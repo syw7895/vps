@@ -23,7 +23,13 @@ bash proxy.sh
 bash proxy.sh xray
 
 # 安装 Hysteria2（等同于 hy2 / hysteria2）
-bash proxy.sh v2
+bash proxy.sh hy2
+
+# 安装快捷命令（只需执行一次）
+bash proxy.sh install-shortcut
+
+# 之后可直接输入 v2 进入菜单
+v2
 
 # 卸载
 bash proxy.sh uninstall-xray
