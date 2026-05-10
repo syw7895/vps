@@ -9,33 +9,8 @@ One-click proxy setup scripts for Ubuntu and Debian VPS servers.
 
 ## Quick Start
 
-Run the menu:
-
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/proxy.sh)
-```
-
-Or install directly:
-
-```bash
-# Xray VLESS + REALITY, TCP 443
-bash <(curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/proxy.sh) xray
-
-# Hysteria2, UDP 8443 with self-signed certificate
-bash <(curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/proxy.sh) hy2
-```
-
-## Direct Options
-
-```bash
-# Xray Reality
-bash proxy.sh xray --port 443 --sni www.microsoft.com --target www.microsoft.com:443
-
-# Hysteria2 self-signed mode
-bash proxy.sh hy2 --port 8443
-
-# Hysteria2 ACME mode, requires a domain pointed to this VPS
-bash proxy.sh hy2 --port 443 --domain example.com --email admin@example.com
 ```
 
 ## Notes
