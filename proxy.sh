@@ -21,35 +21,35 @@ log() {
 }
 
 die() {
-  printf '[%s] ERROR: %s\n' "$APP_NAME" "$*" >&2
+  printf '[%s] 错误：%s\n' "$APP_NAME" "$*" >&2
   exit 1
 }
 
 usage() {
   cat <<'EOF'
-Usage:
+用法：
   bash proxy.sh
   bash proxy.sh menu
-  bash proxy.sh xray [options]
-  bash proxy.sh hy2 [options]
+  bash proxy.sh xray [参数]
+  bash proxy.sh hy2 [参数]
   bash proxy.sh show
   bash proxy.sh uninstall-xray
   bash proxy.sh uninstall-hy2
 
-Xray VLESS + REALITY options:
-  --port PORT          TCP listen port, default: 443
-  --sni DOMAIN         REALITY server name, default: www.microsoft.com
-  --target HOST:PORT   REALITY fallback target, default: www.microsoft.com:443
-  --uuid UUID          Client UUID, generated automatically if omitted
+Xray VLESS + REALITY 参数：
+  --port PORT          TCP 监听端口，默认：443
+  --sni DOMAIN         REALITY 伪装域名，默认：www.microsoft.com
+  --target HOST:PORT   REALITY 回落目标，默认：www.microsoft.com:443
+  --uuid UUID          客户端 UUID，不填则自动生成
 
-Hysteria2 options:
-  --port PORT          UDP listen port, default: 8443
-  --password VALUE     Auth password, generated automatically if omitted
-  --domain DOMAIN      Enable ACME certificate mode for this domain
-  --email EMAIL        ACME email, used with --domain
-  --masquerade URL     Masquerade URL, default: https://www.bing.com
+Hysteria2 参数：
+  --port PORT          UDP 监听端口，默认：8443
+  --password VALUE     认证密码，不填则自动生成
+  --domain DOMAIN      使用域名开启 ACME 证书模式
+  --email EMAIL        ACME 邮箱，配合 --domain 使用
+  --masquerade URL     伪装网站，默认：https://www.bing.com
 
-Examples:
+示例：
   bash proxy.sh xray
   bash proxy.sh xray --port 443 --sni www.microsoft.com --target www.microsoft.com:443
   bash proxy.sh hy2
@@ -58,30 +58,30 @@ EOF
 }
 
 require_root() {
-  [[ "${EUID}" -eq 0 ]] || die "Please run as root."
+  [[ "${EUID}" -eq 0 ]] || die "请使用 root 用户运行。"
 }
 
 require_systemd() {
-  command -v systemctl >/dev/null 2>&1 || die "systemctl is required."
+  command -v systemctl >/dev/null 2>&1 || die "需要 systemctl，当前系统不支持。"
 }
 
 detect_os() {
-  [[ -r /etc/os-release ]] || die "Cannot read /etc/os-release."
+  [[ -r /etc/os-release ]] || die "无法读取 /etc/os-release。"
   # shellcheck disable=SC1091
   . /etc/os-release
 
   case "${ID:-}" in
     debian|ubuntu)
-      log "Detected ${PRETTY_NAME:-$ID}."
+      log "检测到系统：${PRETTY_NAME:-$ID}。"
       ;;
     *)
-      die "Unsupported OS: ${PRETTY_NAME:-unknown}. Use Debian or Ubuntu."
+      die "不支持的系统：${PRETTY_NAME:-unknown}。请使用 Debian 或 Ubuntu。"
       ;;
   esac
 }
 
 install_base_deps() {
-  log "Installing base dependencies."
+  log "正在安装基础依赖。"
   apt-get update
   apt-get install -y curl ca-certificates openssl sed grep gawk coreutils unzip
 }
@@ -92,8 +92,8 @@ ensure_dirs() {
 
 validate_port() {
   local port="$1"
-  [[ "$port" =~ ^[0-9]+$ ]] || die "Invalid port: $port"
-  (( port >= 1 && port <= 65535 )) || die "Port must be between 1 and 65535: $port"
+  [[ "$port" =~ ^[0-9]+$ ]] || die "端口无效：$port"
+  (( port >= 1 && port <= 65535 )) || die "端口必须在 1 到 65535 之间：$port"
 }
 
 server_ip() {
@@ -122,7 +122,7 @@ random_uuid() {
   elif [[ -r /proc/sys/kernel/random/uuid ]]; then
     cat /proc/sys/kernel/random/uuid
   else
-    die "Cannot generate UUID."
+    die "无法生成 UUID。"
   fi
 }
 
@@ -164,7 +164,7 @@ parse_xray_args() {
         exit 0
         ;;
       *)
-        die "Unknown Xray option: $1"
+        die "未知的 Xray 参数：$1"
         ;;
     esac
   done
@@ -198,16 +198,16 @@ parse_hy2_args() {
         exit 0
         ;;
       *)
-        die "Unknown Hysteria2 option: $1"
+        die "未知的 Hysteria2 参数：$1"
         ;;
     esac
   done
 }
 
 install_xray_core() {
-  log "Installing or upgrading Xray."
+  log "正在安装或更新 Xray。"
   bash -c "$(curl -LfsS https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-  command -v xray >/dev/null 2>&1 || die "Xray install failed."
+  command -v xray >/dev/null 2>&1 || die "Xray 安装失败。"
 }
 
 generate_reality_keys() {
@@ -216,7 +216,7 @@ generate_reality_keys() {
   private_key="$(printf '%s\n' "$key_output" | awk -F': ' '/PrivateKey|Private key/ {print $2; exit}')"
   public_key="$(printf '%s\n' "$key_output" | awk -F': ' '/Password \(PublicKey\)|Public key/ {print $2; exit}')"
 
-  [[ -n "$private_key" && -n "$public_key" ]] || die "Cannot generate REALITY keys."
+  [[ -n "$private_key" && -n "$public_key" ]] || die "无法生成 REALITY 密钥。"
   printf '%s\n%s\n' "$private_key" "$public_key"
 }
 
@@ -238,7 +238,7 @@ install_xray_reality() {
   public_key="$(printf '%s\n' "$keys" | sed -n '2p')"
   ip="$(server_ip)"
 
-  log "Writing Xray REALITY config."
+  log "正在写入 Xray REALITY 配置。"
   cat >/usr/local/etc/xray/config.json <<EOF
 {
   "log": {
@@ -309,18 +309,18 @@ EOF
   cat >"$info_file" <<EOF
 Xray VLESS + REALITY
 
-Address:    ${ip}
-Port:       ${XRAY_PORT}
+地址:       ${ip}
+端口:       ${XRAY_PORT}
 UUID:       ${XRAY_UUID}
 Flow:       xtls-rprx-vision
-Security:   reality
+加密:       reality
 SNI:        ${XRAY_SNI}
-Target:     ${XRAY_TARGET}
+目标:       ${XRAY_TARGET}
 PublicKey:  ${public_key}
 ShortId:    ${short_id}
 Fingerprint: chrome
 
-URL:
+分享链接:
 ${link}
 EOF
 
@@ -328,9 +328,9 @@ EOF
 }
 
 install_hysteria_core() {
-  log "Installing or upgrading Hysteria2."
+  log "正在安装或更新 Hysteria2。"
   HYSTERIA_USER=root bash <(curl -fsSL https://get.hy2.sh/)
-  command -v hysteria >/dev/null 2>&1 || die "Hysteria install failed."
+  command -v hysteria >/dev/null 2>&1 || die "Hysteria2 安装失败。"
 }
 
 write_hy2_self_signed_cert() {
@@ -354,7 +354,7 @@ install_hysteria2() {
   detect_os
   validate_port "$HY2_PORT"
   if [[ -n "$HY2_DOMAIN" && "$HY2_PORT" != "443" ]]; then
-    die "Hysteria2 ACME mode requires UDP/TCP port 443. Use --port 443 or omit --domain for self-signed mode."
+    die "Hysteria2 ACME 模式需要使用 443 端口。请使用 --port 443，或不填写 --domain 改用自签证书模式。"
   fi
   install_base_deps
   ensure_dirs
@@ -373,7 +373,7 @@ install_hysteria2() {
   if [[ -n "$HY2_DOMAIN" ]]; then
     [[ -n "$HY2_EMAIL" ]] || HY2_EMAIL="admin@${HY2_DOMAIN}"
     insecure_query=""
-    log "Writing Hysteria2 ACME config for ${HY2_DOMAIN}."
+    log "正在为 ${HY2_DOMAIN} 写入 Hysteria2 ACME 配置。"
     cat >"$config_file" <<EOF
 listen: :${HY2_PORT}
 
@@ -393,7 +393,7 @@ masquerade:
     rewriteHost: true
 EOF
   else
-    log "Writing Hysteria2 self-signed config."
+    log "正在写入 Hysteria2 自签证书配置。"
     write_hy2_self_signed_cert "$cert_dir" "$ip"
     cat >"$config_file" <<EOF
 listen: :${HY2_PORT}
@@ -423,14 +423,14 @@ EOF
   cat >"$info_file" <<EOF
 Hysteria2
 
-Address:    ${ip}
-Port:       ${HY2_PORT}
-Password:   ${HY2_PASSWORD}
+地址:       ${ip}
+端口:       ${HY2_PORT}
+密码:       ${HY2_PASSWORD}
 SNI:        ${sni}
-TLS mode:   $(if [[ -n "$HY2_DOMAIN" ]]; then printf 'ACME'; else printf 'self-signed'; fi)
-Protocol:   UDP
+TLS 模式:   $(if [[ -n "$HY2_DOMAIN" ]]; then printf 'ACME'; else printf '自签证书'; fi)
+协议:       UDP
 
-URL:
+分享链接:
 ${link}
 EOF
 
@@ -449,20 +449,20 @@ show_info() {
   fi
 
   if [[ ! -f "${CONFIG_DIR}/xray-reality.txt" && ! -f "${CONFIG_DIR}/hysteria2.txt" ]]; then
-    log "No saved proxy info found."
+    log "没有找到已保存的节点信息。"
   fi
 }
 
 uninstall_xray() {
   require_root
-  log "Uninstalling Xray."
+  log "正在卸载 Xray。"
   bash -c "$(curl -LfsS https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge || true
   rm -f "${CONFIG_DIR}/xray-reality.txt"
 }
 
 uninstall_hy2() {
   require_root
-  log "Uninstalling Hysteria2."
+  log "正在卸载 Hysteria2。"
   bash <(curl -fsSL https://get.hy2.sh/) --remove || true
   rm -f "${CONFIG_DIR}/hysteria2.txt"
 }
@@ -476,19 +476,19 @@ prompt_default() {
 }
 
 menu_install_xray() {
-  XRAY_PORT="$(prompt_default 'Xray TCP port' "$XRAY_PORT")"
-  XRAY_SNI="$(prompt_default 'REALITY SNI' "$XRAY_SNI")"
-  XRAY_TARGET="$(prompt_default 'REALITY target' "$XRAY_TARGET")"
+  XRAY_PORT="$(prompt_default 'Xray TCP 端口' "$XRAY_PORT")"
+  XRAY_SNI="$(prompt_default 'REALITY 伪装域名 SNI' "$XRAY_SNI")"
+  XRAY_TARGET="$(prompt_default 'REALITY 回落目标' "$XRAY_TARGET")"
   install_xray_reality --port "$XRAY_PORT" --sni "$XRAY_SNI" --target "$XRAY_TARGET"
 }
 
 menu_install_hy2() {
-  HY2_PORT="$(prompt_default 'Hysteria2 UDP port' "$HY2_PORT")"
-  read -r -p "Domain for ACME certificate, leave empty for self-signed: " HY2_DOMAIN
+  HY2_PORT="$(prompt_default 'Hysteria2 UDP 端口' "$HY2_PORT")"
+  read -r -p "ACME 证书域名，留空则使用自签证书: " HY2_DOMAIN
   local -a args
   args=(--port "$HY2_PORT")
   if [[ -n "$HY2_DOMAIN" ]]; then
-    HY2_EMAIL="$(prompt_default 'ACME email' "admin@${HY2_DOMAIN}")"
+    HY2_EMAIL="$(prompt_default 'ACME 邮箱' "admin@${HY2_DOMAIN}")"
     args+=(--domain "$HY2_DOMAIN" --email "$HY2_EMAIL")
   fi
   install_hysteria2 "${args[@]}"
@@ -497,18 +497,18 @@ menu_install_hy2() {
 main_menu() {
   cat <<'EOF'
 
-VPS Proxy Menu
+VPS 代理脚本菜单
 
-1) Install Xray VLESS + REALITY
-2) Install Hysteria2
-3) Show saved connection info
-4) Uninstall Xray
-5) Uninstall Hysteria2
-0) Exit
+1) 安装 Xray VLESS + REALITY
+2) 安装 Hysteria2
+3) 查看已保存的节点信息
+4) 卸载 Xray
+5) 卸载 Hysteria2
+0) 退出
 
 EOF
   local choice
-  read -r -p "Choose: " choice
+  read -r -p "请选择: " choice
   case "$choice" in
     1) menu_install_xray ;;
     2) menu_install_hy2 ;;
@@ -516,7 +516,7 @@ EOF
     4) uninstall_xray ;;
     5) uninstall_hy2 ;;
     0) exit 0 ;;
-    *) die "Invalid choice: $choice" ;;
+    *) die "无效选项：$choice" ;;
   esac
 }
 
@@ -534,7 +534,7 @@ main() {
     uninstall-xray) uninstall_xray ;;
     uninstall-hy2|uninstall-hysteria2) uninstall_hy2 ;;
     --help|-h|help) usage ;;
-    *) die "Unknown command: $command" ;;
+    *) die "未知命令：$command" ;;
   esac
 }
 
