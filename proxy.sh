@@ -622,7 +622,6 @@ main_menu() {
   printf '  %s3%s  查看节点信息与状态\n' "$C_CYAN" "$C_RESET"
   printf '  %s4%s  卸载 Xray\n' "$C_YELLOW" "$C_RESET"
   printf '  %s5%s  卸载 Hysteria2\n' "$C_YELLOW" "$C_RESET"
-  printf '  %s6%s  安装 v2 快捷命令\n' "$C_CYAN" "$C_RESET"
   printf '  %s0%s  退出\n' "$C_DIM" "$C_RESET"
   hr
   printf 'Xray      : %b\n' "$(service_status_label xray xray)"
@@ -638,10 +637,34 @@ main_menu() {
     3) show_info ;;
     4) uninstall_xray ;;
     5) uninstall_hy2 ;;
-    6) install_v2_shortcut ;;
     0) exit 0 ;;
     *) fail "无效选项：${choice}" ;;
   esac
+}
+
+ensure_v2_shortcut_auto() {
+  local target_path script_url source_path
+  target_path="/usr/local/bin/v2"
+  script_url="https://raw.githubusercontent.com/syw7895/vps/main/proxy.sh"
+
+  if [[ "${EUID}" -ne 0 ]]; then
+    warn "当前非 root，已跳过自动安装 v2 快捷命令。"
+    return 0
+  fi
+
+  source_path="$(readlink -f "$0" 2>/dev/null || true)"
+  if [[ -n "$source_path" && -f "$source_path" && "$source_path" != /dev/fd/* ]]; then
+    chmod +x "$source_path" || { warn "自动安装 v2 失败：无法设置执行权限。"; return 0; }
+    ln -sf "$source_path" "$target_path" || { warn "自动安装 v2 失败：无法创建快捷命令。"; return 0; }
+  else
+    curl -fL --retry 3 --connect-timeout 10 --max-time 120 -o "$target_path" "$script_url" || {
+      warn "自动安装 v2 失败：下载脚本失败。"
+      return 0
+    }
+    chmod 755 "$target_path" || { warn "自动安装 v2 失败：无法设置执行权限。"; return 0; }
+  fi
+
+  ok "已自动安装快捷命令：v2"
 }
 
 main() {
@@ -649,7 +672,7 @@ main() {
   if [[ $# -gt 0 ]]; then shift; fi
 
   case "$cmd" in
-    menu|v2) main_menu ;;
+    menu|v2) ensure_v2_shortcut_auto; main_menu ;;
     xray) install_xray_reality "$@" ;;
     hy2|hysteria2) install_hysteria2 "$@" ;;
     install-shortcut|shortcut) install_v2_shortcut ;;
