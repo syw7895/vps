@@ -79,8 +79,10 @@ prompt_default() {
   local label="$1"
   local default_value="$2"
   local value
-  printf "  %b%s%b %s [%b%s%b]: " "${C_CYAN}" "${I_INFO}" "${C_RESET}" "$label" "${C_DIM}" "$default_value" "${C_RESET}"
-  read -r value
+  # [修复] 提示文字和 read 均绑定 /dev/tty，防止通过 $() 调用时
+  # 提示字符串被一并捕获进变量，导致后续数字校验等逻辑失败
+  printf "  %b%s%b %s [%b%s%b]: " "${C_CYAN}" "${I_INFO}" "${C_RESET}" "$label" "${C_DIM}" "$default_value" "${C_RESET}" >/dev/tty
+  read -r value </dev/tty
   printf '%s' "${value:-$default_value}"
 }
 
