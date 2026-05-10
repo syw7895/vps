@@ -16,7 +16,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/proxy.sh)
 ## 常用命令
 
 ```bash
-# 交互菜单
+# 一键安装并进入菜单（会自动添加 v2 快捷命令）
 bash proxy.sh
 
 # 安装 Xray
@@ -24,9 +24,6 @@ bash proxy.sh xray
 
 # 安装 Hysteria2（等同于 hy2 / hysteria2）
 bash proxy.sh hy2
-
-# 安装快捷命令（只需执行一次）
-bash proxy.sh install-shortcut
 
 # 之后可直接输入 v2 进入菜单
 v2
