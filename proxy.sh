@@ -31,6 +31,7 @@ HY2_DOMAIN=""
 HY2_EMAIL=""
 HY2_PASSWORD=""
 HY2_MASQUERADE="https://www.bing.com"
+HY2_FAKE_SNI="www.microsoft.com"
 
 CONFIG_DIR="/root/proxy-info"
 
@@ -80,7 +81,7 @@ Xray VLESS + REALITY 参数：
 Hysteria2 参数：
   --port PORT          UDP 监听端口，不填则随机生成
   --password VALUE     认证密码，不填则自动生成
-  --domain DOMAIN      使用域名开启 ACME 证书模式
+  --domain DOMAIN      使用你自己的域名开启 ACME 证书模式
   --email EMAIL        ACME 邮箱，配合 --domain 使用
   --masquerade URL     伪装网站，默认：https://www.bing.com
 
@@ -434,7 +435,7 @@ install_hysteria2() {
   uri_host="$(format_host_for_uri "$ip")"
   config_file="/etc/hysteria/config.yaml"
   cert_dir="/etc/hysteria/certs"
-  sni="${HY2_DOMAIN:-$ip}"
+  sni="${HY2_DOMAIN:-$HY2_FAKE_SNI}"
   insecure_query="&insecure=1"
 
   install -d -m 755 /etc/hysteria
@@ -466,7 +467,7 @@ EOF
   else
     print_title "Hysteria2"
     log "正在写入 Hysteria2 自签证书配置。"
-    write_hy2_self_signed_cert "$cert_dir" "$ip"
+    write_hy2_self_signed_cert "$cert_dir" "$sni"
     cat >"$config_file" <<EOF
 listen: :${HY2_PORT}
 
