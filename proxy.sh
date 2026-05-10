@@ -27,11 +27,12 @@ XRAY_TARGET="www.microsoft.com:443"
 XRAY_UUID=""
 
 HY2_PORT=""
-HY2_DOMAIN=""
-HY2_EMAIL=""
 HY2_PASSWORD=""
 HY2_MASQUERADE="https://www.bing.com"
-HY2_FAKE_SNI="www.microsoft.com"
+HY2_SNI="www.bing.com"
+HY2_HOP_START="20000"
+HY2_HOP_END="40000"
+HY2_RULE_COMMENT="hy2-port-hop"
 
 CONFIG_DIR="/root/proxy-info"
 
@@ -81,15 +82,16 @@ Xray VLESS + REALITY 参数：
 Hysteria2 参数：
   --port PORT          UDP 监听端口，不填则随机生成
   --password VALUE     认证密码，不填则自动生成
-  --domain DOMAIN      填写则使用你自己的域名开启 ACME；不填默认用大厂域名自签
-  --email EMAIL        ACME 邮箱，配合 --domain 使用
+  --sni DOMAIN         证书 CN / SNI，默认：www.bing.com
+  --hop-start PORT     端口跳跃起始端口，默认：20000
+  --hop-end PORT       端口跳跃结束端口，默认：40000
   --masquerade URL     伪装网站，默认：https://www.bing.com
 
 示例：
   bash proxy.sh xray
   bash proxy.sh xray --port 443 --sni www.microsoft.com --target www.microsoft.com:443
   bash proxy.sh hy2
-  bash proxy.sh hy2 --port 443 --domain example.com --email admin@example.com
+  bash proxy.sh hy2 --port 443 --sni www.bing.com --hop-start 20000 --hop-end 40000
 EOF
 }
 
@@ -119,7 +121,7 @@ detect_os() {
 install_base_deps() {
   log "正在安装基础依赖。"
   apt-get update
-  apt-get install -y curl ca-certificates openssl sed grep gawk coreutils unzip
+  apt-get install -y curl ca-certificates openssl sed grep gawk coreutils unzip iproute2 iptables
 }
 
 ensure_dirs() {
@@ -130,6 +132,28 @@ validate_port() {
   local port="$1"
   [[ "$port" =~ ^[0-9]+$ ]] || die "端口无效：$port"
   (( port >= 1 && port <= 65535 )) || die "端口必须在 1 到 65535 之间：$port"
+}
+
+validate_port_range() {
+  local start="$1"
+  local end="$2"
+  local listen_port="$3"
+  validate_port "$start"
+  validate_port "$end"
+  (( start < end )) || die "端口跳跃范围无效：起始端口必须小于结束端口。"
+  if (( listen_port >= start && listen_port <= end )); then
+    die "端口跳跃范围不能包含主监听端口：${listen_port}"
+  fi
+}
+
+validate_sni() {
+  local value="$1"
+  [[ ${#value} -le 253 ]] || return 1
+  [[ "$value" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
+}
+
+yaml_single_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"
 }
 
 server_ip() {
@@ -156,18 +180,89 @@ random_hex() {
 }
 
 random_password() {
-  openssl rand -hex 16
+  openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 18
 }
 
 random_port() {
   local port
   while true; do
-    port="$(shuf -i 20000-60000 -n 1 2>/dev/null || awk 'BEGIN{srand(); print int(20000+rand()*40001)}')"
+    port="$(shuf -i 10000-65535 -n 1 2>/dev/null || awk 'BEGIN{srand(); print int(10000+rand()*55536)}')"
     if ! ss -H -lntu 2>/dev/null | awk '{print $5}' | grep -Eq "[:.]${port}$"; then
       printf '%s' "$port"
       return 0
     fi
   done
+}
+
+get_default_nic() {
+  local nic
+  nic="$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i==\"dev\") print $(i+1)}' | head -n 1)"
+  printf '%s' "${nic:-eth0}"
+}
+
+cleanup_hy2_iptables_rules() {
+  local line
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    iptables -t nat -D PREROUTING "$line" >/dev/null 2>&1 || true
+  done < <(
+    iptables -t nat -L PREROUTING --line-numbers -n -v 2>/dev/null |
+      awk -v comment="$HY2_RULE_COMMENT" '$0 ~ comment {print $1}' |
+      sort -rn
+  )
+}
+
+add_hy2_iptables_rule() {
+  local nic="$1"
+  local hop_start="$2"
+  local hop_end="$3"
+  local port="$4"
+
+  cleanup_hy2_iptables_rules
+  iptables -t nat -A PREROUTING \
+    -i "$nic" \
+    -p udp \
+    --dport "${hop_start}:${hop_end}" \
+    -m comment --comment "$HY2_RULE_COMMENT" \
+    -j REDIRECT --to-ports "$port"
+}
+
+save_iptables_rules() {
+  if command -v netfilter-persistent >/dev/null 2>&1; then
+    netfilter-persistent save >/dev/null 2>&1 || true
+    return 0
+  fi
+  if command -v apt-get >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent >/dev/null 2>&1 || true
+    command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1 || true
+  fi
+}
+
+write_hy2_state() {
+  local port="$1"
+  local hop_start="$2"
+  local hop_end="$3"
+  local password="$4"
+  local sni="$5"
+  local nic="$6"
+  local state_file="${CONFIG_DIR}/hy2-state.env"
+  {
+    printf 'PORT=%q\n' "$port"
+    printf 'HOP_START=%q\n' "$hop_start"
+    printf 'HOP_END=%q\n' "$hop_end"
+    printf 'PASSWORD=%q\n' "$password"
+    printf 'SNI=%q\n' "$sni"
+    printf 'NIC=%q\n' "$nic"
+  } > "$state_file"
+  chmod 600 "$state_file"
+}
+
+load_hy2_state() {
+  local state_file="${CONFIG_DIR}/hy2-state.env"
+  if [[ -f "$state_file" ]]; then
+    # shellcheck disable=SC1090
+    source "$state_file"
+  fi
 }
 
 random_uuid() {
@@ -237,12 +332,23 @@ parse_hy2_args() {
         HY2_PASSWORD="${2:-}"
         shift 2
         ;;
+      --sni)
+        HY2_SNI="${2:-}"
+        shift 2
+        ;;
       --domain)
-        HY2_DOMAIN="${2:-}"
+        HY2_SNI="${2:-}"
         shift 2
         ;;
       --email)
-        HY2_EMAIL="${2:-}"
+        shift 2
+        ;;
+      --hop-start)
+        HY2_HOP_START="${2:-}"
+        shift 2
+        ;;
+      --hop-end)
+        HY2_HOP_END="${2:-}"
         shift 2
         ;;
       --masquerade)
@@ -389,27 +495,24 @@ EOF
 }
 
 install_hysteria_core() {
+  local installer
   log "正在安装或更新 Hysteria2。"
-  HYSTERIA_USER=root bash <(curl -fsSL https://get.hy2.sh/)
+  installer="$(mktemp)"
+  curl -fsSL https://get.hy2.sh/ -o "$installer"
+  bash "$installer"
+  rm -f "$installer"
   command -v hysteria >/dev/null 2>&1 || die "Hysteria2 安装失败。"
-}
-
-detect_service_user() {
-  local service="$1"
-  local user
-  user="$(systemctl show "$service" -p User --value 2>/dev/null || true)"
-  printf '%s' "${user:-root}"
 }
 
 write_hy2_self_signed_cert() {
   local cert_dir="$1"
   local cn="$2"
   install -d -m 700 "$cert_dir"
-  openssl req -x509 -newkey rsa:2048 \
+  openssl req -x509 -nodes -newkey ec \
+    -pkeyopt ec_paramgen_curve:P-256 \
     -keyout "${cert_dir}/server.key" \
     -out "${cert_dir}/server.crt" \
     -days 3650 \
-    -nodes \
     -subj "/CN=${cn}" >/dev/null 2>&1
   chmod 600 "${cert_dir}/server.key"
   chmod 644 "${cert_dir}/server.crt"
@@ -420,55 +523,30 @@ install_hysteria2() {
   require_root
   require_systemd
   detect_os
+
   [[ -n "$HY2_PORT" ]] || HY2_PORT="$(random_port)"
+  [[ -n "$HY2_SNI" ]] || HY2_SNI="www.bing.com"
   validate_port "$HY2_PORT"
-  if [[ -n "$HY2_DOMAIN" && "$HY2_PORT" != "443" ]]; then
-    die "Hysteria2 ACME 模式需要使用 443 端口。请使用 --port 443，或不填写 --domain 改用自签证书模式。"
-  fi
+  validate_port_range "$HY2_HOP_START" "$HY2_HOP_END" "$HY2_PORT"
+  validate_sni "$HY2_SNI" || die "SNI 域名格式无效：${HY2_SNI}"
+
   install_base_deps
   ensure_dirs
   install_hysteria_core
 
   [[ -n "$HY2_PASSWORD" ]] || HY2_PASSWORD="$(random_password)"
-  local ip uri_host config_file cert_dir link info_file sni insecure_query service_user
+  local ip uri_host config_file cert_dir link info_file password_yaml nic
   ip="$(server_ip)"
   uri_host="$(format_host_for_uri "$ip")"
   config_file="/etc/hysteria/config.yaml"
   cert_dir="/etc/hysteria/certs"
-  sni="${HY2_DOMAIN:-$HY2_FAKE_SNI}"
-  insecure_query="&insecure=1"
+  password_yaml="$(yaml_single_quote "$HY2_PASSWORD")"
 
   install -d -m 755 /etc/hysteria
-  service_user="$(detect_service_user hysteria-server.service)"
-
-  if [[ -n "$HY2_DOMAIN" ]]; then
-    [[ -n "$HY2_EMAIL" ]] || HY2_EMAIL="admin@${HY2_DOMAIN}"
-    insecure_query=""
-    print_title "Hysteria2"
-    log "正在为 ${HY2_DOMAIN} 写入 Hysteria2 ACME 配置。"
-    cat >"$config_file" <<EOF
-listen: :${HY2_PORT}
-
-acme:
-  domains:
-    - ${HY2_DOMAIN}
-  email: ${HY2_EMAIL}
-
-auth:
-  type: password
-  password: ${HY2_PASSWORD}
-
-masquerade:
-  type: proxy
-  proxy:
-    url: ${HY2_MASQUERADE}
-    rewriteHost: true
-EOF
-  else
-    print_title "Hysteria2"
-    log "正在写入 Hysteria2 自签证书配置。"
-    write_hy2_self_signed_cert "$cert_dir" "$sni"
-    cat >"$config_file" <<EOF
+  print_title "Hysteria2"
+  log "正在写入 Hysteria2 配置。"
+  write_hy2_self_signed_cert "$cert_dir" "$HY2_SNI"
+  cat >"$config_file" <<EOF
 listen: :${HY2_PORT}
 
 tls:
@@ -477,46 +555,52 @@ tls:
 
 auth:
   type: password
-  password: ${HY2_PASSWORD}
+  password: ${password_yaml}
 
 masquerade:
   type: proxy
   proxy:
     url: ${HY2_MASQUERADE}
     rewriteHost: true
-EOF
-  fi
 
-  if id "$service_user" >/dev/null 2>&1; then
-    chown -R "$service_user" /etc/hysteria
-  fi
-  chmod 755 /etc/hysteria
-  chmod 700 "$cert_dir" 2>/dev/null || true
-  chmod 600 "${cert_dir}/server.key" 2>/dev/null || true
-  chmod 644 "${cert_dir}/server.crt" 2>/dev/null || true
+quic:
+  initStreamReceiveWindow: 26843545
+  maxStreamReceiveWindow: 26843545
+  initConnReceiveWindow: 67108864
+  maxConnReceiveWindow: 67108864
+EOF
+  chown hysteria:hysteria "$config_file" "${cert_dir}/server.crt" "${cert_dir}/server.key" 2>/dev/null || true
+  chmod 640 "$config_file"
+
+  configure_hy2_firewall "$HY2_PORT" "$HY2_HOP_START" "$HY2_HOP_END"
+  nic="$(get_default_nic)"
+  add_hy2_iptables_rule "$nic" "$HY2_HOP_START" "$HY2_HOP_END" "$HY2_PORT"
+  save_iptables_rules
+  write_hy2_state "$HY2_PORT" "$HY2_HOP_START" "$HY2_HOP_END" "$HY2_PASSWORD" "$HY2_SNI" "$nic"
 
   systemctl enable hysteria-server.service
   systemctl restart hysteria-server.service
-  sleep 1
+  sleep 2
   if ! systemctl is-active --quiet hysteria-server.service; then
     journalctl --no-pager -n 30 -u hysteria-server.service >&2 || true
     die "Hysteria2 启动失败，请查看上方日志。"
   fi
-  open_firewall_udp "$HY2_PORT"
   printf '%s\n' "$HY2_PORT" > "${CONFIG_DIR}/.hy2_port"
+  printf '%s-%s\n' "$HY2_HOP_START" "$HY2_HOP_END" > "${CONFIG_DIR}/.hy2_hop_range"
 
-  link="hysteria2://${HY2_PASSWORD}@${uri_host}:${HY2_PORT}/?sni=${sni}${insecure_query}#Hysteria2"
+  link="hysteria2://${HY2_PASSWORD}@${uri_host}:${HY2_PORT}/?mport=${HY2_HOP_START}-${HY2_HOP_END}&insecure=1&sni=${HY2_SNI}#Hysteria2"
   info_file="${CONFIG_DIR}/hysteria2.txt"
   cat >"$info_file" <<EOF
 Hysteria2
 
 地址:       ${ip}
 端口:       ${HY2_PORT}
+跳跃范围:   ${HY2_HOP_START}-${HY2_HOP_END}
 密码:       ${HY2_PASSWORD}
-SNI:        ${sni}
-TLS 模式:   $(if [[ -n "$HY2_DOMAIN" ]]; then printf 'ACME'; else printf '自签证书'; fi)
+SNI:        ${HY2_SNI}
+TLS 模式:   自签证书
 协议:       UDP
-提醒:       请在 VPS 安全组/外部防火墙放行 ${HY2_PORT}/UDP
+提醒:       请在 VPS 安全组/外部防火墙放行 ${HY2_PORT}/UDP 和 ${HY2_HOP_START}-${HY2_HOP_END}/UDP
 
 分享链接:
 ${link}
@@ -525,6 +609,21 @@ EOF
   success "Hysteria2 已安装并启动。"
   printf '\n'
   cat "$info_file"
+}
+
+configure_hy2_firewall() {
+  local port="$1"
+  local hop_start="$2"
+  local hop_end="$3"
+  if command -v ufw >/dev/null 2>&1; then
+    ufw allow "${port}/udp" >/dev/null 2>&1 || true
+    ufw allow "${hop_start}:${hop_end}/udp" >/dev/null 2>&1 || true
+    ufw reload >/dev/null 2>&1 || true
+  elif command -v firewall-cmd >/dev/null 2>&1; then
+    firewall-cmd --permanent --add-port="${port}/udp" >/dev/null 2>&1 || true
+    firewall-cmd --permanent --add-port="${hop_start}-${hop_end}/udp" >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+  fi
 }
 
 show_info() {
@@ -559,13 +658,20 @@ uninstall_xray() {
 
 uninstall_hy2() {
   require_root
-  if [[ -f "${CONFIG_DIR}/.hy2_port" ]] && command -v ufw >/dev/null 2>&1; then
-    ufw delete allow "$(<"${CONFIG_DIR}/.hy2_port")/udp" >/dev/null 2>&1 || true
-    rm -f "${CONFIG_DIR}/.hy2_port"
+  load_hy2_state
+
+  cleanup_hy2_iptables_rules
+  save_iptables_rules
+
+  if command -v ufw >/dev/null 2>&1; then
+    [[ -n "${PORT:-}" ]] && ufw delete allow "${PORT}/udp" >/dev/null 2>&1 || true
+    if [[ -n "${HOP_START:-}" && -n "${HOP_END:-}" ]]; then
+      ufw delete allow "${HOP_START}:${HOP_END}/udp" >/dev/null 2>&1 || true
+    fi
   fi
   log "正在卸载 Hysteria2。"
   bash <(curl -fsSL https://get.hy2.sh/) --remove || true
-  rm -f "${CONFIG_DIR}/hysteria2.txt"
+  rm -f "${CONFIG_DIR}/hysteria2.txt" "${CONFIG_DIR}/.hy2_port" "${CONFIG_DIR}/.hy2_hop_range" "${CONFIG_DIR}/hy2-state.env"
   success "Hysteria2 已卸载。"
 }
 
@@ -587,13 +693,11 @@ menu_install_xray() {
 menu_install_hy2() {
   [[ -n "$HY2_PORT" ]] || HY2_PORT="$(random_port)"
   HY2_PORT="$(prompt_default 'Hysteria2 UDP 端口' "$HY2_PORT")"
-  read -r -p "ACME 证书域名（留空则默认使用大厂域名自签）: " HY2_DOMAIN
+  HY2_HOP_START="$(prompt_default '端口跳跃起始端口' "$HY2_HOP_START")"
+  HY2_HOP_END="$(prompt_default '端口跳跃结束端口' "$HY2_HOP_END")"
+  HY2_SNI="$(prompt_default 'SNI/证书域名' "$HY2_SNI")"
   local -a args
-  args=(--port "$HY2_PORT")
-  if [[ -n "$HY2_DOMAIN" ]]; then
-    HY2_EMAIL="$(prompt_default 'ACME 邮箱' "admin@${HY2_DOMAIN}")"
-    args+=(--domain "$HY2_DOMAIN" --email "$HY2_EMAIL")
-  fi
+  args=(--port "$HY2_PORT" --hop-start "$HY2_HOP_START" --hop-end "$HY2_HOP_END" --sni "$HY2_SNI")
   install_hysteria2 "${args[@]}"
 }
 
@@ -643,6 +747,35 @@ show_protocol_status() {
   journalctl --no-pager -n 20 -u "$service" 2>/dev/null || printf '暂无日志。\n'
 }
 
+show_hy2_status() {
+  local active_status enabled_status listen_info
+  print_title "Hysteria2 运行状态"
+  active_status="$(systemctl is-active hysteria-server 2>/dev/null || true)"
+  enabled_status="$(systemctl is-enabled hysteria-server 2>/dev/null || true)"
+  listen_info="$(ss -lunp 2>/dev/null | grep 'hysteria' || true)"
+
+  printf '服务状态:   %s\n' "${active_status:-unknown}"
+  printf '开机自启:   %s\n' "${enabled_status:-unknown}"
+  if [[ -f /etc/hysteria/config.yaml ]]; then
+    printf '配置文件:   %s\n' "/etc/hysteria/config.yaml"
+  else
+    printf '配置文件:   未找到\n'
+  fi
+  if [[ -f "${CONFIG_DIR}/.hy2_hop_range" ]]; then
+    printf '跳跃范围:   %s\n' "$(<"${CONFIG_DIR}/.hy2_hop_range")"
+  fi
+  hr
+  printf '监听信息\n'
+  if [[ -n "$listen_info" ]]; then
+    printf '%s\n' "$listen_info"
+  else
+    printf '未检测到 hysteria 监听端口。\n'
+  fi
+  hr
+  printf '最近日志（20 行）\n'
+  journalctl --no-pager -n 20 -u hysteria-server 2>/dev/null || printf '暂无日志。\n'
+}
+
 pause_menu() {
   local ignored
   printf '\n'
@@ -681,8 +814,9 @@ menu_hy2() {
     printf '\n%sHysteria2 菜单%s\n' "$C_BOLD" "$C_RESET"
     hr
     printf '  %s1%s  安装/重装 Hysteria2\n' "$C_GREEN" "$C_RESET"
-    printf '  %s2%s  查看运行状态\n' "$C_CYAN" "$C_RESET"
-    printf '  %s3%s  卸载 Hysteria2\n' "$C_YELLOW" "$C_RESET"
+    printf '  %s2%s  查看节点信息\n' "$C_CYAN" "$C_RESET"
+    printf '  %s3%s  查看运行状态\n' "$C_CYAN" "$C_RESET"
+    printf '  %s4%s  卸载 Hysteria2\n' "$C_YELLOW" "$C_RESET"
     printf '  %s0%s  返回上级菜单\n' "$C_DIM" "$C_RESET"
     hr
     printf '当前状态: %b\n' "$(service_status_label hysteria-server hysteria)"
@@ -691,8 +825,9 @@ menu_hy2() {
     read -r -p "请选择: " choice
     case "$choice" in
       1) menu_install_hy2; pause_menu ;;
-      2) show_protocol_status "Hysteria2" "hysteria-server" "hysteria" "${CONFIG_DIR}/.hy2_port" "udp"; pause_menu ;;
-      3) uninstall_hy2; pause_menu ;;
+      2) [[ -f "${CONFIG_DIR}/hysteria2.txt" ]] && cat "${CONFIG_DIR}/hysteria2.txt" || warn "暂无节点信息。"; pause_menu ;;
+      3) show_hy2_status; pause_menu ;;
+      4) uninstall_hy2; pause_menu ;;
       0) return 0 ;;
       *) warn "无效选项：$choice"; sleep 1 ;;
     esac
