@@ -310,7 +310,7 @@ parse_hy2_args() {
 # ===== Xray 安装 =====
 install_xray_core() {
   log "安装或更新 Xray..."
-  run_remote_script "$XRAY_INSTALLER_URL" "$XRAY_INSTALLER_SHA256" @ install
+  run_remote_script "$XRAY_INSTALLER_URL" "$XRAY_INSTALLER_SHA256" install
   command -v xray >/dev/null 2>&1 || fail "Xray 安装失败。"
 }
 
@@ -549,7 +549,7 @@ show_info() {
 uninstall_xray() {
   require_root
   log "卸载 Xray..."
-  if run_remote_script "$XRAY_INSTALLER_URL" "$XRAY_INSTALLER_SHA256" @ remove --purge; then
+  if run_remote_script "$XRAY_INSTALLER_URL" "$XRAY_INSTALLER_SHA256" remove --purge; then
     rm -f "$XRAY_INFO_FILE"
     ok "Xray 已卸载。"
   else
