@@ -81,7 +81,7 @@ Xray VLESS + REALITY 参数：
 Hysteria2 参数：
   --port PORT          UDP 监听端口，不填则随机生成
   --password VALUE     认证密码，不填则自动生成
-  --domain DOMAIN      使用你自己的域名开启 ACME 证书模式
+  --domain DOMAIN      填写则使用你自己的域名开启 ACME；不填默认用大厂域名自签
   --email EMAIL        ACME 邮箱，配合 --domain 使用
   --masquerade URL     伪装网站，默认：https://www.bing.com
 
@@ -587,7 +587,7 @@ menu_install_xray() {
 menu_install_hy2() {
   [[ -n "$HY2_PORT" ]] || HY2_PORT="$(random_port)"
   HY2_PORT="$(prompt_default 'Hysteria2 UDP 端口' "$HY2_PORT")"
-  read -r -p "ACME 证书域名，留空则使用自签证书: " HY2_DOMAIN
+  read -r -p "ACME 证书域名（留空则默认使用大厂域名自签）: " HY2_DOMAIN
   local -a args
   args=(--port "$HY2_PORT")
   if [[ -n "$HY2_DOMAIN" ]]; then
