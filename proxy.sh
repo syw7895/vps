@@ -3,6 +3,24 @@ set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
 
+if [[ -t 1 ]]; then
+  C_RESET=$'\033[0m'
+  C_BOLD=$'\033[1m'
+  C_DIM=$'\033[2m'
+  C_RED=$'\033[31m'
+  C_GREEN=$'\033[32m'
+  C_YELLOW=$'\033[33m'
+  C_CYAN=$'\033[36m'
+else
+  C_RESET=""
+  C_BOLD=""
+  C_DIM=""
+  C_RED=""
+  C_GREEN=""
+  C_YELLOW=""
+  C_CYAN=""
+fi
+
 XRAY_PORT="443"
 XRAY_SNI="www.microsoft.com"
 XRAY_TARGET="www.microsoft.com:443"
@@ -17,12 +35,29 @@ HY2_MASQUERADE="https://www.bing.com"
 CONFIG_DIR="/root/proxy-info"
 
 log() {
-  printf '[%s] %s\n' "$APP_NAME" "$*"
+  printf '%s[%s]%s %s\n' "$C_CYAN" "$APP_NAME" "$C_RESET" "$*"
 }
 
 die() {
-  printf '[%s] 错误：%s\n' "$APP_NAME" "$*" >&2
+  printf '%s[%s] 错误：%s%s\n' "$C_RED" "$APP_NAME" "$*" "$C_RESET" >&2
   exit 1
+}
+
+success() {
+  printf '%s[%s] 完成：%s%s\n' "$C_GREEN" "$APP_NAME" "$*" "$C_RESET"
+}
+
+warn() {
+  printf '%s[%s] 提醒：%s%s\n' "$C_YELLOW" "$APP_NAME" "$*" "$C_RESET"
+}
+
+hr() {
+  printf '%s\n' "------------------------------------------------------------"
+}
+
+print_title() {
+  printf '\n%s%s%s\n' "$C_BOLD" "$1" "$C_RESET"
+  hr
 }
 
 usage() {
@@ -238,6 +273,7 @@ install_xray_reality() {
   public_key="$(printf '%s\n' "$keys" | sed -n '2p')"
   ip="$(server_ip)"
 
+  print_title "Xray VLESS + REALITY"
   log "正在写入 Xray REALITY 配置。"
   cat >/usr/local/etc/xray/config.json <<EOF
 {
@@ -324,6 +360,8 @@ Fingerprint: chrome
 ${link}
 EOF
 
+  success "Xray Reality 已安装并启动。"
+  printf '\n'
   cat "$info_file"
 }
 
@@ -373,6 +411,7 @@ install_hysteria2() {
   if [[ -n "$HY2_DOMAIN" ]]; then
     [[ -n "$HY2_EMAIL" ]] || HY2_EMAIL="admin@${HY2_DOMAIN}"
     insecure_query=""
+    print_title "Hysteria2"
     log "正在为 ${HY2_DOMAIN} 写入 Hysteria2 ACME 配置。"
     cat >"$config_file" <<EOF
 listen: :${HY2_PORT}
@@ -393,6 +432,7 @@ masquerade:
     rewriteHost: true
 EOF
   else
+    print_title "Hysteria2"
     log "正在写入 Hysteria2 自签证书配置。"
     write_hy2_self_signed_cert "$cert_dir" "$ip"
     cat >"$config_file" <<EOF
@@ -434,10 +474,14 @@ TLS 模式:   $(if [[ -n "$HY2_DOMAIN" ]]; then printf 'ACME'; else printf '自�
 ${link}
 EOF
 
+  success "Hysteria2 已安装并启动。"
+  printf '\n'
   cat "$info_file"
 }
 
 show_info() {
+  print_title "已保存的节点信息"
+
   if [[ -f "${CONFIG_DIR}/xray-reality.txt" ]]; then
     cat "${CONFIG_DIR}/xray-reality.txt"
     printf '\n'
@@ -458,6 +502,7 @@ uninstall_xray() {
   log "正在卸载 Xray。"
   bash -c "$(curl -LfsS https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge || true
   rm -f "${CONFIG_DIR}/xray-reality.txt"
+  success "Xray 已卸载。"
 }
 
 uninstall_hy2() {
@@ -465,6 +510,7 @@ uninstall_hy2() {
   log "正在卸载 Hysteria2。"
   bash <(curl -fsSL https://get.hy2.sh/) --remove || true
   rm -f "${CONFIG_DIR}/hysteria2.txt"
+  success "Hysteria2 已卸载。"
 }
 
 prompt_default() {
@@ -495,18 +541,19 @@ menu_install_hy2() {
 }
 
 main_menu() {
-  cat <<'EOF'
-
-VPS 代理脚本菜单
-
-1) 安装 Xray VLESS + REALITY
-2) 安装 Hysteria2
-3) 查看已保存的节点信息
-4) 卸载 Xray
-5) 卸载 Hysteria2
-0) 退出
-
-EOF
+  clear 2>/dev/null || true
+  printf '\n%sVPS 代理脚本%s\n' "$C_BOLD" "$C_RESET"
+  printf '%s一键安装 Xray Reality / Hysteria2%s\n' "$C_DIM" "$C_RESET"
+  hr
+  printf '  %s1%s  安装 Xray VLESS + REALITY\n' "$C_GREEN" "$C_RESET"
+  printf '  %s2%s  安装 Hysteria2\n' "$C_GREEN" "$C_RESET"
+  printf '  %s3%s  查看已保存的节点信息\n' "$C_CYAN" "$C_RESET"
+  printf '  %s4%s  卸载 Xray\n' "$C_YELLOW" "$C_RESET"
+  printf '  %s5%s  卸载 Hysteria2\n' "$C_YELLOW" "$C_RESET"
+  printf '  %s0%s  退出\n' "$C_DIM" "$C_RESET"
+  hr
+  warn "安装前请确认 VPS 安全组已放行对应端口。"
+  printf '\n'
   local choice
   read -r -p "请选择: " choice
   case "$choice" in
