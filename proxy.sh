@@ -1,172 +1,260 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-APP_NAME="vps-proxy"
+APP_NAME="vps-proxy-v2"
+DATA_DIR="/root/proxy-info"
 
-if [[ -t 1 ]]; then
-  C_RESET=$'\033[0m'
-  C_BOLD=$'\033[1m'
-  C_DIM=$'\033[2m'
-  C_RED=$'\033[31m'
-  C_GREEN=$'\033[32m'
-  C_YELLOW=$'\033[33m'
-  C_CYAN=$'\033[36m'
-else
-  C_RESET=""
-  C_BOLD=""
-  C_DIM=""
-  C_RED=""
-  C_GREEN=""
-  C_YELLOW=""
-  C_CYAN=""
-fi
+XRAY_CONF="/usr/local/etc/xray/config.json"
+XRAY_INFO="${DATA_DIR}/xray-reality.txt"
+XRAY_PORT_FILE="${DATA_DIR}/.xray_port"
 
-XRAY_PORT="443"
-XRAY_SNI="www.microsoft.com"
-XRAY_TARGET="www.microsoft.com:443"
-XRAY_UUID=""
-
-HY2_PORT=""
-HY2_PASSWORD=""
-HY2_MASQUERADE="https://www.bing.com"
-HY2_SNI="www.bing.com"
-HY2_HOP_START="20000"
-HY2_HOP_END="40000"
+HY2_CONF="/etc/hysteria/config.yaml"
+HY2_INFO="${DATA_DIR}/hysteria2.txt"
+HY2_PORT_FILE="${DATA_DIR}/.hy2_port"
+HY2_HOP_FILE="${DATA_DIR}/.hy2_hop"
+HY2_STATE_FILE="${DATA_DIR}/hy2-state.env"
 HY2_RULE_COMMENT="hy2-port-hop"
 
-CONFIG_DIR="/root/proxy-info"
+XRAY_PORT_DEFAULT="443"
+XRAY_SNI_DEFAULT="www.microsoft.com"
+XRAY_TARGET_DEFAULT="www.microsoft.com:443"
 
-log() {
-  printf '%s[%s]%s %s\n' "$C_CYAN" "$APP_NAME" "$C_RESET" "$*"
+HY2_HOP_START_DEFAULT="20000"
+HY2_HOP_END_DEFAULT="40000"
+HY2_MASQ_DEFAULT="https://www.bing.com"
+
+SHORTCUT_TARGET="/usr/local/bin/vps-proxy"
+SHORTCUT_V2="/usr/local/bin/v2"
+
+VENDOR_DOMAINS=(
+  "www.microsoft.com"
+  "www.apple.com"
+  "www.cloudflare.com"
+  "www.amazon.com"
+  "www.google.com"
+  "www.youtube.com"
+  "www.github.com"
+  "www.bing.com"
+)
+
+log() { printf '[%s] %s\n' "$APP_NAME" "$*"; }
+warn() { printf '[%s] 警告: %s\n' "$APP_NAME" "$*" >&2; }
+die() { printf '[%s] 错误: %s\n' "$APP_NAME" "$*" >&2; exit 1; }
+
+on_err() {
+  local line="$1"
+  warn "脚本在第 ${line} 行失败。"
 }
+trap 'on_err "$LINENO"' ERR
 
-die() {
-  printf '%s[%s] 错误：%s%s\n' "$C_RED" "$APP_NAME" "$*" "$C_RESET" >&2
-  exit 1
-}
-
-success() {
-  printf '%s[%s] 完成：%s%s\n' "$C_GREEN" "$APP_NAME" "$*" "$C_RESET"
-}
-
-warn() {
-  printf '%s[%s] 提醒：%s%s\n' "$C_YELLOW" "$APP_NAME" "$*" "$C_RESET"
-}
-
-hr() {
-  printf '%s\n' "------------------------------------------------------------"
-}
-
-print_title() {
-  printf '\n%s%s%s\n' "$C_BOLD" "$1" "$C_RESET"
-  hr
-}
-
-usage() {
-  cat <<'EOF'
-用法：
-  bash proxy.sh
-  bash proxy.sh menu
-  bash proxy.sh xray [参数]
-  bash proxy.sh hy2 [参数]
-  bash proxy.sh show
-  bash proxy.sh uninstall-xray
-  bash proxy.sh uninstall-hy2
-
-Xray VLESS + REALITY 参数：
-  --port PORT          TCP 监听端口，默认：443
-  --sni DOMAIN         REALITY 伪装域名，默认：www.microsoft.com
-  --target HOST:PORT   REALITY 回落目标，默认：www.microsoft.com:443
-  --uuid UUID          客户端 UUID，不填则自动生成
-
-Hysteria2 参数：
-  --port PORT          UDP 监听端口，不填则随机生成
-  --password VALUE     认证密码，不填则自动生成
-  --sni DOMAIN         证书 CN / SNI，默认：www.bing.com
-  --hop-start PORT     端口跳跃起始端口，默认：20000
-  --hop-end PORT       端口跳跃结束端口，默认：40000
-  --masquerade URL     伪装网站，默认：https://www.bing.com
-
-示例：
-  bash proxy.sh xray
-  bash proxy.sh xray --port 443 --sni www.microsoft.com --target www.microsoft.com:443
-  bash proxy.sh hy2
-  bash proxy.sh hy2 --port 443 --sni www.bing.com --hop-start 20000 --hop-end 40000
-EOF
-}
+has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 require_root() {
-  [[ "${EUID}" -eq 0 ]] || die "请使用 root 用户运行。"
+  [[ "${EUID}" -eq 0 ]] || die "请使用 root 运行脚本。"
 }
 
 require_systemd() {
-  command -v systemctl >/dev/null 2>&1 || die "需要 systemctl，当前系统不支持。"
+  has_cmd systemctl || die "当前系统不支持 systemctl。"
 }
 
 detect_os() {
   [[ -r /etc/os-release ]] || die "无法读取 /etc/os-release。"
   # shellcheck disable=SC1091
   . /etc/os-release
-
   case "${ID:-}" in
-    debian|ubuntu)
-      log "检测到系统：${PRETTY_NAME:-$ID}。"
-      ;;
-    *)
-      die "不支持的系统：${PRETTY_NAME:-unknown}。请使用 Debian 或 Ubuntu。"
-      ;;
+    debian|ubuntu) log "检测到系统：${PRETTY_NAME:-$ID}" ;;
+    *) die "仅支持 Debian / Ubuntu，当前是：${PRETTY_NAME:-unknown}" ;;
   esac
 }
 
-install_base_deps() {
-  log "正在安装基础依赖。"
-  apt-get update
-  apt-get install -y curl ca-certificates openssl sed grep gawk coreutils unzip iproute2 iptables
+ensure_data_dir() {
+  install -d -m 700 "${DATA_DIR}"
 }
 
-ensure_dirs() {
-  install -d -m 700 "$CONFIG_DIR"
-}
-
-validate_port() {
-  local port="$1"
-  [[ "$port" =~ ^[0-9]+$ ]] || die "端口无效：$port"
-  (( port >= 1 && port <= 65535 )) || die "端口必须在 1 到 65535 之间：$port"
-}
-
-validate_port_range() {
-  local start="$1"
-  local end="$2"
-  local listen_port="$3"
-  validate_port "$start"
-  validate_port "$end"
-  (( start < end )) || die "端口跳跃范围无效：起始端口必须小于结束端口。"
-  if (( listen_port >= start && listen_port <= end )); then
-    die "端口跳跃范围不能包含主监听端口：${listen_port}"
+run_progress() {
+  local title="$1"
+  if has_cmd gum; then
+    {
+      echo 10; sleep 0.03
+      echo 25; sleep 0.03
+      echo 45; sleep 0.03
+      echo 65; sleep 0.03
+      echo 85; sleep 0.03
+      echo 100
+    } | gum progress --title "$title" --width 50 >/dev/null
   fi
 }
 
-validate_sni() {
-  local value="$1"
-  [[ ${#value} -le 253 ]] || return 1
-  [[ "$value" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
+run_spin() {
+  local title="$1"
+  shift
+  if has_cmd gum; then
+    gum spin --spinner dot --title "$title" -- "$@"
+  else
+    "$@"
+  fi
 }
 
-yaml_single_quote() {
-  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"
+ui_title() {
+  local text="$1"
+  if has_cmd gum; then
+    gum style --bold --foreground 212 "$text"
+  else
+    printf '\n%s\n' "$text"
+  fi
+}
+
+ui_note() {
+  local text="$1"
+  if has_cmd gum; then
+    gum style --foreground 245 "$text"
+  else
+    printf '%s\n' "$text"
+  fi
+}
+
+ui_ok() {
+  local text="$1"
+  if has_cmd gum; then
+    gum style --foreground 42 "$text"
+  else
+    printf '%s\n' "$text"
+  fi
+}
+
+ask_input() {
+  local prompt="$1"
+  local default_value="${2:-}"
+  local v=""
+  if has_cmd gum; then
+    v="$(gum input --prompt "${prompt}: " --value "$default_value")" || return 1
+  else
+    read -r -p "${prompt} [${default_value}]: " v
+    v="${v:-$default_value}"
+  fi
+  printf '%s' "$v"
+}
+
+ask_password() {
+  local prompt="$1"
+  local v=""
+  if has_cmd gum; then
+    v="$(gum input --password --prompt "${prompt}: ")" || return 1
+  else
+    read -r -s -p "${prompt}: " v
+    printf '\n'
+  fi
+  printf '%s' "$v"
+}
+
+ask_confirm() {
+  local text="$1"
+  if has_cmd gum; then
+    gum confirm "$text"
+  else
+    local c=""
+    read -r -p "${text} [y/N]: " c
+    [[ "$c" == "y" || "$c" == "Y" ]]
+  fi
+}
+
+choose_one() {
+  local header="$1"
+  shift
+  if has_cmd gum; then
+    gum choose --header "$header" "$@"
+  else
+    local i=1
+    local choices=("$@")
+    printf '%s\n' "$header"
+    for item in "${choices[@]}"; do
+      printf '%d) %s\n' "$i" "$item"
+      ((i++))
+    done
+    local idx
+    read -r -p "请选择序号: " idx
+    [[ "$idx" =~ ^[0-9]+$ ]] || return 1
+    (( idx >= 1 && idx <= ${#choices[@]} )) || return 1
+    printf '%s' "${choices[$((idx-1))]}"
+  fi
+}
+
+install_base_deps() {
+  run_progress "准备系统依赖"
+  run_spin "安装系统依赖..." bash -lc 'apt-get update >/dev/null && apt-get install -y curl ca-certificates openssl sed grep gawk coreutils unzip uuid-runtime iproute2 iptables >/dev/null'
+}
+
+install_gum() {
+  if has_cmd gum; then
+    return 0
+  fi
+  ui_note "未检测到 gum，正在安装..."
+  apt-get update >/dev/null
+  apt-get install -y curl ca-certificates gnupg >/dev/null
+  install -d -m 755 /etc/apt/keyrings
+  curl -fsSL https://repo.charm.sh/apt/gpg.key | gpg --dearmor -o /etc/apt/keyrings/charm.gpg
+  echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" >/etc/apt/sources.list.d/charm.list
+  apt-get update >/dev/null
+  apt-get install -y gum >/dev/null
+  has_cmd gum || die "gum 安装失败，请检查网络后重试。"
+}
+
+install_shortcut_v2() {
+  local src
+  src="$(readlink -f "$0" 2>/dev/null || true)"
+  [[ -n "$src" ]] || return 0
+  [[ "$src" == /dev/* ]] && return 0
+  [[ -f "$src" ]] || return 0
+
+  install -m 755 "$src" "$SHORTCUT_TARGET"
+  ln -sf "$SHORTCUT_TARGET" "$SHORTCUT_V2"
+}
+
+validate_port() {
+  local p="$1"
+  [[ "$p" =~ ^[0-9]+$ ]] || return 1
+  (( p >= 1 && p <= 65535 ))
+}
+
+validate_domain() {
+  local d="$1"
+  [[ ${#d} -le 253 ]] || return 1
+  [[ "$d" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
+}
+
+is_port_used() {
+  local p="$1"
+  ss -H -lntu 2>/dev/null | awk '{print $5}' | grep -Eq "[:.]${p}$"
+}
+
+random_password() {
+  openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 20
+}
+
+random_hex8() {
+  openssl rand -hex 8
+}
+
+random_uuid() {
+  if has_cmd xray; then
+    xray uuid
+  elif has_cmd uuidgen; then
+    uuidgen
+  else
+    cat /proc/sys/kernel/random/uuid
+  fi
 }
 
 server_ip() {
   local ip=""
-  ip="$(curl -4fsSL --max-time 5 https://api.ipify.org || curl -6fsSL --max-time 5 https://api64.ipify.org || true)"
-  if [[ -z "$ip" ]]; then
-    ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-  fi
+  ip="$(curl -4fsSL --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+  [[ -n "$ip" ]] || ip="$(curl -6fsSL --max-time 5 https://api64.ipify.org 2>/dev/null || true)"
+  [[ -n "$ip" ]] || ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
   [[ -n "$ip" ]] || ip="YOUR_SERVER_IP"
   printf '%s' "$ip"
 }
 
-format_host_for_uri() {
+uri_host() {
   local host="$1"
   if [[ "$host" == *:* && "$host" != \[*\] ]]; then
     printf '[%s]' "$host"
@@ -175,252 +263,172 @@ format_host_for_uri() {
   fi
 }
 
-random_hex() {
-  openssl rand -hex "$1"
+random_vendor_domain() {
+  local n="${#VENDOR_DOMAINS[@]}"
+  local i=$((RANDOM % n))
+  printf '%s' "${VENDOR_DOMAINS[$i]}"
 }
 
-random_password() {
-  openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 18
-}
-
-random_port() {
-  local port
+random_unused_port() {
+  local min="$1"
+  local max="$2"
+  local avoid_start="${3:-0}"
+  local avoid_end="${4:-0}"
+  local p
   while true; do
-    port="$(shuf -i 10000-65535 -n 1 2>/dev/null || awk 'BEGIN{srand(); print int(10000+rand()*55536)}')"
-    if ! ss -H -lntu 2>/dev/null | awk '{print $5}' | grep -Eq "[:.]${port}$"; then
-      printf '%s' "$port"
+    p="$(shuf -i "${min}-${max}" -n 1 2>/dev/null || awk -v a="$min" -v b="$max" 'BEGIN{srand(); print int(a+rand()*(b-a+1))}')"
+    if (( avoid_start > 0 && avoid_end > 0 )) && (( p >= avoid_start && p <= avoid_end )); then
+      continue
+    fi
+    if ! is_port_used "$p"; then
+      printf '%s' "$p"
       return 0
     fi
   done
 }
 
-get_default_nic() {
+open_tcp() {
+  local p="$1"
+  if has_cmd ufw; then
+    ufw allow "${p}/tcp" >/dev/null 2>&1 || true
+  elif has_cmd firewall-cmd; then
+    firewall-cmd --permanent --add-port="${p}/tcp" >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+  fi
+}
+
+open_udp() {
+  local p="$1"
+  if has_cmd ufw; then
+    ufw allow "${p}/udp" >/dev/null 2>&1 || true
+  elif has_cmd firewall-cmd; then
+    firewall-cmd --permanent --add-port="${p}/udp" >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+  fi
+}
+
+open_udp_range() {
+  local s="$1"
+  local e="$2"
+  if has_cmd ufw; then
+    ufw allow "${s}:${e}/udp" >/dev/null 2>&1 || true
+  elif has_cmd firewall-cmd; then
+    firewall-cmd --permanent --add-port="${s}-${e}/udp" >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+  fi
+}
+
+remove_udp() {
+  local p="$1"
+  if has_cmd ufw; then
+    ufw delete allow "${p}/udp" >/dev/null 2>&1 || true
+  fi
+}
+
+remove_udp_range() {
+  local s="$1"
+  local e="$2"
+  if has_cmd ufw; then
+    ufw delete allow "${s}:${e}/udp" >/dev/null 2>&1 || true
+  fi
+}
+
+remove_tcp() {
+  local p="$1"
+  if has_cmd ufw; then
+    ufw delete allow "${p}/tcp" >/dev/null 2>&1 || true
+  fi
+}
+
+default_nic() {
   local nic
-  nic="$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i==\"dev\") print $(i+1)}' | head -n 1)"
+  nic="$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)"
   printf '%s' "${nic:-eth0}"
 }
 
-cleanup_hy2_iptables_rules() {
-  local line
-  while IFS= read -r line; do
-    [[ -n "$line" ]] || continue
-    iptables -t nat -D PREROUTING "$line" >/dev/null 2>&1 || true
+cleanup_hop_rules() {
+  local ln
+  while IFS= read -r ln; do
+    [[ -n "$ln" ]] || continue
+    iptables -t nat -D PREROUTING "$ln" >/dev/null 2>&1 || true
   done < <(
     iptables -t nat -L PREROUTING --line-numbers -n -v 2>/dev/null |
-      awk -v comment="$HY2_RULE_COMMENT" '$0 ~ comment {print $1}' |
+      awk -v c="$HY2_RULE_COMMENT" '$0 ~ c {print $1}' |
       sort -rn
   )
 }
 
-add_hy2_iptables_rule() {
+apply_hop_rule() {
   local nic="$1"
-  local hop_start="$2"
-  local hop_end="$3"
+  local start="$2"
+  local end="$3"
   local port="$4"
-
-  cleanup_hy2_iptables_rules
+  cleanup_hop_rules
   iptables -t nat -A PREROUTING \
     -i "$nic" \
     -p udp \
-    --dport "${hop_start}:${hop_end}" \
+    --dport "${start}:${end}" \
     -m comment --comment "$HY2_RULE_COMMENT" \
     -j REDIRECT --to-ports "$port"
 }
 
-save_iptables_rules() {
-  if command -v netfilter-persistent >/dev/null 2>&1; then
+save_iptables() {
+  if has_cmd netfilter-persistent; then
     netfilter-persistent save >/dev/null 2>&1 || true
-    return 0
-  fi
-  if command -v apt-get >/dev/null 2>&1; then
+  elif has_cmd apt-get; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent >/dev/null 2>&1 || true
-    command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1 || true
+    has_cmd netfilter-persistent && netfilter-persistent save >/dev/null 2>&1 || true
   fi
-}
-
-write_hy2_state() {
-  local port="$1"
-  local hop_start="$2"
-  local hop_end="$3"
-  local password="$4"
-  local sni="$5"
-  local nic="$6"
-  local state_file="${CONFIG_DIR}/hy2-state.env"
-  {
-    printf 'PORT=%q\n' "$port"
-    printf 'HOP_START=%q\n' "$hop_start"
-    printf 'HOP_END=%q\n' "$hop_end"
-    printf 'PASSWORD=%q\n' "$password"
-    printf 'SNI=%q\n' "$sni"
-    printf 'NIC=%q\n' "$nic"
-  } > "$state_file"
-  chmod 600 "$state_file"
-}
-
-load_hy2_state() {
-  local state_file="${CONFIG_DIR}/hy2-state.env"
-  if [[ -f "$state_file" ]]; then
-    # shellcheck disable=SC1090
-    source "$state_file"
-  fi
-}
-
-random_uuid() {
-  if command -v xray >/dev/null 2>&1; then
-    xray uuid
-  elif command -v uuidgen >/dev/null 2>&1; then
-    uuidgen
-  elif [[ -r /proc/sys/kernel/random/uuid ]]; then
-    cat /proc/sys/kernel/random/uuid
-  else
-    die "无法生成 UUID。"
-  fi
-}
-
-open_firewall_tcp() {
-  local port="$1"
-  if command -v ufw >/dev/null 2>&1; then
-    ufw allow "${port}/tcp" >/dev/null || true
-  fi
-}
-
-open_firewall_udp() {
-  local port="$1"
-  if command -v ufw >/dev/null 2>&1; then
-    ufw allow "${port}/udp" >/dev/null || true
-  fi
-}
-
-parse_xray_args() {
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --port)
-        XRAY_PORT="${2:-}"
-        shift 2
-        ;;
-      --sni)
-        XRAY_SNI="${2:-}"
-        shift 2
-        ;;
-      --target)
-        XRAY_TARGET="${2:-}"
-        shift 2
-        ;;
-      --uuid)
-        XRAY_UUID="${2:-}"
-        shift 2
-        ;;
-      --help|-h)
-        usage
-        exit 0
-        ;;
-      *)
-        die "未知的 Xray 参数：$1"
-        ;;
-    esac
-  done
-}
-
-parse_hy2_args() {
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --port)
-        HY2_PORT="${2:-}"
-        shift 2
-        ;;
-      --password)
-        HY2_PASSWORD="${2:-}"
-        shift 2
-        ;;
-      --sni)
-        HY2_SNI="${2:-}"
-        shift 2
-        ;;
-      --domain)
-        HY2_SNI="${2:-}"
-        shift 2
-        ;;
-      --email)
-        shift 2
-        ;;
-      --hop-start)
-        HY2_HOP_START="${2:-}"
-        shift 2
-        ;;
-      --hop-end)
-        HY2_HOP_END="${2:-}"
-        shift 2
-        ;;
-      --masquerade)
-        HY2_MASQUERADE="${2:-}"
-        shift 2
-        ;;
-      --help|-h)
-        usage
-        exit 0
-        ;;
-      *)
-        die "未知的 Hysteria2 参数：$1"
-        ;;
-    esac
-  done
 }
 
 install_xray_core() {
-  log "正在安装或更新 Xray。"
-  bash -c "$(curl -LfsS https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-  command -v xray >/dev/null 2>&1 || die "Xray 安装失败。"
+  run_spin "安装 Xray Core..." bash -lc 'bash -c "$(curl -LfsS https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install'
+  has_cmd xray || die "Xray 安装失败。"
 }
 
 generate_reality_keys() {
-  local key_output private_key public_key
-  key_output="$(xray x25519)"
-  private_key="$(printf '%s\n' "$key_output" | awk -F': ' '/PrivateKey|Private key/ {print $2; exit}')"
-  public_key="$(printf '%s\n' "$key_output" | awk -F': ' '/Password \(PublicKey\)|Public key/ {print $2; exit}')"
-
-  [[ -n "$private_key" && -n "$public_key" ]] || die "无法生成 REALITY 密钥。"
+  local out private_key public_key
+  out="$(xray x25519)"
+  private_key="$(printf '%s\n' "$out" | awk -F': ' '/PrivateKey|Private key/ {print $2; exit}')"
+  public_key="$(printf '%s\n' "$out" | awk -F': ' '/Password \(PublicKey\)|Public key/ {print $2; exit}')"
+  [[ -n "$private_key" && -n "$public_key" ]] || die "REALITY 密钥生成失败。"
   printf '%s\n%s\n' "$private_key" "$public_key"
 }
 
 install_xray_reality() {
-  parse_xray_args "$@"
-  require_root
-  require_systemd
-  detect_os
-  validate_port "$XRAY_PORT"
-  install_base_deps
-  ensure_dirs
-  install_xray_core
+  local port="$1"
+  local sni="$2"
+  local target="$3"
 
-  [[ -n "$XRAY_UUID" ]] || XRAY_UUID="$(random_uuid)"
-  local short_id keys private_key public_key ip uri_host link info_file
-  short_id="$(random_hex 8)"
+  validate_port "$port" || die "Xray 端口无效：${port}"
+  is_port_used "$port" && warn "Xray 端口 ${port} 当前已被占用，稍后可能启动失败。"
+
+  ensure_data_dir
+  install_base_deps
+  install_xray_core
+  run_progress "生成 REALITY 参数"
+
+  local uuid short_id keys private_key public_key ip uhost link
+  uuid="$(random_uuid)"
+  short_id="$(random_hex8)"
   keys="$(generate_reality_keys)"
   private_key="$(printf '%s\n' "$keys" | sed -n '1p')"
   public_key="$(printf '%s\n' "$keys" | sed -n '2p')"
   ip="$(server_ip)"
-  uri_host="$(format_host_for_uri "$ip")"
+  uhost="$(uri_host "$ip")"
 
-  print_title "Xray VLESS + REALITY"
-  log "正在写入 Xray REALITY 配置。"
-  cat >/usr/local/etc/xray/config.json <<EOF
+  cat >"$XRAY_CONF" <<EOF
 {
-  "log": {
-    "loglevel": "warning"
-  },
+  "log": { "loglevel": "warning" },
   "inbounds": [
     {
       "tag": "vless-reality",
       "listen": "0.0.0.0",
-      "port": ${XRAY_PORT},
+      "port": ${port},
       "protocol": "vless",
       "settings": {
         "clients": [
-          {
-            "id": "${XRAY_UUID}",
-            "flow": "xtls-rprx-vision",
-            "email": "user"
-          }
+          { "id": "${uuid}", "flow": "xtls-rprx-vision", "email": "user" }
         ],
         "decryption": "none"
       },
@@ -429,82 +437,95 @@ install_xray_reality() {
         "security": "reality",
         "realitySettings": {
           "show": false,
-          "target": "${XRAY_TARGET}",
+          "target": "${target}",
           "xver": 0,
-          "serverNames": [
-            "${XRAY_SNI}"
-          ],
+          "serverNames": ["${sni}"],
           "privateKey": "${private_key}",
-          "shortIds": [
-            "${short_id}"
-          ]
+          "shortIds": ["${short_id}"]
         }
       },
       "sniffing": {
         "enabled": true,
-        "destOverride": [
-          "http",
-          "tls",
-          "quic"
-        ]
+        "destOverride": ["http", "tls", "quic"]
       }
     }
   ],
   "outbounds": [
-    {
-      "protocol": "freedom",
-      "tag": "direct"
-    },
-    {
-      "protocol": "blackhole",
-      "tag": "block"
-    }
+    { "protocol": "freedom", "tag": "direct" },
+    { "protocol": "blackhole", "tag": "block" }
   ]
 }
 EOF
 
-  xray run -test -config /usr/local/etc/xray/config.json
-  systemctl enable xray
-  systemctl restart xray
-  open_firewall_tcp "$XRAY_PORT"
-  printf '%s\n' "$XRAY_PORT" > "${CONFIG_DIR}/.xray_port"
+  run_spin "校验 Xray 配置..." xray run -test -config "$XRAY_CONF"
+  run_spin "启动 Xray 服务..." systemctl restart xray
+  systemctl enable xray >/dev/null 2>&1 || true
+  open_tcp "$port"
+  printf '%s\n' "$port" >"$XRAY_PORT_FILE"
 
-  link="vless://${XRAY_UUID}@${uri_host}:${XRAY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${XRAY_SNI}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#Xray-Reality"
-  info_file="${CONFIG_DIR}/xray-reality.txt"
-  cat >"$info_file" <<EOF
-Xray VLESS + REALITY
+  link="vless://${uuid}@${uhost}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#Xray-Reality"
+  cat >"$XRAY_INFO" <<EOF
+VLESS + REALITY
 
 地址:       ${ip}
-端口:       ${XRAY_PORT}
-UUID:       ${XRAY_UUID}
+端口:       ${port}
+UUID:       ${uuid}
 Flow:       xtls-rprx-vision
-加密:       reality
-SNI:        ${XRAY_SNI}
-目标:       ${XRAY_TARGET}
-Password:   ${public_key}
+SNI:        ${sni}
+Target:     ${target}
+PublicKey:  ${public_key}
 ShortId:    ${short_id}
-Fingerprint: chrome
 
 分享链接:
 ${link}
 EOF
 
-  success "Xray Reality 已安装并启动。"
-  printf '\n'
-  cat "$info_file"
+  ui_ok "Xray 安装完成。"
+  cat "$XRAY_INFO"
 }
 
-install_hysteria_core() {
-  local installer
-  log "正在安装或更新 Hysteria2。"
-  installer="$(mktemp)"
-  curl -fsSL https://get.hy2.sh/ -o "$installer"
-  bash "$installer"
-  rm -f "$installer"
-  command -v hysteria >/dev/null 2>&1 || die "Hysteria2 安装失败。"
+uninstall_xray() {
+  run_spin "卸载 Xray..." bash -lc 'bash -c "$(curl -LfsS https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge'
+  if [[ -f "$XRAY_PORT_FILE" ]]; then
+    remove_tcp "$(<"$XRAY_PORT_FILE")"
+  fi
+  rm -f "$XRAY_INFO" "$XRAY_PORT_FILE"
+  ui_ok "Xray 已卸载。"
 }
 
-write_hy2_self_signed_cert() {
+write_hy2_state() {
+  local port="$1"
+  local hop_start="$2"
+  local hop_end="$3"
+  local password="$4"
+  local sni="$5"
+  local mode="$6"
+  local email="$7"
+  {
+    printf 'PORT=%q\n' "$port"
+    printf 'HOP_START=%q\n' "$hop_start"
+    printf 'HOP_END=%q\n' "$hop_end"
+    printf 'PASSWORD=%q\n' "$password"
+    printf 'SNI=%q\n' "$sni"
+    printf 'TLS_MODE=%q\n' "$mode"
+    printf 'ACME_EMAIL=%q\n' "$email"
+  } >"$HY2_STATE_FILE"
+  chmod 600 "$HY2_STATE_FILE"
+}
+
+load_hy2_state() {
+  if [[ -f "$HY2_STATE_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$HY2_STATE_FILE"
+  fi
+}
+
+install_hy2_core() {
+  run_spin "安装 Hysteria2 Core..." bash -lc 'bash <(curl -fsSL https://get.hy2.sh/)'
+  has_cmd hysteria || die "Hysteria2 安装失败。"
+}
+
+write_hy2_self_signed() {
   local cert_dir="$1"
   local cn="$2"
   install -d -m 700 "$cert_dir"
@@ -519,48 +540,65 @@ write_hy2_self_signed_cert() {
 }
 
 install_hysteria2() {
-  parse_hy2_args "$@"
-  require_root
-  require_systemd
-  detect_os
+  local domain_input="$1"
+  local hop_start="$2"
+  local hop_end="$3"
+  local port="$4"
+  local password="$5"
+  local masquerade="$6"
 
-  [[ -n "$HY2_PORT" ]] || HY2_PORT="$(random_port)"
-  [[ -n "$HY2_SNI" ]] || HY2_SNI="www.bing.com"
-  validate_port "$HY2_PORT"
-  validate_port_range "$HY2_HOP_START" "$HY2_HOP_END" "$HY2_PORT"
-  validate_sni "$HY2_SNI" || die "SNI 域名格式无效：${HY2_SNI}"
+  validate_port "$hop_start" || die "跳跃起始端口无效。"
+  validate_port "$hop_end" || die "跳跃结束端口无效。"
+  (( hop_start < hop_end )) || die "跳跃端口范围必须满足 起始 < 结束。"
 
-  install_base_deps
-  ensure_dirs
-  install_hysteria_core
+  if [[ -z "$port" ]]; then
+    port="$(random_unused_port 10000 65535 "$hop_start" "$hop_end")"
+  fi
+  validate_port "$port" || die "HY2 监听端口无效。"
+  (( port < hop_start || port > hop_end )) || die "HY2 监听端口不能位于跳跃范围内。"
+  is_port_used "$port" && die "HY2 监听端口已被占用：${port}"
 
-  [[ -n "$HY2_PASSWORD" ]] || HY2_PASSWORD="$(random_password)"
-  local ip uri_host config_file cert_dir link info_file password_yaml nic
-  ip="$(server_ip)"
-  uri_host="$(format_host_for_uri "$ip")"
-  config_file="/etc/hysteria/config.yaml"
+  [[ -n "$password" ]] || password="$(random_password)"
+
+  local tls_mode sni acme_email insecure_query cert_dir ip uhost link nic
   cert_dir="/etc/hysteria/certs"
-  password_yaml="$(yaml_single_quote "$HY2_PASSWORD")"
+  acme_email=""
+  insecure_query="&insecure=1"
+
+  if [[ -n "$domain_input" ]]; then
+    validate_domain "$domain_input" || die "你填写的域名格式无效：${domain_input}"
+    tls_mode="acme"
+    sni="$domain_input"
+    acme_email="$(ask_input "ACME 邮箱" "admin@${domain_input}")"
+    insecure_query=""
+  else
+    tls_mode="self-signed"
+    sni="$(random_vendor_domain)"
+  fi
+
+  ensure_data_dir
+  install_base_deps
+  install_hy2_core
+  run_progress "写入 Hysteria2 配置"
 
   install -d -m 755 /etc/hysteria
-  print_title "Hysteria2"
-  log "正在写入 Hysteria2 配置。"
-  write_hy2_self_signed_cert "$cert_dir" "$HY2_SNI"
-  cat >"$config_file" <<EOF
-listen: :${HY2_PORT}
+  if [[ "$tls_mode" == "acme" ]]; then
+    cat >"$HY2_CONF" <<EOF
+listen: :${port}
 
-tls:
-  cert: ${cert_dir}/server.crt
-  key: ${cert_dir}/server.key
+acme:
+  domains:
+    - ${sni}
+  email: ${acme_email}
 
 auth:
   type: password
-  password: ${password_yaml}
+  password: ${password}
 
 masquerade:
   type: proxy
   proxy:
-    url: ${HY2_MASQUERADE}
+    url: ${masquerade}
     rewriteHost: true
 
 quic:
@@ -569,316 +607,280 @@ quic:
   initConnReceiveWindow: 67108864
   maxConnReceiveWindow: 67108864
 EOF
-  chown hysteria:hysteria "$config_file" "${cert_dir}/server.crt" "${cert_dir}/server.key" 2>/dev/null || true
-  chmod 640 "$config_file"
+  else
+    write_hy2_self_signed "$cert_dir" "$sni"
+    cat >"$HY2_CONF" <<EOF
+listen: :${port}
 
-  configure_hy2_firewall "$HY2_PORT" "$HY2_HOP_START" "$HY2_HOP_END"
-  nic="$(get_default_nic)"
-  add_hy2_iptables_rule "$nic" "$HY2_HOP_START" "$HY2_HOP_END" "$HY2_PORT"
-  save_iptables_rules
-  write_hy2_state "$HY2_PORT" "$HY2_HOP_START" "$HY2_HOP_END" "$HY2_PASSWORD" "$HY2_SNI" "$nic"
+tls:
+  cert: ${cert_dir}/server.crt
+  key: ${cert_dir}/server.key
 
-  systemctl enable hysteria-server.service
-  systemctl restart hysteria-server.service
-  sleep 2
-  if ! systemctl is-active --quiet hysteria-server.service; then
-    journalctl --no-pager -n 30 -u hysteria-server.service >&2 || true
-    die "Hysteria2 启动失败，请查看上方日志。"
+auth:
+  type: password
+  password: ${password}
+
+masquerade:
+  type: proxy
+  proxy:
+    url: ${masquerade}
+    rewriteHost: true
+
+quic:
+  initStreamReceiveWindow: 26843545
+  maxStreamReceiveWindow: 26843545
+  initConnReceiveWindow: 67108864
+  maxConnReceiveWindow: 67108864
+EOF
   fi
-  printf '%s\n' "$HY2_PORT" > "${CONFIG_DIR}/.hy2_port"
-  printf '%s-%s\n' "$HY2_HOP_START" "$HY2_HOP_END" > "${CONFIG_DIR}/.hy2_hop_range"
 
-  link="hysteria2://${HY2_PASSWORD}@${uri_host}:${HY2_PORT}/?mport=${HY2_HOP_START}-${HY2_HOP_END}&insecure=1&sni=${HY2_SNI}#Hysteria2"
-  info_file="${CONFIG_DIR}/hysteria2.txt"
-  cat >"$info_file" <<EOF
+  chown -R hysteria:hysteria /etc/hysteria 2>/dev/null || true
+  chmod 640 "$HY2_CONF" 2>/dev/null || true
+
+  open_udp "$port"
+  open_udp_range "$hop_start" "$hop_end"
+  nic="$(default_nic)"
+  apply_hop_rule "$nic" "$hop_start" "$hop_end" "$port"
+  save_iptables
+
+  run_spin "启动 Hysteria2 服务..." systemctl restart hysteria-server.service
+  systemctl enable hysteria-server.service >/dev/null 2>&1 || true
+  systemctl is-active --quiet hysteria-server.service || {
+    journalctl --no-pager -n 40 -u hysteria-server.service >&2 || true
+    die "Hysteria2 启动失败。"
+  }
+
+  printf '%s\n' "$port" >"$HY2_PORT_FILE"
+  printf '%s-%s\n' "$hop_start" "$hop_end" >"$HY2_HOP_FILE"
+  write_hy2_state "$port" "$hop_start" "$hop_end" "$password" "$sni" "$tls_mode" "$acme_email"
+
+  ip="$(server_ip)"
+  uhost="$(uri_host "$ip")"
+  link="hysteria2://${password}@${uhost}:${port}/?mport=${hop_start}-${hop_end}${insecure_query}&sni=${sni}#Hysteria2"
+  cat >"$HY2_INFO" <<EOF
 Hysteria2
 
 地址:       ${ip}
-端口:       ${HY2_PORT}
-跳跃范围:   ${HY2_HOP_START}-${HY2_HOP_END}
-密码:       ${HY2_PASSWORD}
-SNI:        ${HY2_SNI}
-TLS 模式:   自签证书
-协议:       UDP
-提醒:       请在 VPS 安全组/外部防火墙放行 ${HY2_PORT}/UDP 和 ${HY2_HOP_START}-${HY2_HOP_END}/UDP
+端口:       ${port}
+跳跃范围:   ${hop_start}-${hop_end}
+密码:       ${password}
+SNI:        ${sni}
+TLS 模式:   ${tls_mode}
+伪装站点:   ${masquerade}
 
 分享链接:
 ${link}
 EOF
 
-  success "Hysteria2 已安装并启动。"
-  printf '\n'
-  cat "$info_file"
-}
-
-configure_hy2_firewall() {
-  local port="$1"
-  local hop_start="$2"
-  local hop_end="$3"
-  if command -v ufw >/dev/null 2>&1; then
-    ufw allow "${port}/udp" >/dev/null 2>&1 || true
-    ufw allow "${hop_start}:${hop_end}/udp" >/dev/null 2>&1 || true
-    ufw reload >/dev/null 2>&1 || true
-  elif command -v firewall-cmd >/dev/null 2>&1; then
-    firewall-cmd --permanent --add-port="${port}/udp" >/dev/null 2>&1 || true
-    firewall-cmd --permanent --add-port="${hop_start}-${hop_end}/udp" >/dev/null 2>&1 || true
-    firewall-cmd --reload >/dev/null 2>&1 || true
-  fi
-}
-
-show_info() {
-  print_title "已保存的节点信息"
-
-  if [[ -f "${CONFIG_DIR}/xray-reality.txt" ]]; then
-    cat "${CONFIG_DIR}/xray-reality.txt"
-    printf '\n'
-  fi
-
-  if [[ -f "${CONFIG_DIR}/hysteria2.txt" ]]; then
-    cat "${CONFIG_DIR}/hysteria2.txt"
-    printf '\n'
-  fi
-
-  if [[ ! -f "${CONFIG_DIR}/xray-reality.txt" && ! -f "${CONFIG_DIR}/hysteria2.txt" ]]; then
-    log "没有找到已保存的节点信息。"
-  fi
-}
-
-uninstall_xray() {
-  require_root
-  if [[ -f "${CONFIG_DIR}/.xray_port" ]] && command -v ufw >/dev/null 2>&1; then
-    ufw delete allow "$(<"${CONFIG_DIR}/.xray_port")/tcp" >/dev/null 2>&1 || true
-    rm -f "${CONFIG_DIR}/.xray_port"
-  fi
-  log "正在卸载 Xray。"
-  bash -c "$(curl -LfsS https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge || true
-  rm -f "${CONFIG_DIR}/xray-reality.txt"
-  success "Xray 已卸载。"
+  ui_ok "Hysteria2 安装完成。"
+  cat "$HY2_INFO"
 }
 
 uninstall_hy2() {
-  require_root
   load_hy2_state
+  cleanup_hop_rules
+  save_iptables
 
-  cleanup_hy2_iptables_rules
-  save_iptables_rules
-
-  if command -v ufw >/dev/null 2>&1; then
-    [[ -n "${PORT:-}" ]] && ufw delete allow "${PORT}/udp" >/dev/null 2>&1 || true
-    if [[ -n "${HOP_START:-}" && -n "${HOP_END:-}" ]]; then
-      ufw delete allow "${HOP_START}:${HOP_END}/udp" >/dev/null 2>&1 || true
-    fi
-  fi
-  log "正在卸载 Hysteria2。"
-  bash <(curl -fsSL https://get.hy2.sh/) --remove || true
-  rm -f "${CONFIG_DIR}/hysteria2.txt" "${CONFIG_DIR}/.hy2_port" "${CONFIG_DIR}/.hy2_hop_range" "${CONFIG_DIR}/hy2-state.env"
-  success "Hysteria2 已卸载。"
-}
-
-prompt_default() {
-  local label="$1"
-  local default_value="$2"
-  local value
-  read -r -p "${label} [${default_value}]: " value
-  printf '%s' "${value:-$default_value}"
-}
-
-menu_install_xray() {
-  XRAY_PORT="$(prompt_default 'Xray TCP 端口' "$XRAY_PORT")"
-  XRAY_SNI="$(prompt_default 'REALITY 伪装域名 SNI' "$XRAY_SNI")"
-  XRAY_TARGET="$(prompt_default 'REALITY 回落目标' "$XRAY_TARGET")"
-  install_xray_reality --port "$XRAY_PORT" --sni "$XRAY_SNI" --target "$XRAY_TARGET"
-}
-
-menu_install_hy2() {
-  [[ -n "$HY2_PORT" ]] || HY2_PORT="$(random_port)"
-  HY2_PORT="$(prompt_default 'Hysteria2 UDP 端口' "$HY2_PORT")"
-  HY2_HOP_START="$(prompt_default '端口跳跃起始端口' "$HY2_HOP_START")"
-  HY2_HOP_END="$(prompt_default '端口跳跃结束端口' "$HY2_HOP_END")"
-  HY2_SNI="$(prompt_default 'SNI/证书域名' "$HY2_SNI")"
-  local -a args
-  args=(--port "$HY2_PORT" --hop-start "$HY2_HOP_START" --hop-end "$HY2_HOP_END" --sni "$HY2_SNI")
-  install_hysteria2 "${args[@]}"
-}
-
-service_status_label() {
-  local service="$1"
-  local binary="$2"
-
-  if systemctl is-active --quiet "$service" 2>/dev/null; then
-    printf '%s运行中%s' "$C_GREEN" "$C_RESET"
-  elif command -v "$binary" >/dev/null 2>&1; then
-    printf '%s已停止%s' "$C_RED" "$C_RESET"
-  else
-    printf '%s未安装%s' "$C_DIM" "$C_RESET"
-  fi
-}
-
-show_protocol_status() {
-  local title="$1"
-  local service="$2"
-  local binary="$3"
-  local port_file="$4"
-  local proto="$5"
-
-  print_title "${title} 运行状态"
-  printf '服务状态:   %b\n' "$(service_status_label "$service" "$binary")"
-
-  if systemctl is-enabled --quiet "$service" 2>/dev/null; then
-    printf '开机自启:   %s\n' "已启用"
-  else
-    printf '开机自启:   %s\n' "未启用"
+  if [[ -n "${PORT:-}" ]]; then
+    remove_udp "$PORT"
+  elif [[ -f "$HY2_PORT_FILE" ]]; then
+    remove_udp "$(<"$HY2_PORT_FILE")"
   fi
 
-  if [[ -f "$port_file" ]]; then
-    printf '监听端口:   %s/%s\n' "$(<"$port_file")" "$proto"
-  else
-    printf '监听端口:   %s\n' "未知"
+  if [[ -n "${HOP_START:-}" && -n "${HOP_END:-}" ]]; then
+    remove_udp_range "$HOP_START" "$HOP_END"
+  elif [[ -f "$HY2_HOP_FILE" ]]; then
+    local_range="$(<"$HY2_HOP_FILE")"
+    start="${local_range%-*}"
+    end="${local_range#*-}"
+    remove_udp_range "$start" "$end"
   fi
 
-  if systemctl is-active --quiet "$service" 2>/dev/null; then
-    printf '进程检查:   %s\n' "正常"
-  else
-    printf '进程检查:   %s\n' "异常或未启动"
-  fi
+  run_spin "卸载 Hysteria2..." bash -lc 'bash <(curl -fsSL https://get.hy2.sh/) --remove'
+  rm -f "$HY2_INFO" "$HY2_PORT_FILE" "$HY2_HOP_FILE" "$HY2_STATE_FILE"
+  ui_ok "Hysteria2 已卸载。"
+}
 
-  hr
-  printf '最近日志（20 行）\n'
-  journalctl --no-pager -n 20 -u "$service" 2>/dev/null || printf '暂无日志。\n'
+show_xray_status() {
+  ui_title "Xray 运行状态"
+  printf '服务状态: %s\n' "$(systemctl is-active xray 2>/dev/null || echo unknown)"
+  printf '开机自启: %s\n' "$(systemctl is-enabled xray 2>/dev/null || echo unknown)"
+  if [[ -f "$XRAY_PORT_FILE" ]]; then
+    printf '监听端口: %s/tcp\n' "$(<"$XRAY_PORT_FILE")"
+  fi
+  printf '\n最近日志:\n'
+  journalctl --no-pager -n 20 -u xray 2>/dev/null || true
 }
 
 show_hy2_status() {
-  local active_status enabled_status listen_info
-  print_title "Hysteria2 运行状态"
-  active_status="$(systemctl is-active hysteria-server 2>/dev/null || true)"
-  enabled_status="$(systemctl is-enabled hysteria-server 2>/dev/null || true)"
-  listen_info="$(ss -lunp 2>/dev/null | grep 'hysteria' || true)"
-
-  printf '服务状态:   %s\n' "${active_status:-unknown}"
-  printf '开机自启:   %s\n' "${enabled_status:-unknown}"
-  if [[ -f /etc/hysteria/config.yaml ]]; then
-    printf '配置文件:   %s\n' "/etc/hysteria/config.yaml"
-  else
-    printf '配置文件:   未找到\n'
+  ui_title "Hysteria2 运行状态"
+  printf '服务状态: %s\n' "$(systemctl is-active hysteria-server 2>/dev/null || echo unknown)"
+  printf '开机自启: %s\n' "$(systemctl is-enabled hysteria-server 2>/dev/null || echo unknown)"
+  if [[ -f "$HY2_PORT_FILE" ]]; then
+    printf '监听端口: %s/udp\n' "$(<"$HY2_PORT_FILE")"
   fi
-  if [[ -f "${CONFIG_DIR}/.hy2_hop_range" ]]; then
-    printf '跳跃范围:   %s\n' "$(<"${CONFIG_DIR}/.hy2_hop_range")"
+  if [[ -f "$HY2_HOP_FILE" ]]; then
+    printf '跳跃范围: %s/udp\n' "$(<"$HY2_HOP_FILE")"
   fi
-  hr
-  printf '监听信息\n'
-  if [[ -n "$listen_info" ]]; then
-    printf '%s\n' "$listen_info"
-  else
-    printf '未检测到 hysteria 监听端口。\n'
-  fi
-  hr
-  printf '最近日志（20 行）\n'
-  journalctl --no-pager -n 20 -u hysteria-server 2>/dev/null || printf '暂无日志。\n'
+  printf '\n监听信息:\n'
+  ss -lunp 2>/dev/null | grep hysteria || printf '未检测到 hysteria 监听。\n'
+  printf '\n最近日志:\n'
+  journalctl --no-pager -n 20 -u hysteria-server 2>/dev/null || true
 }
 
-pause_menu() {
-  local ignored
-  printf '\n'
-  read -r -p "按回车返回菜单..." ignored
-}
-
-menu_xray() {
-  local choice
-  while true; do
-    clear 2>/dev/null || true
-    printf '\n%sXray 菜单%s\n' "$C_BOLD" "$C_RESET"
-    hr
-    printf '  %s1%s  安装/重装 Xray VLESS + REALITY\n' "$C_GREEN" "$C_RESET"
-    printf '  %s2%s  查看运行状态\n' "$C_CYAN" "$C_RESET"
-    printf '  %s3%s  卸载 Xray\n' "$C_YELLOW" "$C_RESET"
-    printf '  %s0%s  返回上级菜单\n' "$C_DIM" "$C_RESET"
-    hr
-    printf '当前状态: %b\n' "$(service_status_label xray xray)"
+show_nodes() {
+  ui_title "节点信息"
+  if [[ -f "$XRAY_INFO" ]]; then
+    cat "$XRAY_INFO"
     printf '\n'
+  fi
+  if [[ -f "$HY2_INFO" ]]; then
+    cat "$HY2_INFO"
+    printf '\n'
+  fi
+  if [[ ! -f "$XRAY_INFO" && ! -f "$HY2_INFO" ]]; then
+    ui_note "暂无节点信息。"
+  fi
+}
 
-    read -r -p "请选择: " choice
-    case "$choice" in
-      1) menu_install_xray; pause_menu ;;
-      2) show_protocol_status "Xray" "xray" "xray" "${CONFIG_DIR}/.xray_port" "tcp"; pause_menu ;;
-      3) uninstall_xray; pause_menu ;;
-      0) return 0 ;;
-      *) warn "无效选项：$choice"; sleep 1 ;;
+xray_menu() {
+  while true; do
+    local action
+    action="$(choose_one "Xray 菜单" \
+      "安装/重装 VLESS+REALITY" \
+      "查看运行状态" \
+      "查看节点信息" \
+      "卸载 Xray" \
+      "返回上级")" || return 0
+    case "$action" in
+      "安装/重装 VLESS+REALITY")
+        local port sni target
+        port="$(ask_input "Xray 监听端口" "$XRAY_PORT_DEFAULT")"
+        sni="$(ask_input "REALITY SNI" "$XRAY_SNI_DEFAULT")"
+        target="$(ask_input "REALITY Target" "$XRAY_TARGET_DEFAULT")"
+        install_xray_reality "$port" "$sni" "$target"
+        ;;
+      "查看运行状态") show_xray_status ;;
+      "查看节点信息") [[ -f "$XRAY_INFO" ]] && cat "$XRAY_INFO" || ui_note "暂无 Xray 节点信息。" ;;
+      "卸载 Xray")
+        ask_confirm "确认卸载 Xray？" && uninstall_xray
+        ;;
+      "返回上级") return 0 ;;
     esac
   done
 }
 
-menu_hy2() {
-  local choice
+hy2_menu() {
   while true; do
-    clear 2>/dev/null || true
-    printf '\n%sHysteria2 菜单%s\n' "$C_BOLD" "$C_RESET"
-    hr
-    printf '  %s1%s  安装/重装 Hysteria2\n' "$C_GREEN" "$C_RESET"
-    printf '  %s2%s  查看节点信息\n' "$C_CYAN" "$C_RESET"
-    printf '  %s3%s  查看运行状态\n' "$C_CYAN" "$C_RESET"
-    printf '  %s4%s  卸载 Hysteria2\n' "$C_YELLOW" "$C_RESET"
-    printf '  %s0%s  返回上级菜单\n' "$C_DIM" "$C_RESET"
-    hr
-    printf '当前状态: %b\n' "$(service_status_label hysteria-server hysteria)"
-    printf '\n'
-
-    read -r -p "请选择: " choice
-    case "$choice" in
-      1) menu_install_hy2; pause_menu ;;
-      2) [[ -f "${CONFIG_DIR}/hysteria2.txt" ]] && cat "${CONFIG_DIR}/hysteria2.txt" || warn "暂无节点信息。"; pause_menu ;;
-      3) show_hy2_status; pause_menu ;;
-      4) uninstall_hy2; pause_menu ;;
-      0) return 0 ;;
-      *) warn "无效选项：$choice"; sleep 1 ;;
+    local action
+    action="$(choose_one "Hysteria2 菜单" \
+      "安装/重装 Hysteria2" \
+      "查看运行状态" \
+      "查看节点信息" \
+      "卸载 Hysteria2" \
+      "返回上级")" || return 0
+    case "$action" in
+      "安装/重装 Hysteria2")
+        local hop_start hop_end port domain password masq
+        hop_start="$(ask_input "跳跃端口起始" "$HY2_HOP_START_DEFAULT")"
+        hop_end="$(ask_input "跳跃端口结束" "$HY2_HOP_END_DEFAULT")"
+        validate_port "$hop_start" || die "跳跃起始端口无效。"
+        validate_port "$hop_end" || die "跳跃结束端口无效。"
+        (( hop_start < hop_end )) || die "跳跃端口必须 起始 < 结束。"
+        local default_port
+        default_port="$(random_unused_port 10000 65535 "$hop_start" "$hop_end")"
+        port="$(ask_input "HY2 监听端口（留空自动随机）" "$default_port")"
+        domain="$(ask_input "域名（留空=随机大厂域名；填写=你自己的域名）" "")"
+        password="$(ask_password "HY2 密码（留空自动随机）")"
+        masq="$(ask_input "伪装网站 URL" "$HY2_MASQ_DEFAULT")"
+        install_hysteria2 "$domain" "$hop_start" "$hop_end" "$port" "$password" "$masq"
+        ;;
+      "查看运行状态") show_hy2_status ;;
+      "查看节点信息") [[ -f "$HY2_INFO" ]] && cat "$HY2_INFO" || ui_note "暂无 Hysteria2 节点信息。" ;;
+      "卸载 Hysteria2")
+        ask_confirm "确认卸载 Hysteria2？" && uninstall_hy2
+        ;;
+      "返回上级") return 0 ;;
     esac
   done
+}
+
+status_menu() {
+  local choice
+  choice="$(choose_one "运行状态" "Xray" "Hysteria2" "全部" "返回")" || return 0
+  case "$choice" in
+    "Xray") show_xray_status ;;
+    "Hysteria2") show_hy2_status ;;
+    "全部") show_xray_status; printf '\n'; show_hy2_status ;;
+    "返回") return 0 ;;
+  esac
 }
 
 main_menu() {
+  install_shortcut_v2 || true
   while true; do
-    clear 2>/dev/null || true
-    printf '\n%sVPS 代理脚本%s\n' "$C_BOLD" "$C_RESET"
-    printf '%sXray / Hysteria2 二级菜单%s\n' "$C_DIM" "$C_RESET"
-    hr
-    printf '  %s1%s  进入 Xray 菜单\n' "$C_GREEN" "$C_RESET"
-    printf '  %s2%s  进入 Hysteria2 菜单\n' "$C_GREEN" "$C_RESET"
-    printf '  %s3%s  查看已保存的节点信息\n' "$C_CYAN" "$C_RESET"
-    printf '  %s0%s  退出\n' "$C_DIM" "$C_RESET"
-    hr
-    printf '当前状态\n'
-    printf '  Xray      : %b\n' "$(service_status_label xray xray)"
-    printf '  Hysteria2 : %b\n' "$(service_status_label hysteria-server hysteria)"
-    hr
-    warn "安装前请确认 VPS 安全组已放行对应端口。"
-    printf '\n'
-
+    ui_title "VPS 代理脚本 v2 (gum UI)"
     local choice
-    read -r -p "请选择: " choice
+    choice="$(choose_one "请选择功能" \
+      "VLESS+REALITY" \
+      "Hysteria2" \
+      "查看运行状态" \
+      "查看节点信息" \
+      "安装/修复快捷指令 v2" \
+      "退出")" || exit 0
     case "$choice" in
-      1) menu_xray ;;
-      2) menu_hy2 ;;
-      3) show_info; pause_menu ;;
-      0) printf '\n再见。\n'; exit 0 ;;
-      *) warn "无效选项：$choice"; sleep 1 ;;
+      "VLESS+REALITY") xray_menu ;;
+      "Hysteria2") hy2_menu ;;
+      "查看运行状态") status_menu ;;
+      "查看节点信息") show_nodes ;;
+      "安装/修复快捷指令 v2")
+        install_shortcut_v2
+        ui_ok "快捷指令已就绪：v2"
+        ;;
+      "退出") exit 0 ;;
     esac
   done
 }
 
-main() {
-  local command="${1:-menu}"
-  if [[ $# -gt 0 ]]; then
-    shift
-  fi
+usage() {
+  cat <<'EOF'
+用法:
+  bash proxy.sh                 # 交互菜单
+  bash proxy.sh menu            # 交互菜单
+  bash proxy.sh v2              # 交互菜单（快捷入口）
+  bash proxy.sh status          # 查看全部状态
+  bash proxy.sh nodes           # 查看节点信息
+  bash proxy.sh xray-uninstall  # 卸载 Xray
+  bash proxy.sh hy2-uninstall   # 卸载 Hysteria2
+  bash proxy.sh install-shortcut# 安装快捷指令 v2
 
-  case "$command" in
-    menu) main_menu ;;
-    xray) install_xray_reality "$@" ;;
-    hy2|hysteria2) install_hysteria2 "$@" ;;
-    show) show_info ;;
-    uninstall-xray) uninstall_xray ;;
-    uninstall-hy2|uninstall-hysteria2) uninstall_hy2 ;;
-    --help|-h|help) usage ;;
-    *) die "未知命令：$command" ;;
+说明:
+  - UI 使用 gum: spinner + choose + progress
+  - Hysteria2:
+    * 域名留空 -> 自动随机大厂域名（自签证书）
+    * 填写域名 -> 使用你的域名（ACME）
+    * 监听端口随机且避开已占用端口，且不落入跳跃端口范围
+EOF
+}
+
+main() {
+  require_root
+  require_systemd
+  detect_os
+  install_base_deps
+  install_gum
+  ensure_data_dir
+
+  local cmd="${1:-menu}"
+  case "$cmd" in
+    menu|v2) main_menu ;;
+    status) show_xray_status; printf '\n'; show_hy2_status ;;
+    nodes) show_nodes ;;
+    xray-uninstall) uninstall_xray ;;
+    hy2-uninstall) uninstall_hy2 ;;
+    install-shortcut) install_shortcut_v2; ui_ok "快捷指令已就绪：v2" ;;
+    -h|--help|help) usage ;;
+    *) usage; die "未知命令: ${cmd}" ;;
   esac
 }
 
