@@ -37,9 +37,41 @@ VENDOR_DOMAINS=(
   "www.bing.com"
 )
 
-log() { printf '[%s] %s\n' "$APP_NAME" "$*"; }
-warn() { printf '[%s] 警告: %s\n' "$APP_NAME" "$*" >&2; }
-die() { printf '[%s] 错误: %s\n' "$APP_NAME" "$*" >&2; exit 1; }
+if [[ -t 1 ]]; then
+  C_RESET=$'\033[0m'
+  C_BOLD=$'\033[1m'
+  C_RED=$'\033[31m'
+  C_GREEN=$'\033[32m'
+  C_YELLOW=$'\033[33m'
+  C_BLUE=$'\033[34m'
+  C_CYAN=$'\033[36m'
+  C_GRAY=$'\033[90m'
+else
+  C_RESET=""
+  C_BOLD=""
+  C_RED=""
+  C_GREEN=""
+  C_YELLOW=""
+  C_BLUE=""
+  C_CYAN=""
+  C_GRAY=""
+fi
+
+I_INFO="ℹ"
+I_OK="✔"
+I_WARN="⚠"
+I_ERR="✖"
+I_MENU="◆"
+I_RUN="▶"
+I_DOT="•"
+
+hr() {
+  printf '%s\n' "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+}
+
+log() { printf '%s[%s] %s %s%s\n' "$C_CYAN" "$APP_NAME" "$I_INFO" "$*" "$C_RESET"; }
+warn() { printf '%s[%s] %s %s%s\n' "$C_YELLOW" "$APP_NAME" "$I_WARN" "$*" "$C_RESET" >&2; }
+die() { printf '%s[%s] %s %s%s\n' "$C_RED" "$APP_NAME" "$I_ERR" "$*" "$C_RESET" >&2; exit 1; }
 
 on_err() {
   local line="$1"
@@ -73,130 +105,107 @@ ensure_data_dir() {
 
 run_progress() {
   local title="$1"
-  if has_cmd gum; then
-    {
-      echo 10; sleep 0.03
-      echo 25; sleep 0.03
-      echo 45; sleep 0.03
-      echo 65; sleep 0.03
-      echo 85; sleep 0.03
-      echo 100
-    } | gum progress --title "$title" --width 50 >/dev/null
+  if [[ -t 1 ]]; then
+    local p done left bar
+    for p in 10 25 45 65 85 100; do
+      done=$((p / 5))
+      left=$((20 - done))
+      bar="$(printf '%0.s█' $(seq 1 "$done"))$(printf '%0.s░' $(seq 1 "$left"))"
+      printf '\r%s%s %s [%s] %3d%%%s' "$C_BLUE" "$I_RUN" "$title" "$bar" "$p" "$C_RESET"
+      sleep 0.06
+    done
+    printf '\n'
   fi
 }
 
 run_spin() {
   local title="$1"
   shift
-  if has_cmd gum; then
-    gum spin --spinner dot --title "$title" -- "$@"
+  if ! [[ -t 1 ]]; then "$@"; return; fi
+  local spin=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  "$@" >/dev/null 2>&1 &
+  local pid=$!
+  local i=0
+  while kill -0 "$pid" 2>/dev/null; do
+    printf '\r%s%s %s %s%s' "$C_CYAN" "${spin[$i]}" "$title" "..." "$C_RESET"
+    i=$(( (i + 1) % ${#spin[@]} ))
+    sleep 0.08
+  done
+  wait "$pid"
+  local rc=$?
+  if [[ $rc -eq 0 ]]; then
+    printf '\r%s%s %s 完成%s\n' "$C_GREEN" "$I_OK" "$title" "$C_RESET"
   else
-    "$@"
+    printf '\r%s%s %s 失败%s\n' "$C_RED" "$I_ERR" "$title" "$C_RESET"
   fi
+  return "$rc"
 }
 
 ui_title() {
   local text="$1"
-  if has_cmd gum; then
-    gum style --bold --foreground 212 "$text"
-  else
-    printf '\n%s\n' "$text"
-  fi
+  printf '\n%s' "$C_BOLD$C_BLUE"
+  hr
+  printf '%s %s\n' "$I_MENU" "$text"
+  hr
+  printf '%s' "$C_RESET"
 }
 
 ui_note() {
   local text="$1"
-  if has_cmd gum; then
-    gum style --foreground 245 "$text"
-  else
-    printf '%s\n' "$text"
-  fi
+  printf '%s%s %s%s\n' "$C_GRAY" "$I_DOT" "$text" "$C_RESET"
 }
 
 ui_ok() {
   local text="$1"
-  if has_cmd gum; then
-    gum style --foreground 42 "$text"
-  else
-    printf '%s\n' "$text"
-  fi
+  printf '%s%s %s%s\n' "$C_GREEN" "$I_OK" "$text" "$C_RESET"
 }
 
 ask_input() {
   local prompt="$1"
   local default_value="${2:-}"
   local v=""
-  if has_cmd gum; then
-    v="$(gum input --prompt "${prompt}: " --value "$default_value")" || return 1
-  else
-    read -r -p "${prompt} [${default_value}]: " v
-    v="${v:-$default_value}"
-  fi
+  read -r -p "${prompt} [${default_value}]: " v
+  v="${v:-$default_value}"
   printf '%s' "$v"
 }
 
 ask_password() {
   local prompt="$1"
   local v=""
-  if has_cmd gum; then
-    v="$(gum input --password --prompt "${prompt}: ")" || return 1
-  else
-    read -r -s -p "${prompt}: " v
-    printf '\n'
-  fi
+  read -r -s -p "${prompt}: " v
+  printf '\n'
   printf '%s' "$v"
 }
 
 ask_confirm() {
   local text="$1"
-  if has_cmd gum; then
-    gum confirm "$text"
-  else
-    local c=""
-    read -r -p "${text} [y/N]: " c
-    [[ "$c" == "y" || "$c" == "Y" ]]
-  fi
+  local c=""
+  read -r -p "${text} [y/N]: " c
+  [[ "$c" == "y" || "$c" == "Y" ]]
 }
 
 choose_one() {
   local header="$1"
   shift
-  if has_cmd gum; then
-    gum choose --header "$header" "$@"
-  else
-    local i=1
-    local choices=("$@")
-    printf '%s\n' "$header"
-    for item in "${choices[@]}"; do
-      printf '%d) %s\n' "$i" "$item"
-      ((i++))
-    done
-    local idx
-    read -r -p "请选择序号: " idx
-    [[ "$idx" =~ ^[0-9]+$ ]] || return 1
-    (( idx >= 1 && idx <= ${#choices[@]} )) || return 1
-    printf '%s' "${choices[$((idx-1))]}"
-  fi
+  local i=1
+  local choices=("$@")
+  printf '%s%s%s\n' "$C_CYAN" "$header" "$C_RESET"
+  hr
+  for item in "${choices[@]}"; do
+    printf '  %s%2d%s) %s %s\n' "$C_BLUE" "$i" "$C_RESET" "$I_DOT" "$item"
+    ((i++))
+  done
+  hr
+  local idx
+  read -r -p "请选择序号: " idx
+  [[ "$idx" =~ ^[0-9]+$ ]] || return 1
+  (( idx >= 1 && idx <= ${#choices[@]} )) || return 1
+  printf '%s' "${choices[$((idx-1))]}"
 }
 
 install_base_deps() {
   run_progress "准备系统依赖"
   run_spin "安装系统依赖..." bash -lc 'apt-get update >/dev/null && apt-get install -y curl ca-certificates openssl sed grep gawk coreutils unzip uuid-runtime iproute2 iptables >/dev/null'
-}
-
-install_gum() {
-  if has_cmd gum; then
-    return 0
-  fi
-  ui_note "未检测到 gum，正在安装..."
-  apt-get update >/dev/null
-  apt-get install -y curl ca-certificates gnupg >/dev/null
-  install -d -m 755 /etc/apt/keyrings
-  curl -fsSL https://repo.charm.sh/apt/gpg.key | gpg --dearmor -o /etc/apt/keyrings/charm.gpg
-  echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" >/etc/apt/sources.list.d/charm.list
-  apt-get update >/dev/null
-  apt-get install -y gum >/dev/null
-  has_cmd gum || die "gum 安装失败，请检查网络后重试。"
 }
 
 install_shortcut_v2() {
@@ -819,7 +828,7 @@ status_menu() {
 main_menu() {
   install_shortcut_v2 || true
   while true; do
-    ui_title "VPS 代理脚本 v2 (gum UI)"
+    ui_title "VPS 代理脚本 v2 (ANSI UI)"
     local choice
     choice="$(choose_one "请选择功能" \
       "VLESS+REALITY" \
@@ -855,7 +864,7 @@ usage() {
   bash proxy.sh install-shortcut# 安装快捷指令 v2
 
 说明:
-  - UI 使用 gum: spinner + choose + progress
+  - UI 风格: ANSI 颜色 + Unicode 图标 + 分隔线
   - Hysteria2:
     * 域名留空 -> 自动随机大厂域名（自签证书）
     * 填写域名 -> 使用你的域名（ACME）
@@ -868,7 +877,6 @@ main() {
   require_systemd
   detect_os
   install_base_deps
-  install_gum
   ensure_data_dir
 
   local cmd="${1:-menu}"
