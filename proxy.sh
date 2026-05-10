@@ -213,8 +213,8 @@ install_xray_core() {
 generate_reality_keys() {
   local key_output private_key public_key
   key_output="$(xray x25519)"
-  private_key="$(printf '%s\n' "$key_output" | awk -F': ' '/Private key/ {print $2}')"
-  public_key="$(printf '%s\n' "$key_output" | awk -F': ' '/Public key/ {print $2}')"
+  private_key="$(printf '%s\n' "$key_output" | awk -F': ' '/PrivateKey|Private key/ {print $2; exit}')"
+  public_key="$(printf '%s\n' "$key_output" | awk -F': ' '/Password \(PublicKey\)|Public key/ {print $2; exit}')"
 
   [[ -n "$private_key" && -n "$public_key" ]] || die "Cannot generate REALITY keys."
   printf '%s\n%s\n' "$private_key" "$public_key"
