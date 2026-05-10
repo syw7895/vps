@@ -77,15 +77,16 @@ trap 'on_error "$LINENO" "$?"' ERR
 usage() {
   cat <<'EOF'
 用法:
-  bash 修改版.sh
-  bash 修改版.sh menu
-  bash 修改版.sh xray [参数]
-  bash 修改版.sh hy2 [参数]
-  bash 修改版.sh v2 [参数]
-  bash 修改版.sh show
-  bash 修改版.sh uninstall-xray
-  bash 修改版.sh uninstall-hy2
-  bash 修改版.sh uninstall-v2
+  bash proxy.sh
+  bash proxy.sh menu
+  bash proxy.sh xray [参数]
+  bash proxy.sh hy2 [参数]
+  bash proxy.sh v2
+  bash proxy.sh install-shortcut
+  bash proxy.sh show
+  bash proxy.sh uninstall-xray
+  bash proxy.sh uninstall-hy2
+  bash proxy.sh uninstall-v2
 
 Xray VLESS + REALITY 参数:
   --port PORT          TCP 监听端口（默认: 443）
@@ -100,11 +101,12 @@ Hysteria2 参数:
   --masquerade URL     伪装网站（默认: https://www.bing.com）
 
 示例:
-  bash 修改版.sh xray
-  bash 修改版.sh xray --port 443 --sni www.microsoft.com --target www.microsoft.com:443
-  bash 修改版.sh hy2
-  bash 修改版.sh hy2 --domain example.com
-  bash 修改版.sh v2 --domain example.com
+  bash proxy.sh xray
+  bash proxy.sh xray --port 443 --sni www.microsoft.com --target www.microsoft.com:443
+  bash proxy.sh hy2
+  bash proxy.sh hy2 --domain example.com
+  bash proxy.sh install-shortcut
+  v2
 EOF
 }
 
@@ -566,6 +568,21 @@ uninstall_hy2() {
   fi
 }
 
+install_v2_shortcut() {
+  require_root
+
+  local source_path target_path
+  source_path="$(readlink -f "$0" 2>/dev/null || true)"
+  target_path="/usr/local/bin/v2"
+
+  [[ -n "$source_path" && -f "$source_path" ]] || fail "无法定位当前脚本路径，请使用文件方式执行后重试。"
+  chmod +x "$source_path"
+  ln -sf "$source_path" "$target_path"
+
+  ok "已安装快捷命令：v2"
+  log "现在可直接输入：v2"
+}
+
 # ===== 菜单 =====
 prompt_default() {
   local label="$1" default_value="$2" value
@@ -599,6 +616,7 @@ main_menu() {
   printf '  %s3%s  查看节点信息与状态\n' "$C_CYAN" "$C_RESET"
   printf '  %s4%s  卸载 Xray\n' "$C_YELLOW" "$C_RESET"
   printf '  %s5%s  卸载 Hysteria2\n' "$C_YELLOW" "$C_RESET"
+  printf '  %s6%s  安装 v2 快捷命令\n' "$C_CYAN" "$C_RESET"
   printf '  %s0%s  退出\n' "$C_DIM" "$C_RESET"
   hr
   printf 'Xray      : %b\n' "$(service_status_label xray xray)"
@@ -614,6 +632,7 @@ main_menu() {
     3) show_info ;;
     4) uninstall_xray ;;
     5) uninstall_hy2 ;;
+    6) install_v2_shortcut ;;
     0) exit 0 ;;
     *) fail "无效选项：${choice}" ;;
   esac
@@ -624,9 +643,10 @@ main() {
   if [[ $# -gt 0 ]]; then shift; fi
 
   case "$cmd" in
-    menu) main_menu ;;
+    menu|v2) main_menu ;;
     xray) install_xray_reality "$@" ;;
-    hy2|hysteria2|v2) install_hysteria2 "$@" ;;
+    hy2|hysteria2) install_hysteria2 "$@" ;;
+    install-shortcut|shortcut) install_v2_shortcut ;;
     show) show_info ;;
     uninstall-xray) uninstall_xray ;;
     uninstall-hy2|uninstall-hysteria2|uninstall-v2) uninstall_hy2 ;;
