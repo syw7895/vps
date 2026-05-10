@@ -166,11 +166,26 @@ get_default_nic() {
 }
 
 install_shortcut() {
-    local script_path
+    local script_path source_path
 
-    script_path=$(readlink -f "$0")
+    script_path="$(readlink -f "$0" 2>/dev/null || true)"
+    source_path="${BASH_SOURCE[0]:-}"
+
+    # 通过 curl | bash 或 /dev/fd 执行时，没有稳定脚本路径，跳过快捷命令安装。
+    if [[ -z "$script_path" || "$script_path" == /proc/*/fd/* || "$script_path" == /dev/fd/* || ! -f "$script_path" ]]; then
+        if [[ -n "$source_path" && -f "$source_path" ]]; then
+            script_path="$source_path"
+        else
+            warn "当前运行方式为临时脚本，已跳过快捷命令安装。可将脚本保存到本地后再运行一次。"
+            return 0
+        fi
+    fi
+
     if [[ "$script_path" != "$HY2_CMD" ]]; then
-        install -m 0755 "$script_path" "$HY2_CMD"
+        install -m 0755 "$script_path" "$HY2_CMD" || {
+            warn "快捷命令安装失败，已跳过，不影响主功能。"
+            return 0
+        }
         success "全局快捷命令已生效：输入 ${YELLOW}hy2${NC} 即可打开菜单。"
     fi
 }
