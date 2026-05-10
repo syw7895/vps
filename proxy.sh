@@ -23,6 +23,15 @@ HY2_CONFIG="/etc/hysteria/config.yaml"
 HY2_CERT_DIR="/etc/hysteria/certs"
 HY2_INFO_FILE="${CONFIG_DIR}/hysteria2.txt"
 
+# 远程安装脚本地址（可按需固定版本）
+XRAY_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
+HY2_INSTALLER_URL="https://get.hy2.sh/"
+
+# 可选：固定脚本哈希，留空表示仅下载后执行
+# 例如：XRAY_INSTALLER_SHA256="<sha256>"
+XRAY_INSTALLER_SHA256=""
+HY2_INSTALLER_SHA256=""
+
 # 默认大厂域名池（HY2 留空时随机）
 BIG_TECH_DOMAINS=(
   "www.bing.com"
@@ -72,9 +81,11 @@ usage() {
   bash 修改版.sh menu
   bash 修改版.sh xray [参数]
   bash 修改版.sh hy2 [参数]
+  bash 修改版.sh v2 [参数]
   bash 修改版.sh show
   bash 修改版.sh uninstall-xray
   bash 修改版.sh uninstall-hy2
+  bash 修改版.sh uninstall-v2
 
 Xray VLESS + REALITY 参数:
   --port PORT          TCP 监听端口（默认: 443）
@@ -93,6 +104,7 @@ Hysteria2 参数:
   bash 修改版.sh xray --port 443 --sni www.microsoft.com --target www.microsoft.com:443
   bash 修改版.sh hy2
   bash 修改版.sh hy2 --domain example.com
+  bash 修改版.sh v2 --domain example.com
 EOF
 }
 
@@ -124,6 +136,36 @@ install_base_deps() {
 
 ensure_dirs() {
   install -d -m 700 "$CONFIG_DIR"
+}
+
+download_remote_script() {
+  local url="$1" out="$2"
+  curl -fL --retry 3 --connect-timeout 10 --max-time 120 -o "$out" "$url"
+  [[ -s "$out" ]] || fail "下载安装脚本失败：${url}"
+}
+
+verify_script_sha256() {
+  local file="$1" expected="$2"
+  [[ -z "$expected" ]] && return 0
+
+  local actual
+  actual="$(sha256sum "$file" | awk '{print $1}')"
+  [[ "$actual" == "$expected" ]] || fail "安装脚本哈希校验失败。"
+}
+
+run_remote_script() {
+  local url="$1" expected_sha="$2"
+  shift 2
+
+  local script_file rc=0
+  script_file="$(mktemp /tmp/${APP_NAME}.installer.XXXXXX.sh)"
+  download_remote_script "$url" "$script_file"
+  verify_script_sha256 "$script_file" "$expected_sha"
+  chmod 700 "$script_file"
+
+  bash "$script_file" "$@" || rc=$?
+  rm -f "$script_file"
+  (( rc == 0 )) || return "$rc"
 }
 
 # ===== 校验与工具函数 =====
@@ -266,7 +308,7 @@ parse_hy2_args() {
 # ===== Xray 安装 =====
 install_xray_core() {
   log "安装或更新 Xray..."
-  bash -c "$(curl -LfsS https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+  run_remote_script "$XRAY_INSTALLER_URL" "$XRAY_INSTALLER_SHA256" @ install
   command -v xray >/dev/null 2>&1 || fail "Xray 安装失败。"
 }
 
@@ -380,7 +422,7 @@ EOF
 # ===== Hysteria2 安装 =====
 install_hysteria_core() {
   log "安装或更新 Hysteria2..."
-  HYSTERIA_USER=root bash <(curl -fsSL https://get.hy2.sh/)
+  HYSTERIA_USER=root run_remote_script "$HY2_INSTALLER_URL" "$HY2_INSTALLER_SHA256"
   command -v hysteria >/dev/null 2>&1 || fail "Hysteria2 安装失败。"
 }
 
@@ -505,17 +547,23 @@ show_info() {
 uninstall_xray() {
   require_root
   log "卸载 Xray..."
-  bash -c "$(curl -LfsS https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge || true
-  rm -f "$XRAY_INFO_FILE"
-  ok "Xray 已卸载。"
+  if run_remote_script "$XRAY_INSTALLER_URL" "$XRAY_INSTALLER_SHA256" @ remove --purge; then
+    rm -f "$XRAY_INFO_FILE"
+    ok "Xray 已卸载。"
+  else
+    fail "Xray 卸载失败，请检查日志后重试。"
+  fi
 }
 
 uninstall_hy2() {
   require_root
   log "卸载 Hysteria2..."
-  bash <(curl -fsSL https://get.hy2.sh/) --remove || true
-  rm -f "$HY2_INFO_FILE"
-  ok "Hysteria2 已卸载。"
+  if run_remote_script "$HY2_INSTALLER_URL" "$HY2_INSTALLER_SHA256" --remove; then
+    rm -f "$HY2_INFO_FILE"
+    ok "Hysteria2 已卸载。"
+  else
+    fail "Hysteria2 卸载失败，请检查日志后重试。"
+  fi
 }
 
 # ===== 菜单 =====
@@ -578,10 +626,10 @@ main() {
   case "$cmd" in
     menu) main_menu ;;
     xray) install_xray_reality "$@" ;;
-    hy2|hysteria2) install_hysteria2 "$@" ;;
+    hy2|hysteria2|v2) install_hysteria2 "$@" ;;
     show) show_info ;;
     uninstall-xray) uninstall_xray ;;
-    uninstall-hy2|uninstall-hysteria2) uninstall_hy2 ;;
+    uninstall-hy2|uninstall-hysteria2|uninstall-v2) uninstall_hy2 ;;
     --help|-h|help) usage ;;
     *) fail "未知命令：${cmd}" ;;
   esac
