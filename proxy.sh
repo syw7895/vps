@@ -571,13 +571,19 @@ uninstall_hy2() {
 install_v2_shortcut() {
   require_root
 
-  local source_path target_path
+  local source_path target_path script_url
   source_path="$(readlink -f "$0" 2>/dev/null || true)"
   target_path="/usr/local/bin/v2"
+  script_url="https://raw.githubusercontent.com/syw7895/vps/main/proxy.sh"
 
-  [[ -n "$source_path" && -f "$source_path" ]] || fail "无法定位当前脚本路径，请使用文件方式执行后重试。"
-  chmod +x "$source_path"
-  ln -sf "$source_path" "$target_path"
+  if [[ -n "$source_path" && -f "$source_path" && "$source_path" != /dev/fd/* ]]; then
+    chmod +x "$source_path"
+    ln -sf "$source_path" "$target_path"
+  else
+    log "检测到在线执行模式，改为下载最新脚本安装快捷命令..."
+    curl -fL --retry 3 --connect-timeout 10 --max-time 120 -o "$target_path" "$script_url"
+    chmod 755 "$target_path"
+  fi
 
   ok "已安装快捷命令：v2"
   log "现在可直接输入：v2"
