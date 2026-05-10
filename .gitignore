@@ -1,0 +1,15 @@
+# Logs
+*.log
+
+# Local editor files
+.vscode/
+.idea/
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+
+# Temporary files
+tmp/
+*.tmp
