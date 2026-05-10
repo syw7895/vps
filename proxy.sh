@@ -133,12 +133,21 @@ validate_port() {
 
 server_ip() {
   local ip=""
-  ip="$(curl -4fsSL --max-time 5 https://api.ipify.org || true)"
+  ip="$(curl -4fsSL --max-time 5 https://api.ipify.org || curl -6fsSL --max-time 5 https://api64.ipify.org || true)"
   if [[ -z "$ip" ]]; then
     ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
   fi
   [[ -n "$ip" ]] || ip="YOUR_SERVER_IP"
   printf '%s' "$ip"
+}
+
+format_host_for_uri() {
+  local host="$1"
+  if [[ "$host" == *:* && "$host" != \[*\] ]]; then
+    printf '[%s]' "$host"
+  else
+    printf '%s' "$host"
+  fi
 }
 
 random_hex() {
@@ -266,12 +275,13 @@ install_xray_reality() {
   install_xray_core
 
   [[ -n "$XRAY_UUID" ]] || XRAY_UUID="$(random_uuid)"
-  local short_id keys private_key public_key ip link info_file
+  local short_id keys private_key public_key ip uri_host link info_file
   short_id="$(random_hex 8)"
   keys="$(generate_reality_keys)"
   private_key="$(printf '%s\n' "$keys" | sed -n '1p')"
   public_key="$(printf '%s\n' "$keys" | sed -n '2p')"
   ip="$(server_ip)"
+  uri_host="$(format_host_for_uri "$ip")"
 
   print_title "Xray VLESS + REALITY"
   log "正在写入 Xray REALITY 配置。"
@@ -339,8 +349,9 @@ EOF
   systemctl enable xray
   systemctl restart xray
   open_firewall_tcp "$XRAY_PORT"
+  printf '%s\n' "$XRAY_PORT" > "${CONFIG_DIR}/.xray_port"
 
-  link="vless://${XRAY_UUID}@${ip}:${XRAY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${XRAY_SNI}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#Xray-Reality-${ip}"
+  link="vless://${XRAY_UUID}@${uri_host}:${XRAY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${XRAY_SNI}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#Xray-Reality"
   info_file="${CONFIG_DIR}/xray-reality.txt"
   cat >"$info_file" <<EOF
 Xray VLESS + REALITY
@@ -399,8 +410,9 @@ install_hysteria2() {
   install_hysteria_core
 
   [[ -n "$HY2_PASSWORD" ]] || HY2_PASSWORD="$(random_password)"
-  local ip config_file cert_dir link info_file sni insecure_query
+  local ip uri_host config_file cert_dir link info_file sni insecure_query
   ip="$(server_ip)"
+  uri_host="$(format_host_for_uri "$ip")"
   config_file="/etc/hysteria/config.yaml"
   cert_dir="/etc/hysteria/certs"
   sni="${HY2_DOMAIN:-$ip}"
@@ -457,8 +469,9 @@ EOF
   systemctl enable hysteria-server.service
   systemctl restart hysteria-server.service
   open_firewall_udp "$HY2_PORT"
+  printf '%s\n' "$HY2_PORT" > "${CONFIG_DIR}/.hy2_port"
 
-  link="hysteria2://${HY2_PASSWORD}@${ip}:${HY2_PORT}/?sni=${sni}${insecure_query}#Hysteria2-${ip}"
+  link="hysteria2://${HY2_PASSWORD}@${uri_host}:${HY2_PORT}/?sni=${sni}${insecure_query}#Hysteria2"
   info_file="${CONFIG_DIR}/hysteria2.txt"
   cat >"$info_file" <<EOF
 Hysteria2
@@ -499,6 +512,10 @@ show_info() {
 
 uninstall_xray() {
   require_root
+  if [[ -f "${CONFIG_DIR}/.xray_port" ]] && command -v ufw >/dev/null 2>&1; then
+    ufw delete allow "$(<"${CONFIG_DIR}/.xray_port")/tcp" >/dev/null 2>&1 || true
+    rm -f "${CONFIG_DIR}/.xray_port"
+  fi
   log "正在卸载 Xray。"
   bash -c "$(curl -LfsS https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge || true
   rm -f "${CONFIG_DIR}/xray-reality.txt"
@@ -507,6 +524,10 @@ uninstall_xray() {
 
 uninstall_hy2() {
   require_root
+  if [[ -f "${CONFIG_DIR}/.hy2_port" ]] && command -v ufw >/dev/null 2>&1; then
+    ufw delete allow "$(<"${CONFIG_DIR}/.hy2_port")/udp" >/dev/null 2>&1 || true
+    rm -f "${CONFIG_DIR}/.hy2_port"
+  fi
   log "正在卸载 Hysteria2。"
   bash <(curl -fsSL https://get.hy2.sh/) --remove || true
   rm -f "${CONFIG_DIR}/hysteria2.txt"
@@ -540,31 +561,57 @@ menu_install_hy2() {
   install_hysteria2 "${args[@]}"
 }
 
-main_menu() {
-  clear 2>/dev/null || true
-  printf '\n%sVPS 代理脚本%s\n' "$C_BOLD" "$C_RESET"
-  printf '%s一键安装 Xray Reality / Hysteria2%s\n' "$C_DIM" "$C_RESET"
-  hr
-  printf '  %s1%s  安装 Xray VLESS + REALITY\n' "$C_GREEN" "$C_RESET"
-  printf '  %s2%s  安装 Hysteria2\n' "$C_GREEN" "$C_RESET"
-  printf '  %s3%s  查看已保存的节点信息\n' "$C_CYAN" "$C_RESET"
-  printf '  %s4%s  卸载 Xray\n' "$C_YELLOW" "$C_RESET"
-  printf '  %s5%s  卸载 Hysteria2\n' "$C_YELLOW" "$C_RESET"
-  printf '  %s0%s  退出\n' "$C_DIM" "$C_RESET"
-  hr
-  warn "安装前请确认 VPS 安全组已放行对应端口。"
+service_status_label() {
+  local service="$1"
+  local binary="$2"
+
+  if systemctl is-active --quiet "$service" 2>/dev/null; then
+    printf '%s运行中%s' "$C_GREEN" "$C_RESET"
+  elif command -v "$binary" >/dev/null 2>&1; then
+    printf '%s已停止%s' "$C_RED" "$C_RESET"
+  else
+    printf '%s未安装%s' "$C_DIM" "$C_RESET"
+  fi
+}
+
+pause_menu() {
+  local ignored
   printf '\n'
-  local choice
-  read -r -p "请选择: " choice
-  case "$choice" in
-    1) menu_install_xray ;;
-    2) menu_install_hy2 ;;
-    3) show_info ;;
-    4) uninstall_xray ;;
-    5) uninstall_hy2 ;;
-    0) exit 0 ;;
-    *) die "无效选项：$choice" ;;
-  esac
+  read -r -p "按回车返回菜单..." ignored
+}
+
+main_menu() {
+  while true; do
+    clear 2>/dev/null || true
+    printf '\n%sVPS 代理脚本%s\n' "$C_BOLD" "$C_RESET"
+    printf '%s一键安装 Xray Reality / Hysteria2%s\n' "$C_DIM" "$C_RESET"
+    hr
+    printf '  %s1%s  安装 Xray VLESS + REALITY\n' "$C_GREEN" "$C_RESET"
+    printf '  %s2%s  安装 Hysteria2\n' "$C_GREEN" "$C_RESET"
+    printf '  %s3%s  查看已保存的节点信息\n' "$C_CYAN" "$C_RESET"
+    printf '  %s4%s  卸载 Xray\n' "$C_YELLOW" "$C_RESET"
+    printf '  %s5%s  卸载 Hysteria2\n' "$C_YELLOW" "$C_RESET"
+    printf '  %s0%s  退出\n' "$C_DIM" "$C_RESET"
+    hr
+    printf '当前状态\n'
+    printf '  Xray      : %b\n' "$(service_status_label xray xray)"
+    printf '  Hysteria2 : %b\n' "$(service_status_label hysteria-server hysteria)"
+    hr
+    warn "安装前请确认 VPS 安全组已放行对应端口。"
+    printf '\n'
+
+    local choice
+    read -r -p "请选择: " choice
+    case "$choice" in
+      1) menu_install_xray; pause_menu ;;
+      2) menu_install_hy2; pause_menu ;;
+      3) show_info; pause_menu ;;
+      4) uninstall_xray; pause_menu ;;
+      5) uninstall_hy2; pause_menu ;;
+      0) printf '\n再见。\n'; exit 0 ;;
+      *) warn "无效选项：$choice"; sleep 1 ;;
+    esac
+  done
 }
 
 main() {
