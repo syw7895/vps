@@ -261,7 +261,7 @@ install_xray_reality() {
         "decryption": "none"
       },
       "streamSettings": {
-        "network": "tcp",
+        "network": "raw",
         "security": "reality",
         "realitySettings": {
           "show": false,
@@ -316,7 +316,7 @@ Flow:       xtls-rprx-vision
 加密:       reality
 SNI:        ${XRAY_SNI}
 目标:       ${XRAY_TARGET}
-PublicKey:  ${public_key}
+Password:   ${public_key}
 ShortId:    ${short_id}
 Fingerprint: chrome
 
