@@ -7,8 +7,8 @@ CONFIG_DIR="/root/proxy-info"
 
 # Xray 默认参数
 XRAY_PORT="443"
-XRAY_SNI="www.microsoft.com"
-XRAY_TARGET="www.microsoft.com:443"
+XRAY_SNI="${REALITY_SERVER_NAME:-www.cloudflare.com}"
+XRAY_TARGET="${REALITY_DEST:-www.cloudflare.com:443}"
 XRAY_UUID=""
 XRAY_CONFIG="/usr/local/etc/xray/config.json"
 XRAY_INFO_FILE="${CONFIG_DIR}/xray-reality.txt"
@@ -90,8 +90,8 @@ usage() {
 
 Xray VLESS + REALITY 参数:
   --port PORT          TCP 监听端口（默认: 443）
-  --sni DOMAIN         REALITY 伪装域名（默认: www.microsoft.com）
-  --target HOST:PORT   REALITY 回落目标（默认: www.microsoft.com:443）
+  --sni DOMAIN         REALITY 伪装域名（默认: www.cloudflare.com）
+  --target HOST:PORT   REALITY 回落目标（默认: www.cloudflare.com:443）
   --uuid UUID          客户端 UUID（不填自动生成）
 
 Hysteria2 参数:
@@ -102,7 +102,7 @@ Hysteria2 参数:
 
 示例:
   bash proxy.sh xray
-  bash proxy.sh xray --port 443 --sni www.microsoft.com --target www.microsoft.com:443
+  bash proxy.sh xray --port 443 --sni www.cloudflare.com --target www.cloudflare.com:443
   bash proxy.sh hy2
   bash proxy.sh hy2 --domain example.com
   bash proxy.sh install-shortcut
@@ -596,10 +596,37 @@ prompt_default() {
   printf '%s' "${value:-$default_value}"
 }
 
+select_reality_target() {
+  local choice custom_sni custom_target
+
+  printf '\n请选择 REALITY 伪装目标:\n'
+  printf '  1  www.cloudflare.com（推荐）\n'
+  printf '  2  www.yahoo.com\n'
+  printf '  3  www.microsoft.com\n'
+  printf '  4  自定义\n'
+  read -r -p "请选择 [1]: " choice
+
+  case "${choice:-1}" in
+    1) XRAY_SNI="www.cloudflare.com"; XRAY_TARGET="www.cloudflare.com:443" ;;
+    2) XRAY_SNI="www.yahoo.com"; XRAY_TARGET="www.yahoo.com:443" ;;
+    3) XRAY_SNI="www.microsoft.com"; XRAY_TARGET="www.microsoft.com:443" ;;
+    4)
+      custom_sni="$(prompt_default '自定义 REALITY SNI' "$XRAY_SNI")"
+      custom_target="$(prompt_default '自定义 REALITY 回落目标 host:port' "${custom_sni}:443")"
+      XRAY_SNI="$custom_sni"
+      XRAY_TARGET="$custom_target"
+      ;;
+    *)
+      warn "无效选择，使用默认 Cloudflare。"
+      XRAY_SNI="www.cloudflare.com"
+      XRAY_TARGET="www.cloudflare.com:443"
+      ;;
+  esac
+}
+
 menu_install_xray() {
   XRAY_PORT="$(prompt_default 'Xray TCP 端口' "$XRAY_PORT")"
-  XRAY_SNI="$(prompt_default 'REALITY 伪装域名 SNI' "$XRAY_SNI")"
-  XRAY_TARGET="$(prompt_default 'REALITY 回落目标' "$XRAY_TARGET")"
+  select_reality_target
   install_xray_reality --port "$XRAY_PORT" --sni "$XRAY_SNI" --target "$XRAY_TARGET"
 }
 
