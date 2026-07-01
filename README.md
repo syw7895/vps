@@ -37,8 +37,9 @@ bash proxy.sh uninstall-v2
 
 - 请使用 `root` 用户运行。
 - 支持 Debian 11+、Debian 12+、Ubuntu 22.04+、Ubuntu 24.04+。
-- Xray Reality 使用 TCP。
+- Xray Reality 使用 TCP，默认伪装目标为 `www.cloudflare.com:443`。
 - Hysteria2 使用 UDP，默认会随机生成端口。
 - 如果 VPS 服务商有安全组或外部防火墙，请放行脚本显示的对应端口。
 - 测试新节点前，请先不要关闭当前 SSH 连接。
+- 安装 Xray 时可选择 Reality 伪装目标：Cloudflare、Yahoo、Microsoft 或自定义。
 - 脚本已改为“先下载远程安装器再执行”，并支持通过 `XRAY_INSTALLER_SHA256`、`HY2_INSTALLER_SHA256` 启用哈希校验（留空为不校验）。
