@@ -1,0 +1,22 @@
+name: Shell Script Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Check shell syntax
+        run: bash -n proxy.sh tests/test_proxy.sh
+      - name: Run ShellCheck
+        run: shellcheck -x proxy.sh tests/test_proxy.sh
+      - name: Run behavior tests
+        run: bash tests/test_proxy.sh
