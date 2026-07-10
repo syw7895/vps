@@ -86,7 +86,7 @@ usage() {
   bash proxy.sh show
   bash proxy.sh uninstall-xray
   bash proxy.sh uninstall-hy2
-  bash proxy.sh uninstall-v2
+  bash proxy.sh uninstall-v2       # 仅删除 v2 快捷命令
 
 Xray VLESS + REALITY 参数:
   --port PORT          TCP 监听端口（默认: 443）
@@ -179,7 +179,9 @@ validate_port() {
 
 validate_target() {
   local target="$1"
-  [[ "$target" =~ ^[^:]+:[0-9]+$ ]] || fail "target 格式错误，应为 host:port，例如 www.microsoft.com:443"
+  [[ "$target" =~ ^[^:[:space:]]+:[0-9]+$ ]] || \
+    fail "target 格式错误，应为 host:port，例如 www.cloudflare.com:443"
+  validate_port "${target##*:}"
 }
 
 validate_domain() {
@@ -235,6 +237,11 @@ random_uuid() {
   fi
 }
 
+require_arg_value() {
+  local option="$1" value="${2:-}"
+  [[ -n "$value" && "$value" != --* ]] || fail "${option} 后面需要填写参数值。"
+}
+
 open_firewall_tcp() {
   local port="$1"
   if command -v ufw >/dev/null 2>&1; then
@@ -284,10 +291,10 @@ show_journal() {
 parse_xray_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --port) XRAY_PORT="${2:-}"; shift 2 ;;
-      --sni) XRAY_SNI="${2:-}"; shift 2 ;;
-      --target) XRAY_TARGET="${2:-}"; shift 2 ;;
-      --uuid) XRAY_UUID="${2:-}"; shift 2 ;;
+      --port) require_arg_value "$1" "${2:-}"; XRAY_PORT="$2"; shift 2 ;;
+      --sni) require_arg_value "$1" "${2:-}"; XRAY_SNI="$2"; shift 2 ;;
+      --target) require_arg_value "$1" "${2:-}"; XRAY_TARGET="$2"; shift 2 ;;
+      --uuid) require_arg_value "$1" "${2:-}"; XRAY_UUID="$2"; shift 2 ;;
       --help|-h) usage; exit 0 ;;
       *) fail "未知 Xray 参数：$1" ;;
     esac
@@ -297,10 +304,10 @@ parse_xray_args() {
 parse_hy2_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --port) HY2_PORT="${2:-}"; HY2_PORT_SET_BY_USER="1"; shift 2 ;;
-      --password) HY2_PASSWORD="${2:-}"; shift 2 ;;
-      --domain) HY2_DOMAIN="${2:-}"; shift 2 ;;
-      --masquerade) HY2_MASQUERADE="${2:-}"; shift 2 ;;
+      --port) require_arg_value "$1" "${2:-}"; HY2_PORT="$2"; HY2_PORT_SET_BY_USER="1"; shift 2 ;;
+      --password) require_arg_value "$1" "${2:-}"; HY2_PASSWORD="$2"; shift 2 ;;
+      --domain) require_arg_value "$1" "${2:-}"; HY2_DOMAIN="$2"; shift 2 ;;
+      --masquerade) require_arg_value "$1" "${2:-}"; HY2_MASQUERADE="$2"; shift 2 ;;
       --help|-h) usage; exit 0 ;;
       *) fail "未知 Hysteria2 参数：$1" ;;
     esac
@@ -568,6 +575,18 @@ uninstall_hy2() {
   fi
 }
 
+uninstall_v2_shortcut() {
+  local target_path="/usr/local/bin/v2"
+
+  require_root
+  if [[ -e "$target_path" || -L "$target_path" ]]; then
+    rm -f "$target_path"
+    ok "已删除 v2 快捷命令。"
+  else
+    warn "v2 快捷命令不存在，无需删除。"
+  fi
+}
+
 install_v2_shortcut() {
   require_root
 
@@ -602,7 +621,7 @@ select_reality_target() {
   printf '\n请选择 REALITY 伪装目标:\n'
   printf '  1  www.cloudflare.com（推荐）\n'
   printf '  2  www.yahoo.com\n'
-  printf '  3  www.microsoft.com\n'
+  printf '  3  www.microsoft.com（部分地区可能不稳定）\n'
   printf '  4  自定义\n'
   read -r -p "请选择 [1]: " choice
 
@@ -641,12 +660,12 @@ menu_install_hy2() {
 
 main_menu() {
   clear 2>/dev/null || true
-  printf '\n%sVPS 代理脚本%s\n' "$C_BOLD" "$C_RESET"
-  printf '%s一键安装 Xray Reality / Hysteria2%s\n' "$C_DIM" "$C_RESET"
+  printf '\n%sVPS 代理控制面板%s\n' "$C_BOLD" "$C_RESET"
+  printf '%sXray Reality · Hysteria2 · 输入 v2 随时进入此菜单%s\n' "$C_DIM" "$C_RESET"
   hr
   printf '  %s1%s  安装 Xray VLESS + REALITY\n' "$C_GREEN" "$C_RESET"
   printf '  %s2%s  安装 Hysteria2\n' "$C_GREEN" "$C_RESET"
-  printf '  %s3%s  查看节点信息与状态\n' "$C_CYAN" "$C_RESET"
+  printf '  %s3%s  查看节点信息与服务状态\n' "$C_CYAN" "$C_RESET"
   printf '  %s4%s  卸载 Xray\n' "$C_YELLOW" "$C_RESET"
   printf '  %s5%s  卸载 Hysteria2\n' "$C_YELLOW" "$C_RESET"
   printf '  %s0%s  退出\n' "$C_DIM" "$C_RESET"
@@ -700,15 +719,18 @@ main() {
 
   case "$cmd" in
     menu|v2) ensure_v2_shortcut_auto; main_menu ;;
-    xray) install_xray_reality "$@" ;;
-    hy2|hysteria2) install_hysteria2 "$@" ;;
+    xray) install_xray_reality "$@"; ensure_v2_shortcut_auto ;;
+    hy2|hysteria2) install_hysteria2 "$@"; ensure_v2_shortcut_auto ;;
     install-shortcut|shortcut) install_v2_shortcut ;;
     show) show_info ;;
     uninstall-xray) uninstall_xray ;;
-    uninstall-hy2|uninstall-hysteria2|uninstall-v2) uninstall_hy2 ;;
+    uninstall-hy2|uninstall-hysteria2) uninstall_hy2 ;;
+    uninstall-v2|uninstall-shortcut|uninstall-v2-shortcut) uninstall_v2_shortcut ;;
     --help|-h|help) usage ;;
     *) fail "未知命令：${cmd}" ;;
   esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
