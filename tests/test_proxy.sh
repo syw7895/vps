@@ -51,7 +51,33 @@ test_command_routing() {
     ensure_v2_shortcut_auto() { printf "shortcut\n"; }
     main xray
   ' bash "$SCRIPT")"
-  [[ "$output" == $'xray\nshortcut' ]] || fail_test 'xray install must add the v2 shortcut after success'
+  [[ "$output" == 
+
+test_argument_errors
+test_command_routing
+printf 'All proxy.sh tests passed.\n'
+xray\nshortcut' ]] || fail_test 'xray install must add the v2 shortcut after success'
+
+  output="$(bash -c '
+    source "$1"
+    install_hysteria2() { printf "hy2\n"; }
+    ensure_v2_shortcut_auto() { printf "shortcut\n"; }
+    main hy2
+  ' bash "$SCRIPT")"
+  [[ "$output" == 
+
+test_argument_errors
+test_command_routing
+printf 'All proxy.sh tests passed.\n'
+hy2\nshortcut' ]] || fail_test 'hy2 install must add the v2 shortcut after success'
+
+  output="$(bash -c '
+    source "$1"
+    uninstall_hy2() { printf "hy2\n"; }
+    uninstall_v2_shortcut() { printf "v2\n"; }
+    main uninstall-hy2
+  ' bash "$SCRIPT")"
+  [[ "$output" == "hy2" ]] || fail_test 'uninstall-hy2 must keep its service uninstall behavior'
 }
 
 test_argument_errors
