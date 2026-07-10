@@ -14,6 +14,11 @@ assert_contains() {
   [[ "$text" == *"$expected"* ]] || fail_test "expected output to contain: ${expected}"
 }
 
+assert_equals() {
+  local actual="$1" expected="$2"
+  [[ "$actual" == "$expected" ]] || fail_test "unexpected output: ${actual}"
+}
+
 expect_function_failure() {
   local expected="$1"
   shift
@@ -35,7 +40,7 @@ test_argument_errors() {
 }
 
 test_command_routing() {
-  local output
+  local output expected
 
   output="$(bash -c '
     source "$1"
@@ -43,7 +48,7 @@ test_command_routing() {
     uninstall_v2_shortcut() { printf "v2\n"; }
     main uninstall-v2
   ' bash "$SCRIPT")"
-  [[ "$output" == "v2" ]] || fail_test 'uninstall-v2 must only remove the v2 shortcut'
+  assert_equals "$output" "v2"
 
   output="$(bash -c '
     source "$1"
@@ -51,12 +56,8 @@ test_command_routing() {
     ensure_v2_shortcut_auto() { printf "shortcut\n"; }
     main xray
   ' bash "$SCRIPT")"
-  [[ "$output" == 
-
-test_argument_errors
-test_command_routing
-printf 'All proxy.sh tests passed.\n'
-xray\nshortcut' ]] || fail_test 'xray install must add the v2 shortcut after success'
+  expected="$(printf 'xray\nshortcut')"
+  assert_equals "$output" "$expected"
 
   output="$(bash -c '
     source "$1"
@@ -64,12 +65,8 @@ xray\nshortcut' ]] || fail_test 'xray install must add the v2 shortcut after suc
     ensure_v2_shortcut_auto() { printf "shortcut\n"; }
     main hy2
   ' bash "$SCRIPT")"
-  [[ "$output" == 
-
-test_argument_errors
-test_command_routing
-printf 'All proxy.sh tests passed.\n'
-hy2\nshortcut' ]] || fail_test 'hy2 install must add the v2 shortcut after success'
+  expected="$(printf 'hy2\nshortcut')"
+  assert_equals "$output" "$expected"
 
   output="$(bash -c '
     source "$1"
@@ -77,7 +74,7 @@ hy2\nshortcut' ]] || fail_test 'hy2 install must add the v2 shortcut after succe
     uninstall_v2_shortcut() { printf "v2\n"; }
     main uninstall-hy2
   ' bash "$SCRIPT")"
-  [[ "$output" == "hy2" ]] || fail_test 'uninstall-hy2 must keep its service uninstall behavior'
+  assert_equals "$output" "hy2"
 }
 
 test_argument_errors
