@@ -69,19 +69,24 @@ test_port_reinstall_guard() {
 }
 
 test_download_helpers() {
-  source "$SCRIPT"
-
-  local temp_file actual_sha
+  local temp_file actual_sha output status
   temp_file="$(mktemp)"
   printf 'fixture' >"$temp_file"
   actual_sha="$(sha256sum "$temp_file" | awk '{print $1}')"
 
-  sha256_matches "$temp_file" "" || fail_test "empty hash should allow the file"
-  sha256_matches "$temp_file" "$actual_sha" || fail_test "matching hash was rejected"
-  if sha256_matches "$temp_file" "0000000000000000000000000000000000000000000000000000000000000000"; then
-    fail_test "mismatched hash was accepted"
-  fi
+  set +e
+  output="$(bash -c '
+    source "$1"
+    sha256_matches "$2" "" &&
+      sha256_matches "$2" "$3" &&
+      ! sha256_matches "$2" "$4"
+  ' bash "$SCRIPT" "$temp_file" "$actual_sha"     "0000000000000000000000000000000000000000000000000000000000000000" 2>&1)"
+  status=$?
+  set -e
+
   rm -f "$temp_file"
+  (( status == 0 )) || fail_test "hash helper test failed: ${output}"
+  assert_equals "$output" ""
 }
 
 test_v2_download_failure_is_soft() {
@@ -129,15 +134,23 @@ test_firewall_and_status_helpers() {
 test_certificate_fingerprint() {
   local temp_dir fingerprint
   temp_dir="$(mktemp -d)"
+  cat >"${temp_dir}/openssl.cnf" <<'EOF'
+[req]
+distinguished_name = subject
+prompt = no
+
+[subject]
+CN = test.example.com
+EOF
   openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
     -keyout "${temp_dir}/key.pem" -out "${temp_dir}/cert.pem" \
-    -days 1 -subj "/CN=test.example.com" >/dev/null 2>&1
+    -days 1 -config "${temp_dir}/openssl.cnf" >/dev/null 2>&1
 
   fingerprint="$(bash -c 'source "$1"; hy2_certificate_sha256 "$2"' \
     bash "$SCRIPT" "${temp_dir}/cert.pem")"
   assert_matches "$fingerprint" '^[0-9a-f]{64}$'
 
-  rm -f "${temp_dir}/key.pem" "${temp_dir}/cert.pem"
+  rm -f "${temp_dir}/key.pem" "${temp_dir}/cert.pem" "${temp_dir}/openssl.cnf"
   rmdir "$temp_dir"
 }
 
