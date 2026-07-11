@@ -102,14 +102,17 @@ test_v2_download_failure_is_soft() {
 }
 
 test_firewall_and_status_helpers() {
-  local output
+  local output temp_file
+  temp_file="$(mktemp)"
 
-  output="$(bash -c '
+  bash -c '
     source "$1"
-    ufw() { printf "%s\n" "$*"; }
+    ufw() { printf "%s\n" "$*" >"$2"; }
     open_firewall_port 443 tcp
-  ' bash "$SCRIPT")"
+  ' bash "$SCRIPT" "$temp_file"
+  output="$(<"$temp_file")"
   assert_equals "$output" "allow 443/tcp"
+  rm -f "$temp_file"
 
   output="$(bash -c '
     source "$1"
