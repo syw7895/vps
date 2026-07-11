@@ -23,14 +23,17 @@ HY2_CONFIG="/etc/hysteria/config.yaml"
 HY2_CERT_DIR="/etc/hysteria/certs"
 HY2_INFO_FILE="${CONFIG_DIR}/hysteria2.txt"
 
-# 远程安装脚本地址（可按需固定版本）
-XRAY_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
-HY2_INSTALLER_URL="https://get.hy2.sh/"
+# 远程脚本地址与可选哈希；固定版本时请同时设置 URL 和 SHA256
+XRAY_INSTALLER_URL="${XRAY_INSTALLER_URL:-https://github.com/XTLS/Xray-install/raw/main/install-release.sh}"
+HY2_INSTALLER_URL="${HY2_INSTALLER_URL:-https://get.hy2.sh/}"
+XRAY_INSTALLER_SHA256="${XRAY_INSTALLER_SHA256:-}"
+HY2_INSTALLER_SHA256="${HY2_INSTALLER_SHA256:-}"
 
-# 可选：固定脚本哈希，留空表示仅下载后执行
-# 例如：XRAY_INSTALLER_SHA256="<sha256>"
-XRAY_INSTALLER_SHA256=""
-HY2_INSTALLER_SHA256=""
+V2_SCRIPT_URL="${V2_SCRIPT_URL:-https://raw.githubusercontent.com/syw7895/vps/main/proxy.sh}"
+V2_SCRIPT_SHA256="${V2_SCRIPT_SHA256:-}"
+V2_INSTALL_DIR="/usr/local/lib/vps-proxy"
+V2_SCRIPT_PATH="${V2_INSTALL_DIR}/proxy.sh"
+V2_COMMAND_PATH="/usr/local/bin/v2"
 
 # 默认大厂域名池（HY2 留空时随机）
 BIG_TECH_DOMAINS=(
@@ -192,7 +195,35 @@ validate_domain() {
 
 is_port_in_use() {
   local port="$1"
-  ss -tuln 2>/dev/null | grep -qE "[\.\:]{1}${port}[[:space:]]"
+  ss -tuln 2>/dev/null | grep -qE ":${port}[[:space:]]"
+}
+
+service_owns_port() {
+  local service="$1" port="$2"
+
+  systemctl is-active --quiet "$service" 2>/dev/null || return 1
+  case "$service" in
+    xray)
+      [[ -r "$XRAY_CONFIG" ]] &&
+        grep -qE "\"port\"[[:space:]]*:[[:space:]]*${port}([[:space:]]*,|[[:space:]]*$)" "$XRAY_CONFIG"
+      ;;
+    hysteria-server)
+      [[ -r "$HY2_CONFIG" ]] &&
+        grep -qE "^[[:space:]]*listen:[[:space:]]*:${port}[[:space:]]*(#.*)?$" "$HY2_CONFIG"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+ensure_port_available() {
+  local port="$1" service="$2" label="$3"
+
+  is_port_in_use "$port" || return 0
+  if service_owns_port "$service" "$port"; then
+    warn "${label} 正在使用端口 ${port}，允许原端口更新。"
+    return 0
+  fi
+  fail "端口已被其他程序占用：${port}"
 }
 
 random_free_port() {
@@ -341,9 +372,7 @@ install_xray_reality() {
   validate_port "$XRAY_PORT"
   validate_target "$XRAY_TARGET"
   validate_domain "$XRAY_SNI"
-  if is_port_in_use "$XRAY_PORT"; then
-    fail "Xray 端口已被占用：${XRAY_PORT}"
-  fi
+  ensure_port_available "$XRAY_PORT" xray "Xray"
 
   install_xray_core
   [[ -n "$XRAY_UUID" ]] || XRAY_UUID="$(random_uuid)"
@@ -431,6 +460,7 @@ EOF
 # ===== Hysteria2 安装 =====
 install_hysteria_core() {
   log "安装或更新 Hysteria2..."
+  # Hysteria2 官方安装器通过该变量确定服务运行用户。
   HYSTERIA_USER=root run_remote_script "$HY2_INSTALLER_URL" "$HY2_INSTALLER_SHA256"
   command -v hysteria >/dev/null 2>&1 || fail "Hysteria2 安装失败。"
 }
@@ -438,14 +468,25 @@ install_hysteria_core() {
 write_hy2_self_signed_cert() {
   local cert_dir="$1" cn="$2"
   install -d -m 700 "$cert_dir"
-  openssl req -x509 -newkey rsa:2048 \
+  openssl req -x509 -newkey rsa:2048 -sha256 \
     -keyout "${cert_dir}/server.key" \
     -out "${cert_dir}/server.crt" \
     -days 3650 \
     -nodes \
-    -subj "/CN=${cn}" >/dev/null 2>&1
+    -subj "/CN=${cn}" \
+    -addext "subjectAltName=DNS:${cn}" >/dev/null 2>&1
   chmod 600 "${cert_dir}/server.key"
   chmod 644 "${cert_dir}/server.crt"
+}
+
+hy2_certificate_sha256() {
+  local cert_file="$1" fingerprint
+  fingerprint="$(openssl x509 -in "$cert_file" -noout -fingerprint -sha256 |
+    awk -F= 'NF > 1 {print $2; exit}' |
+    tr -d ':' |
+    tr '[:upper:]' '[:lower:]')"
+  [[ "$fingerprint" =~ ^[0-9a-f]{64}$ ]] || fail "无法读取 Hysteria2 证书 SHA256 指纹。"
+  printf '%s' "$fingerprint"
 }
 
 install_hysteria2() {
@@ -458,9 +499,7 @@ install_hysteria2() {
 
   if [[ "$HY2_PORT_SET_BY_USER" == "1" ]]; then
     validate_port "$HY2_PORT"
-    if is_port_in_use "$HY2_PORT"; then
-      fail "Hysteria2 端口已被占用：${HY2_PORT}"
-    fi
+    ensure_port_available "$HY2_PORT" hysteria-server "Hysteria2"
   else
     HY2_PORT="$(random_free_port)"
     log "未指定 Hysteria2 端口，已随机分配：${HY2_PORT}"
@@ -477,7 +516,7 @@ install_hysteria2() {
   [[ -n "$HY2_PASSWORD" ]] || HY2_PASSWORD="$(random_password)"
   install_hysteria_core
 
-  local ip sni link
+  local ip sni link cert_sha256
   ip="$(server_ip)"
   sni="${HY2_DOMAIN}"
 
@@ -485,6 +524,7 @@ install_hysteria2() {
   title "Hysteria2"
   log "写入 Hysteria2 自签证书配置..."
   write_hy2_self_signed_cert "$HY2_CERT_DIR" "$HY2_DOMAIN"
+  cert_sha256="$(hy2_certificate_sha256 "${HY2_CERT_DIR}/server.crt")"
 
   cat >"$HY2_CONFIG" <<EOF
 listen: :${HY2_PORT}
@@ -508,7 +548,7 @@ EOF
   systemctl restart hysteria-server.service
   open_firewall_udp "$HY2_PORT"
 
-  link="hysteria2://${HY2_PASSWORD}@${ip}:${HY2_PORT}/?sni=${sni}&insecure=1#Hysteria2-${ip}"
+  link="hysteria2://${HY2_PASSWORD}@${ip}:${HY2_PORT}/?sni=${sni}&insecure=1&pinSHA256=${cert_sha256}#Hysteria2-${ip}"
   cat >"$HY2_INFO_FILE" <<EOF
 Hysteria2
 
@@ -516,7 +556,8 @@ Hysteria2
 端口:       ${HY2_PORT}
 密码:       ${HY2_PASSWORD}
 SNI:        ${sni}
-TLS 模式:   自签证书
+TLS 模式:   自签证书 + SHA256 指纹校验
+证书指纹:   ${cert_sha256}
 协议:       UDP
 
 分享链接:
@@ -576,33 +617,71 @@ uninstall_hy2() {
 }
 
 uninstall_v2_shortcut() {
-  local target_path="/usr/local/bin/v2"
-
   require_root
-  if [[ -e "$target_path" || -L "$target_path" ]]; then
-    rm -f "$target_path"
+
+  if [[ -e "$V2_COMMAND_PATH" || -L "$V2_COMMAND_PATH" || -e "$V2_SCRIPT_PATH" ]]; then
+    rm -f "$V2_COMMAND_PATH" "$V2_SCRIPT_PATH"
+    rmdir "$V2_INSTALL_DIR" 2>/dev/null || true
     ok "已删除 v2 快捷命令。"
   else
     warn "v2 快捷命令不存在，无需删除。"
   fi
 }
 
-install_v2_shortcut() {
-  require_root
+install_v2_local_copy() {
+  local source_path="$1" resolved_source resolved_target
+  install -d -m 755 "$V2_INSTALL_DIR"
+  resolved_source="$(readlink -f "$source_path")"
+  resolved_target="$(readlink -f "$V2_SCRIPT_PATH" 2>/dev/null || true)"
 
-  local source_path target_path script_url
+  if [[ "$resolved_source" != "$resolved_target" ]]; then
+    install -m 755 "$source_path" "$V2_SCRIPT_PATH"
+  else
+    chmod 755 "$V2_SCRIPT_PATH"
+  fi
+  ln -sfn "$V2_SCRIPT_PATH" "$V2_COMMAND_PATH"
+}
+
+download_v2_local_copy() {
+  local temp_file actual_sha
+  temp_file="$(mktemp /tmp/${APP_NAME}.v2.XXXXXX.sh)"
+
+  if ! curl -fL --retry 3 --connect-timeout 10 --max-time 120 -o "$temp_file" "$V2_SCRIPT_URL"; then
+    rm -f "$temp_file"
+    return 1
+  fi
+  if [[ ! -s "$temp_file" ]]; then
+    rm -f "$temp_file"
+    return 1
+  fi
+
+  if [[ -n "$V2_SCRIPT_SHA256" ]]; then
+    actual_sha="$(sha256sum "$temp_file" | awk '{print $1}')"
+    if [[ "$actual_sha" != "$V2_SCRIPT_SHA256" ]]; then
+      rm -f "$temp_file"
+      return 1
+    fi
+  fi
+
+  install_v2_local_copy "$temp_file"
+  rm -f "$temp_file"
+}
+
+install_v2_shortcut_files() {
+  local source_path
   source_path="$(readlink -f "$0" 2>/dev/null || true)"
-  target_path="/usr/local/bin/v2"
-  script_url="https://raw.githubusercontent.com/syw7895/vps/main/proxy.sh"
 
   if [[ -n "$source_path" && -f "$source_path" && "$source_path" != /dev/fd/* ]]; then
-    chmod +x "$source_path"
-    ln -sf "$source_path" "$target_path"
+    install_v2_local_copy "$source_path"
   else
-    log "检测到在线执行模式，改为下载最新脚本安装快捷命令..."
-    curl -fL --retry 3 --connect-timeout 10 --max-time 120 -o "$target_path" "$script_url"
-    chmod 755 "$target_path"
+    log "检测到在线执行模式，下载脚本到固定本地路径..."
+    download_v2_local_copy
   fi
+}
+
+install_v2_shortcut() {
+  require_root
+  install_v2_shortcut_files || fail "安装 v2 快捷命令失败。"
 
   ok "已安装快捷命令：v2"
   log "现在可直接输入：v2"
@@ -689,27 +768,15 @@ main_menu() {
 }
 
 ensure_v2_shortcut_auto() {
-  local target_path script_url source_path
-  target_path="/usr/local/bin/v2"
-  script_url="https://raw.githubusercontent.com/syw7895/vps/main/proxy.sh"
-
   if [[ "${EUID}" -ne 0 ]]; then
     warn "当前非 root，已跳过自动安装 v2 快捷命令。"
     return 0
   fi
 
-  source_path="$(readlink -f "$0" 2>/dev/null || true)"
-  if [[ -n "$source_path" && -f "$source_path" && "$source_path" != /dev/fd/* ]]; then
-    chmod +x "$source_path" || { warn "自动安装 v2 失败：无法设置执行权限。"; return 0; }
-    ln -sf "$source_path" "$target_path" || { warn "自动安装 v2 失败：无法创建快捷命令。"; return 0; }
-  else
-    curl -fL --retry 3 --connect-timeout 10 --max-time 120 -o "$target_path" "$script_url" || {
-      warn "自动安装 v2 失败：下载脚本失败。"
-      return 0
-    }
-    chmod 755 "$target_path" || { warn "自动安装 v2 失败：无法设置执行权限。"; return 0; }
+  if ! install_v2_shortcut_files; then
+    warn "自动安装 v2 失败，现有代理服务不受影响。"
+    return 0
   fi
-
   ok "已自动安装快捷命令：v2"
 }
 
