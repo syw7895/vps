@@ -86,7 +86,7 @@ test_certificate_fingerprint() {
 test_hy2_link_pinning() {
   local source_text
   source_text="$(<"$SCRIPT")"
-  assert_contains "$source_text" 'pinSHA256=${cert_sha256}'
+  assert_contains "$source_text" "pinSHA256=\${cert_sha256}"
 }
 
 test_command_routing() {
