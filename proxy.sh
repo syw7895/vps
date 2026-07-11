@@ -143,19 +143,28 @@ ensure_dirs() {
   install -d -m 700 "$CONFIG_DIR"
 }
 
-download_remote_script() {
+curl_download() {
   local url="$1" out="$2"
-  curl -fL --retry 3 --connect-timeout 10 --max-time 120 -o "$out" "$url"
-  [[ -s "$out" ]] || fail "下载安装脚本失败：${url}"
+  curl -fL --retry 3 --connect-timeout 10 --max-time 120 -o "$out" "$url" &&
+    [[ -s "$out" ]]
 }
 
-verify_script_sha256() {
+sha256_matches() {
   local file="$1" expected="$2"
   [[ -z "$expected" ]] && return 0
 
   local actual
   actual="$(sha256sum "$file" | awk '{print $1}')"
-  [[ "$actual" == "$expected" ]] || fail "安装脚本哈希校验失败。"
+  [[ "$actual" == "$expected" ]]
+}
+
+download_remote_script() {
+  local url="$1" out="$2"
+  curl_download "$url" "$out" || fail "下载安装脚本失败：${url}"
+}
+
+verify_script_sha256() {
+  sha256_matches "$1" "$2" || fail "安装脚本哈希校验失败。"
 }
 
 run_remote_script() {
@@ -201,6 +210,7 @@ is_port_in_use() {
 service_owns_port() {
   local service="$1" port="$2"
 
+  # Only recognize the standard configuration files written by this script.
   systemctl is-active --quiet "$service" 2>/dev/null || return 1
   case "$service" in
     xray)
@@ -273,17 +283,10 @@ require_arg_value() {
   [[ -n "$value" && "$value" != --* ]] || fail "${option} 后面需要填写参数值。"
 }
 
-open_firewall_tcp() {
-  local port="$1"
+open_firewall_port() {
+  local port="$1" protocol="$2"
   if command -v ufw >/dev/null 2>&1; then
-    ufw allow "${port}/tcp" >/dev/null || true
-  fi
-}
-
-open_firewall_udp() {
-  local port="$1"
-  if command -v ufw >/dev/null 2>&1; then
-    ufw allow "${port}/udp" >/dev/null || true
+    ufw allow "${port}/${protocol}" >/dev/null || true
   fi
 }
 
@@ -309,6 +312,11 @@ service_status_label() {
     stopped) printf '%s• 已停止%s' "$C_YELLOW" "$C_RESET" ;;
     missing) printf '%s- 未安装%s' "$C_DIM" "$C_RESET" ;;
   esac
+}
+
+print_service_statuses() {
+  printf '%-10s: %b\n' "Xray" "$(service_status_label xray xray)"
+  printf '%-10s: %b\n' "Hysteria2" "$(service_status_label hysteria-server hysteria)"
 }
 
 show_journal() {
@@ -433,7 +441,7 @@ EOF
   xray run -test -config "$XRAY_CONFIG"
   systemctl enable xray >/dev/null 2>&1
   systemctl restart xray
-  open_firewall_tcp "$XRAY_PORT"
+  open_firewall_port "$XRAY_PORT" tcp
 
   link="vless://${XRAY_UUID}@${ip}:${XRAY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${XRAY_SNI}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#Xray-Reality-${ip}"
   cat >"$XRAY_INFO_FILE" <<EOF
@@ -453,6 +461,7 @@ ${link}
 EOF
 
   ok "Xray Reality 已安装并启动。"
+  warn "请确认 VPS 安全组和防火墙已放行 ${XRAY_PORT}/tcp。"
   printf '\n'
   cat "$XRAY_INFO_FILE"
 }
@@ -546,7 +555,7 @@ EOF
 
   systemctl enable hysteria-server.service >/dev/null 2>&1
   systemctl restart hysteria-server.service
-  open_firewall_udp "$HY2_PORT"
+  open_firewall_port "$HY2_PORT" udp
 
   link="hysteria2://${HY2_PASSWORD}@${ip}:${HY2_PORT}/?sni=${sni}&insecure=1&pinSHA256=${cert_sha256}#Hysteria2-${ip}"
   cat >"$HY2_INFO_FILE" <<EOF
@@ -565,6 +574,7 @@ ${link}
 EOF
 
   ok "Hysteria2 已安装并启动。"
+  warn "请确认 VPS 安全组和防火墙已放行 ${HY2_PORT}/udp。"
   printf '\n'
   cat "$HY2_INFO_FILE"
 }
@@ -574,21 +584,18 @@ show_info() {
   title "已保存的节点信息"
   local found="0"
 
-  if [[ -f "$XRAY_INFO_FILE" ]]; then
-    found="1"
-    cat "$XRAY_INFO_FILE"
-    printf '\n'
-  fi
-  if [[ -f "$HY2_INFO_FILE" ]]; then
-    found="1"
-    cat "$HY2_INFO_FILE"
-    printf '\n'
-  fi
+  local info_file
+  for info_file in "$XRAY_INFO_FILE" "$HY2_INFO_FILE"; do
+    if [[ -f "$info_file" ]]; then
+      found="1"
+      cat "$info_file"
+      printf '\n'
+    fi
+  done
   [[ "$found" == "1" ]] || log "暂无已保存节点信息。"
 
   title "服务状态"
-  printf 'Xray      : %b\n' "$(service_status_label xray xray)"
-  printf 'Hysteria2 : %b\n' "$(service_status_label hysteria-server hysteria)"
+  print_service_statuses
 
   show_journal xray "Xray"
   show_journal hysteria-server "Hysteria2"
@@ -643,28 +650,18 @@ install_v2_local_copy() {
 }
 
 download_v2_local_copy() {
-  local temp_file actual_sha
+  local temp_file rc=0
   temp_file="$(mktemp /tmp/${APP_NAME}.v2.XXXXXX.sh)"
 
-  if ! curl -fL --retry 3 --connect-timeout 10 --max-time 120 -o "$temp_file" "$V2_SCRIPT_URL"; then
-    rm -f "$temp_file"
-    return 1
-  fi
-  if [[ ! -s "$temp_file" ]]; then
+  if ! curl_download "$V2_SCRIPT_URL" "$temp_file" ||
+    ! sha256_matches "$temp_file" "$V2_SCRIPT_SHA256"; then
     rm -f "$temp_file"
     return 1
   fi
 
-  if [[ -n "$V2_SCRIPT_SHA256" ]]; then
-    actual_sha="$(sha256sum "$temp_file" | awk '{print $1}')"
-    if [[ "$actual_sha" != "$V2_SCRIPT_SHA256" ]]; then
-      rm -f "$temp_file"
-      return 1
-    fi
-  fi
-
-  install_v2_local_copy "$temp_file"
+  install_v2_local_copy "$temp_file" || rc=$?
   rm -f "$temp_file"
+  return "$rc"
 }
 
 install_v2_shortcut_files() {
@@ -749,8 +746,7 @@ main_menu() {
   printf '  %s5%s  卸载 Hysteria2\n' "$C_YELLOW" "$C_RESET"
   printf '  %s0%s  退出\n' "$C_DIM" "$C_RESET"
   hr
-  printf 'Xray      : %b\n' "$(service_status_label xray xray)"
-  printf 'Hysteria2 : %b\n' "$(service_status_label hysteria-server hysteria)"
+  print_service_statuses
   hr
   warn "安装前请确认安全组已放行对应端口。"
 
