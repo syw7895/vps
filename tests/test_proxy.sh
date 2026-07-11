@@ -69,6 +69,8 @@ test_port_reinstall_guard() {
 }
 
 test_download_helpers() {
+  source "$SCRIPT"
+
   local temp_file actual_sha
   temp_file="$(mktemp)"
   printf 'fixture' >"$temp_file"
