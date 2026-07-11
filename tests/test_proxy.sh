@@ -109,7 +109,8 @@ test_firewall_and_status_helpers() {
 
   bash -c '
     source "$1"
-    ufw() { printf "%s\n" "$*" >"$2"; }
+    output_file="$2"
+    ufw() { printf "%s\n" "$*" >"$output_file"; }
     open_firewall_port 443 tcp
   ' bash "$SCRIPT" "$temp_file"
   output="$(<"$temp_file")"
