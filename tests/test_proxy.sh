@@ -68,6 +68,58 @@ test_port_reinstall_guard() {
   assert_contains "$output" "端口已被其他程序占用：443"
 }
 
+test_download_helpers() {
+  local temp_file actual_sha
+  temp_file="$(mktemp)"
+  printf 'fixture' >"$temp_file"
+  actual_sha="$(sha256sum "$temp_file" | awk '{print $1}')"
+
+  sha256_matches "$temp_file" "" || fail_test "empty hash should allow the file"
+  sha256_matches "$temp_file" "$actual_sha" || fail_test "matching hash was rejected"
+  if sha256_matches "$temp_file" "0000000000000000000000000000000000000000000000000000000000000000"; then
+    fail_test "mismatched hash was accepted"
+  fi
+  rm -f "$temp_file"
+}
+
+test_v2_download_failure_is_soft() {
+  local temp_dir output
+  temp_dir="$(mktemp -d)"
+  output="$(bash -c '
+    source "$1"
+    V2_INSTALL_DIR="$2/v2"
+    V2_SCRIPT_PATH="$V2_INSTALL_DIR/proxy.sh"
+    V2_COMMAND_PATH="$2/v2-command"
+    curl_download() { return 1; }
+    if download_v2_local_copy; then
+      exit 1
+    fi
+    [[ ! -e "$V2_SCRIPT_PATH" ]]
+  ' bash "$SCRIPT" "$temp_dir")"
+  assert_equals "$output" ""
+
+  rmdir "$temp_dir"
+}
+
+test_firewall_and_status_helpers() {
+  local output
+
+  output="$(bash -c '
+    source "$1"
+    ufw() { printf "%s\n" "$*"; }
+    open_firewall_port 443 tcp
+  ' bash "$SCRIPT")"
+  assert_equals "$output" "allow 443/tcp"
+
+  output="$(bash -c '
+    source "$1"
+    service_status_label() { printf "%s" "$1"; }
+    print_service_statuses
+  ' bash "$SCRIPT")"
+  assert_contains "$output" "Xray      : xray"
+  assert_contains "$output" "Hysteria2 : hysteria-server"
+}
+
 test_certificate_fingerprint() {
   local temp_dir fingerprint
   temp_dir="$(mktemp -d)"
@@ -129,6 +181,9 @@ test_command_routing() {
 
 test_argument_errors
 test_port_reinstall_guard
+test_download_helpers
+test_v2_download_failure_is_soft
+test_firewall_and_status_helpers
 test_certificate_fingerprint
 test_hy2_link_pinning
 test_command_routing
