@@ -19,6 +19,11 @@ assert_equals() {
   [[ "$actual" == "$expected" ]] || fail_test "unexpected output: ${actual}"
 }
 
+assert_matches() {
+  local actual="$1" pattern="$2"
+  [[ "$actual" =~ $pattern ]] || fail_test "output did not match ${pattern}: ${actual}"
+}
+
 expect_function_failure() {
   local expected="$1"
   shift
@@ -37,6 +42,51 @@ test_argument_errors() {
   expect_function_failure '--port 后面需要填写参数值。' parse_xray_args --port
   expect_function_failure '--domain 后面需要填写参数值。' parse_hy2_args --domain
   expect_function_failure '端口必须在 1-65535' validate_target www.cloudflare.com:70000
+}
+
+test_port_reinstall_guard() {
+  local output status
+
+  output="$(bash -c '
+    source "$1"
+    is_port_in_use() { return 0; }
+    service_owns_port() { return 0; }
+    ensure_port_available 443 xray Xray
+  ' bash "$SCRIPT")"
+  assert_contains "$output" "允许原端口更新"
+
+  set +e
+  output="$(bash -c '
+    source "$1"
+    is_port_in_use() { return 0; }
+    service_owns_port() { return 1; }
+    ensure_port_available 443 xray Xray
+  ' bash "$SCRIPT" 2>&1)"
+  status=$?
+  set -e
+  (( status != 0 )) || fail_test "expected occupied third-party port to fail"
+  assert_contains "$output" "端口已被其他程序占用：443"
+}
+
+test_certificate_fingerprint() {
+  local temp_dir fingerprint
+  temp_dir="$(mktemp -d)"
+  openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
+    -keyout "${temp_dir}/key.pem" -out "${temp_dir}/cert.pem" \
+    -days 1 -subj "/CN=test.example.com" >/dev/null 2>&1
+
+  fingerprint="$(bash -c 'source "$1"; hy2_certificate_sha256 "$2"' \
+    bash "$SCRIPT" "${temp_dir}/cert.pem")"
+  assert_matches "$fingerprint" '^[0-9a-f]{64}$'
+
+  rm -f "${temp_dir}/key.pem" "${temp_dir}/cert.pem"
+  rmdir "$temp_dir"
+}
+
+test_hy2_link_pinning() {
+  local source_text
+  source_text="$(<"$SCRIPT")"
+  assert_contains "$source_text" 'pinSHA256=${cert_sha256}'
 }
 
 test_command_routing() {
@@ -78,5 +128,8 @@ test_command_routing() {
 }
 
 test_argument_errors
+test_port_reinstall_guard
+test_certificate_fingerprint
+test_hy2_link_pinning
 test_command_routing
 printf 'All proxy.sh tests passed.\n'
