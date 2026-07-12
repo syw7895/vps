@@ -657,10 +657,18 @@ download_v2_local_copy() {
   install_v2_local_copy "$tf" || rc=$?; rm -f "$tf"; return $rc
 }
 install_v2_shortcut_files() {
-  local sp
-  sp=$(readlink -f "$0" 2>/dev/null || true)
-  if [[ -n $sp && -f $sp && $sp != /dev/fd/* ]]; then install_v2_local_copy "$sp"
-  else log "在线执行模式，下载脚本..."; download_v2_local_copy; fi
+  local source_path=""
+  if [[ "${BASH_SOURCE[0]:-}" != bash && "${BASH_SOURCE[0]:-}" != -bash ]]; then
+    source_path=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)
+  fi
+
+  if [[ -n $source_path && -f $source_path && $source_path != /dev/fd/* ]] &&
+    grep -q '^APP_NAME="vps-proxy"$' "$source_path"; then
+    install_v2_local_copy "$source_path"
+  else
+    log "在线执行模式，下载并校验 v2 快照..."
+    download_v2_local_copy
+  fi
 }
 install_v2_shortcut() {
   require_root
