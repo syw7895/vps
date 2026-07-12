@@ -166,7 +166,7 @@ listener_uses_port() {
     udp) flags='-H -lun' ;;
     *) fail "未知端口协议：$proto" ;;
   esac
-  ss $flags 2>/dev/null | awk -v suffix=":${port}" '$5 ~ (suffix "$") {found=1} END {exit !found}'
+  ss $flags 2>/dev/null | grep -qE ":${port}[[:space:]]"
 }
 
 port_reserved_by_forwarder() {
