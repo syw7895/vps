@@ -742,4 +742,6 @@ main() {
     *) fail "未知命令：$cmd" ;;
   esac
 }
-[[ ${BASH_SOURCE[0]} == "$0" ]] && main "$@"
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi
