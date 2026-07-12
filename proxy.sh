@@ -23,17 +23,20 @@ HY2_CONFIG="/etc/hysteria/config.yaml"
 HY2_CERT_DIR="/etc/hysteria/certs"
 HY2_INFO_FILE="${CONFIG_DIR}/hysteria2.txt"
 
-# 远程脚本地址与可选哈希；固定版本时请同时设置 URL 和 SHA256
-XRAY_INSTALLER_URL="${XRAY_INSTALLER_URL:-https://github.com/XTLS/Xray-install/raw/main/install-release.sh}"
-HY2_INSTALLER_URL="${HY2_INSTALLER_URL:-https://get.hy2.sh/}"
-XRAY_INSTALLER_SHA256="${XRAY_INSTALLER_SHA256:-}"
-HY2_INSTALLER_SHA256="${HY2_INSTALLER_SHA256:-}"
+# 远程安装器固定到经过审查的提交，默认强制 SHA256 校验。
+# 更新安装器时，必须同时更新 URL 和对应哈希。
+XRAY_INSTALLER_URL="${XRAY_INSTALLER_URL:-https://raw.githubusercontent.com/XTLS/Xray-install/e741a4f56d368afbb9e5be3361b40c4552d3710d/install-release.sh}"
+HY2_INSTALLER_URL="${HY2_INSTALLER_URL:-https://raw.githubusercontent.com/apernet/hysteria/d1cd1503d35d3cd3fbe176be634b805d560ec7e7/scripts/install_server.sh}"
+XRAY_INSTALLER_SHA256="${XRAY_INSTALLER_SHA256:-7f70c95f6b418da8b4f4883343d602964915e28748993870fd554383afdbe555}"
+HY2_INSTALLER_SHA256="${HY2_INSTALLER_SHA256:-e6b9023dcc0142f155546548b9d7a75ce288704d6dead0c2010d61663b90e217}"
 
+# 在线执行时，v2 副本必须提供来自独立可信渠道的 SHA256。
 V2_SCRIPT_URL="${V2_SCRIPT_URL:-https://raw.githubusercontent.com/syw7895/vps/main/proxy.sh}"
 V2_SCRIPT_SHA256="${V2_SCRIPT_SHA256:-}"
 V2_INSTALL_DIR="/usr/local/lib/vps-proxy"
 V2_SCRIPT_PATH="${V2_INSTALL_DIR}/proxy.sh"
 V2_COMMAND_PATH="/usr/local/bin/v2"
+HY2_SERVICE_USER="hysteria"
 
 # 默认大厂域名池（HY2 留空时随机）
 BIG_TECH_DOMAINS=(
@@ -149,13 +152,22 @@ curl_download() {
     [[ -s "$out" ]]
 }
 
-sha256_matches() {
-  local file="$1" expected="$2"
-  [[ -z "$expected" ]] && return 0
+is_valid_sha256() {
+  [[ "$1" =~ ^[A-Fa-f0-9]{64}$ ]]
+}
 
-  local actual
+require_sha256() {
+  local expected="$1" label="$2"
+  is_valid_sha256 "$expected" ||
+    fail "${label} 缺少或格式错误的 SHA256；拒绝执行未校验的远程脚本。"
+}
+
+sha256_matches() {
+  local file="$1" expected="$2" actual
+  is_valid_sha256 "$expected" || return 1
+
   actual="$(sha256sum "$file" | awk '{print $1}')"
-  [[ "$actual" == "$expected" ]]
+  [[ "${actual,,}" == "${expected,,}" ]]
 }
 
 download_remote_script() {
@@ -164,6 +176,7 @@ download_remote_script() {
 }
 
 verify_script_sha256() {
+  require_sha256 "$2" "安装脚本"
   sha256_matches "$1" "$2" || fail "安装脚本哈希校验失败。"
 }
 
@@ -189,17 +202,55 @@ validate_port() {
   (( port >= 1 && port <= 65535 )) || fail "端口必须在 1-65535：${port}"
 }
 
+is_ipv4_address() {
+  local ip="$1" octet
+  local -a octets
+  local IFS=.
+
+  [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+  read -r -a octets <<<"$ip"
+  for octet in "${octets[@]}"; do
+    (( 10#$octet <= 255 )) || return 1
+  done
+}
+
 validate_target() {
-  local target="$1"
-  [[ "$target" =~ ^[^:[:space:]]+:[0-9]+$ ]] || \
+  local target="$1" host port
+  [[ "$target" =~ ^[^:[:space:]]+:[0-9]+$ ]] ||
     fail "target 格式错误，应为 host:port，例如 www.cloudflare.com:443"
-  validate_port "${target##*:}"
+
+  host="${target%:*}"
+  port="${target##*:}"
+  if ! [[ "$host" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$ ]] &&
+    ! is_ipv4_address "$host"; then
+    fail "target 主机名或 IPv4 地址无效：${host}"
+  fi
+  validate_port "$port"
 }
 
 validate_domain() {
   local domain="$1"
-  [[ "$domain" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$ ]] || \
+  [[ "$domain" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$ ]] ||
     fail "域名格式错误：${domain}"
+}
+
+validate_uuid() {
+  local uuid="$1"
+  [[ "$uuid" =~ ^[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[1-5][A-Fa-f0-9]{3}-[89ABab][A-Fa-f0-9]{3}-[A-Fa-f0-9]{12}$ ]] ||
+    fail "UUID 格式错误：${uuid}"
+}
+
+validate_hy2_password() {
+  local password="$1"
+  [[ "$password" =~ ^[-A-Za-z0-9._~]{1,128}$ ]] ||
+    fail "Hysteria2 密码只能包含字母、数字和 - . _ ~，长度为 1-128。"
+}
+
+validate_hy2_masquerade() {
+  local url="$1"
+  local url_pattern='^https?://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?(/[A-Za-z0-9._~:/?@!$&()*+,;=%-]*)?$'
+  [[ "$url" =~ $url_pattern ]] ||
+    fail "伪装 URL 格式错误：仅支持不含空白或引号的 http(s) URL。"
 }
 
 is_port_in_use() {
@@ -237,14 +288,15 @@ ensure_port_available() {
 }
 
 random_free_port() {
-  local port
-  while true; do
+  local port attempt
+  for ((attempt = 1; attempt <= 128; attempt++)); do
     port="$(shuf -i 10000-65535 -n 1)"
     if ! is_port_in_use "$port"; then
       printf '%s' "$port"
       return 0
     fi
   done
+  fail "连续 128 次未找到可用随机端口，请手动通过 --port 指定端口。"
 }
 
 random_big_tech_domain() {
@@ -326,6 +378,25 @@ show_journal() {
   journalctl -u "$service" -n "$lines" --no-pager -o short-iso 2>/dev/null || true
 }
 
+restart_and_verify_service() {
+  local service="$1" label="$2" attempt
+
+  if ! systemctl restart "$service"; then
+    show_journal "$service" "$label"
+    fail "${label} 重启失败。"
+  fi
+
+  for ((attempt = 1; attempt <= 5; attempt++)); do
+    if systemctl is-active --quiet "$service"; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  show_journal "$service" "$label"
+  fail "${label} 重启后未保持运行状态。"
+}
+
 # ===== 参数解析 =====
 parse_xray_args() {
   while [[ $# -gt 0 ]]; do
@@ -380,6 +451,7 @@ install_xray_reality() {
   validate_port "$XRAY_PORT"
   validate_target "$XRAY_TARGET"
   validate_domain "$XRAY_SNI"
+  [[ -z "$XRAY_UUID" ]] || validate_uuid "$XRAY_UUID"
   ensure_port_available "$XRAY_PORT" xray "Xray"
 
   install_xray_core
@@ -440,7 +512,7 @@ EOF
 
   xray run -test -config "$XRAY_CONFIG"
   systemctl enable xray >/dev/null 2>&1
-  systemctl restart xray
+  restart_and_verify_service xray "Xray"
   open_firewall_port "$XRAY_PORT" tcp
 
   link="vless://${XRAY_UUID}@${ip}:${XRAY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${XRAY_SNI}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#Xray-Reality-${ip}"
@@ -469,9 +541,11 @@ EOF
 # ===== Hysteria2 安装 =====
 install_hysteria_core() {
   log "安装或更新 Hysteria2..."
-  # Hysteria2 官方安装器通过该变量确定服务运行用户。
-  HYSTERIA_USER=root run_remote_script "$HY2_INSTALLER_URL" "$HY2_INSTALLER_SHA256"
+  # 官方安装器会创建该专用系统用户，并将服务改为以其身份运行。
+  HYSTERIA_USER="$HY2_SERVICE_USER" run_remote_script "$HY2_INSTALLER_URL" "$HY2_INSTALLER_SHA256"
   command -v hysteria >/dev/null 2>&1 || fail "Hysteria2 安装失败。"
+  getent passwd "$HY2_SERVICE_USER" >/dev/null ||
+    fail "Hysteria2 服务用户 ${HY2_SERVICE_USER} 创建失败。"
 }
 
 write_hy2_self_signed_cert() {
@@ -486,6 +560,42 @@ write_hy2_self_signed_cert() {
     -addext "subjectAltName=DNS:${cn}" >/dev/null 2>&1
   chmod 600 "${cert_dir}/server.key"
   chmod 644 "${cert_dir}/server.crt"
+}
+
+configure_hy2_cert_permissions() {
+  local cert_dir="$1"
+  getent passwd "$HY2_SERVICE_USER" >/dev/null ||
+    fail "Hysteria2 服务用户不存在：${HY2_SERVICE_USER}"
+
+  install -d -o root -g "$HY2_SERVICE_USER" -m 750 "$cert_dir"
+  chown root:"$HY2_SERVICE_USER" "${cert_dir}/server.key" "${cert_dir}/server.crt"
+  chmod 640 "${cert_dir}/server.key"
+  chmod 644 "${cert_dir}/server.crt"
+}
+
+check_hy2_config() {
+  local test_port test_config test_output rc=0
+  command -v runuser >/dev/null 2>&1 ||
+    fail "缺少 runuser，无法以 Hysteria2 服务用户验证配置。"
+
+  test_port="$(random_free_port)"
+  test_config="$(mktemp /tmp/${APP_NAME}.hy2-config.XXXXXX.yaml)"
+  test_output="$(mktemp /tmp/${APP_NAME}.hy2-check.XXXXXX.log)"
+  sed -E "s|^listen:.*$|listen: 127.0.0.1:${test_port}|" "$HY2_CONFIG" >"$test_config"
+  chown root:"$HY2_SERVICE_USER" "$test_config"
+  chmod 640 "$test_config"
+
+  runuser -u "$HY2_SERVICE_USER" -- \
+    timeout --signal=TERM 3s hysteria --disable-update-check --log-level error server -c "$test_config" \
+    >"$test_output" 2>&1 || rc=$?
+
+  if (( rc != 124 )); then
+    cat "$test_output" >&2 || true
+    rm -f "$test_config" "$test_output"
+    fail "Hysteria2 配置预检失败（退出码：${rc}）。"
+  fi
+
+  rm -f "$test_config" "$test_output"
 }
 
 hy2_certificate_sha256() {
@@ -522,17 +632,21 @@ install_hysteria2() {
     log "使用自定义域名：${HY2_DOMAIN}"
   fi
 
+  validate_domain "$HY2_DOMAIN"
+  validate_hy2_masquerade "$HY2_MASQUERADE"
   [[ -n "$HY2_PASSWORD" ]] || HY2_PASSWORD="$(random_password)"
+  validate_hy2_password "$HY2_PASSWORD"
   install_hysteria_core
 
   local ip sni link cert_sha256
   ip="$(server_ip)"
   sni="${HY2_DOMAIN}"
 
-  install -d -m 755 /etc/hysteria
+  install -d -o root -g "$HY2_SERVICE_USER" -m 750 /etc/hysteria
   title "Hysteria2"
   log "写入 Hysteria2 自签证书配置..."
   write_hy2_self_signed_cert "$HY2_CERT_DIR" "$HY2_DOMAIN"
+  configure_hy2_cert_permissions "$HY2_CERT_DIR"
   cert_sha256="$(hy2_certificate_sha256 "${HY2_CERT_DIR}/server.crt")"
 
   cat >"$HY2_CONFIG" <<EOF
@@ -553,8 +667,11 @@ masquerade:
     rewriteHost: true
 EOF
 
+  chown root:"$HY2_SERVICE_USER" "$HY2_CONFIG"
+  chmod 640 "$HY2_CONFIG"
+  check_hy2_config
   systemctl enable hysteria-server.service >/dev/null 2>&1
-  systemctl restart hysteria-server.service
+  restart_and_verify_service hysteria-server "Hysteria2"
   open_firewall_port "$HY2_PORT" udp
 
   link="hysteria2://${HY2_PASSWORD}@${ip}:${HY2_PORT}/?sni=${sni}&insecure=1&pinSHA256=${cert_sha256}#Hysteria2-${ip}"
@@ -601,11 +718,30 @@ show_info() {
   show_journal hysteria-server "Hysteria2"
 }
 
+cleanup_info_dir() {
+  rmdir -- "$CONFIG_DIR" 2>/dev/null || true
+}
+
+remove_hy2_managed_files() {
+  rm -f "$HY2_INFO_FILE"
+  rm -rf -- "$HY2_CERT_DIR"
+
+  if [[ -f "$HY2_CONFIG" ]] &&
+    grep -qF "cert: ${HY2_CERT_DIR}/server.crt" "$HY2_CONFIG" &&
+    grep -qF "key: ${HY2_CERT_DIR}/server.key" "$HY2_CONFIG"; then
+    rm -f "$HY2_CONFIG"
+  fi
+
+  rmdir -- /etc/hysteria 2>/dev/null || true
+  cleanup_info_dir
+}
+
 uninstall_xray() {
   require_root
   log "卸载 Xray..."
   if run_remote_script "$XRAY_INSTALLER_URL" "$XRAY_INSTALLER_SHA256" remove --purge; then
     rm -f "$XRAY_INFO_FILE"
+    cleanup_info_dir
     ok "Xray 已卸载。"
   else
     fail "Xray 卸载失败，请检查日志后重试。"
@@ -616,7 +752,7 @@ uninstall_hy2() {
   require_root
   log "卸载 Hysteria2..."
   if run_remote_script "$HY2_INSTALLER_URL" "$HY2_INSTALLER_SHA256" --remove; then
-    rm -f "$HY2_INFO_FILE"
+    remove_hy2_managed_files
     ok "Hysteria2 已卸载。"
   else
     fail "Hysteria2 卸载失败，请检查日志后重试。"
@@ -651,6 +787,11 @@ install_v2_local_copy() {
 
 download_v2_local_copy() {
   local temp_file rc=0
+  is_valid_sha256 "$V2_SCRIPT_SHA256" || {
+    warn "在线安装 v2 需要通过 V2_SCRIPT_SHA256 提供可信的 64 位 SHA256。"
+    return 1
+  }
+
   temp_file="$(mktemp /tmp/${APP_NAME}.v2.XXXXXX.sh)"
 
   if ! curl_download "$V2_SCRIPT_URL" "$temp_file" ||
