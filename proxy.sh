@@ -25,8 +25,8 @@ HY2_INSTALLER_URL="${HY2_INSTALLER_URL:-https://raw.githubusercontent.com/aperne
 XRAY_INSTALLER_SHA256="${XRAY_INSTALLER_SHA256:-7f70c95f6b418da8b4f4883343d602964915e28748993870fd554383afdbe555}"
 HY2_INSTALLER_SHA256="${HY2_INSTALLER_SHA256:-e6b9023dcc0142f155546548b9d7a75ce288704d6dead0c2010d61663b90e217}"
 # 默认下载独立 v2 快照；提交时由发布流程填入不可变提交与 SHA256。
-V2_SCRIPT_URL="${V2_SCRIPT_URL:-https://raw.githubusercontent.com/syw7895/vps/492fe01bcf3a3deb35d42c3b00a8f362393357a9/v2.sh}"
-V2_SCRIPT_SHA256="${V2_SCRIPT_SHA256:-70c7c4572e4c0139c4b06fc1eef6904c7607da85e3e5d86b86fe9b700ac46279}"
+V2_SCRIPT_URL="${V2_SCRIPT_URL:-https://raw.githubusercontent.com/syw7895/vps/b320b4e2635bc968bc7e40bb8d334fa554fe7aa5/v2.sh}"
+V2_SCRIPT_SHA256="${V2_SCRIPT_SHA256:-2657ad384f11f562523ce79b2777cabe8449c23167731256d78ab941d1292ab9}"
 V2_INSTALL_DIR="/usr/local/lib/vps-proxy"
 V2_SCRIPT_PATH="${V2_INSTALL_DIR}/proxy.sh"
 V2_COMMAND_PATH="/usr/local/bin/v2"
@@ -166,7 +166,7 @@ listener_uses_port() {
     udp) flags='-H -lun' ;;
     *) fail "未知端口协议：$proto" ;;
   esac
-  ss $flags 2>/dev/null | awk -v suffix=":${port}" '$5 ~ (suffix "$") {found=1} END {exit !found}'
+  ss $flags 2>/dev/null | grep -qE ":${port}[[:space:]]"
 }
 
 port_reserved_by_forwarder() {
