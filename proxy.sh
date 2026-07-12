@@ -4,6 +4,8 @@ set -Eeuo pipefail
 # ===== 基础配置 =====
 APP_NAME="vps-proxy"
 CONFIG_DIR="/root/proxy-info"
+BACKUP_DIR="${CONFIG_DIR}/backups"
+PUBLIC_IP=""
 XRAY_PORT="443"
 XRAY_SNI="${REALITY_SERVER_NAME:-www.cloudflare.com}"
 XRAY_TARGET="${REALITY_DEST:-www.cloudflare.com:443}"
@@ -22,8 +24,9 @@ XRAY_INSTALLER_URL="${XRAY_INSTALLER_URL:-https://raw.githubusercontent.com/XTLS
 HY2_INSTALLER_URL="${HY2_INSTALLER_URL:-https://raw.githubusercontent.com/apernet/hysteria/d1cd1503d35d3cd3fbe176be634b805d560ec7e7/scripts/install_server.sh}"
 XRAY_INSTALLER_SHA256="${XRAY_INSTALLER_SHA256:-7f70c95f6b418da8b4f4883343d602964915e28748993870fd554383afdbe555}"
 HY2_INSTALLER_SHA256="${HY2_INSTALLER_SHA256:-e6b9023dcc0142f155546548b9d7a75ce288704d6dead0c2010d61663b90e217}"
-V2_SCRIPT_URL="${V2_SCRIPT_URL:-https://raw.githubusercontent.com/syw7895/vps/main/proxy.sh}"
-V2_SCRIPT_SHA256="${V2_SCRIPT_SHA256:-}"
+# 默认下载独立 v2 快照；提交时由发布流程填入不可变提交与 SHA256。
+V2_SCRIPT_URL="${V2_SCRIPT_URL:-https://raw.githubusercontent.com/syw7895/vps/0e9fd68b91d0fe7fc66e6e104cc45a3e00e85ec2/v2.sh}"
+V2_SCRIPT_SHA256="${V2_SCRIPT_SHA256:-c6897a2884924dc928fc28104a64ff2e7921202ad7c885bcfa4d0f0a9a8d92bb}"
 V2_INSTALL_DIR="/usr/local/lib/vps-proxy"
 V2_SCRIPT_PATH="${V2_INSTALL_DIR}/proxy.sh"
 V2_COMMAND_PATH="/usr/local/bin/v2"
@@ -62,12 +65,14 @@ Xray 参数:
   --sni DOMAIN         REALITY 伪装域名（默认: www.cloudflare.com）
   --target HOST:PORT   REALITY 回落目标（默认: www.cloudflare.com:443）
   --uuid UUID          客户端 UUID（不填自动生成）
+  --public-ip IPv4     分享链接使用的公网 IPv4（自动检测失败时必填）
 
 Hysteria2 参数:
   --port PORT          UDP 监听端口（不填自动随机）
   --password VALUE     认证密码（不填自动生成）
   --domain DOMAIN      证书/SNI 域名（不填默认随机大厂域名）
   --masquerade URL     伪装网站（默认: https://www.bing.com）
+  --public-ip IPv4     分享链接使用的公网 IPv4（自动检测失败时必填）
 
 示例:
   bash proxy.sh xray --port 443 --sni www.cloudflare.com --target www.cloudflare.com:443
@@ -88,7 +93,24 @@ install_base_deps() {
   apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates openssl sed grep gawk coreutils unzip iproute2
 }
-ensure_dirs() { install -d -m 700 "$CONFIG_DIR"; }
+ensure_dirs() { install -d -m 700 "$CONFIG_DIR" "$BACKUP_DIR"; }
+
+backup_managed_state() {
+  local label=$1 stamp archive path
+  shift
+  local -a paths=() existing=()
+  paths=("$@")
+  for path in "${paths[@]}"; do
+    [[ -e "$path" || -L "$path" ]] && existing+=("$path")
+  done
+  ((${#existing[@]})) || return 0
+
+  stamp=$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM
+  archive="$BACKUP_DIR/${label}-${stamp}.tar.gz"
+  (umask 077; tar -C / -czf "$archive" "${existing[@]#/}")
+  chmod 600 "$archive"
+  ok "已备份原有 ${label} 配置：${archive}"
+}
 
 curl_download() { curl -fL --retry 3 --connect-timeout 10 --max-time 120 -o "$2" "$1" && [[ -s $2 ]]; }
 is_valid_sha256() { [[ $1 =~ ^[A-Fa-f0-9]{64}$ ]]; }
@@ -137,7 +159,41 @@ validate_hy2_masquerade() {
   [[ $1 =~ $p ]] || fail "伪装 URL 格式错误。"
 }
 
-is_port_in_use() { ss -tuln 2>/dev/null | grep -qE ":${1}[[:space:]]"; }
+listener_uses_port() {
+  local port=$1 proto=$2 flags
+  case $proto in
+    tcp) flags='-H -ltn' ;;
+    udp) flags='-H -lun' ;;
+    *) fail "未知端口协议：$proto" ;;
+  esac
+  ss $flags 2>/dev/null | awk -v suffix=":${port}" '$4 ~ (suffix "$") {found=1} END {exit !found}'
+}
+
+port_reserved_by_forwarder() {
+  local port=$1 proto=$2
+  if command -v docker >/dev/null 2>&1 &&
+    docker ps --format '{{.Ports}}' 2>/dev/null | grep -qE ":${port}->[^,]*/${proto}"; then
+    return 0
+  fi
+  if command -v podman >/dev/null 2>&1 &&
+    podman ps --format '{{.Ports}}' 2>/dev/null | grep -qE ":${port}->[^,]*/${proto}"; then
+    return 0
+  fi
+  if command -v iptables-save >/dev/null 2>&1 &&
+    iptables-save -t nat 2>/dev/null | grep -qE "(--dport|dport)[[:space:]]+${port}.*(DNAT|REDIRECT)"; then
+    return 0
+  fi
+  if command -v nft >/dev/null 2>&1 &&
+    nft list ruleset 2>/dev/null | grep -qE "dport[[:space:]]+${port}.*(dnat|redirect)"; then
+    return 0
+  fi
+  return 1
+}
+
+is_port_in_use() {
+  listener_uses_port "$1" "$2" || port_reserved_by_forwarder "$1" "$2"
+}
+
 service_owns_port() {
   local s=$1 p=$2
   systemctl is-active --quiet "$s" 2>/dev/null || return 1
@@ -147,26 +203,41 @@ service_owns_port() {
     *) return 1 ;;
   esac
 }
+
 ensure_port_available() {
-  local p=$1 s=$2 l=$3
-  is_port_in_use "$p" || return 0
+  local p=$1 s=$2 l=$3 proto=$4
+  port_reserved_by_forwarder "$p" "$proto" &&
+    fail "端口 ${p}/${proto} 已被容器或 NAT 转发占用。"
+  listener_uses_port "$p" "$proto" || return 0
   service_owns_port "$s" "$p" && { warn "$l 正在使用端口 $p，允许更新。"; return 0; }
-  fail "端口已被占用：$p"
+  fail "端口 ${p}/${proto} 已被其他程序监听。"
 }
+
 random_free_port() {
-  local p a
+  local proto=$1 p a
   for ((a=1;a<=128;a++)); do
     p=$(shuf -i 10000-65535 -n1)
-    is_port_in_use "$p" || { printf %s "$p"; return; }
+    is_port_in_use "$p" "$proto" || { printf %s "$p"; return; }
   done
-  fail "连续128次未找到可用端口，请手动 --port。"
+  fail "连续 128 次未找到可用 ${proto} 端口，请手动 --port。"
 }
 random_big_tech_domain() { printf %s "${BIG_TECH_DOMAINS[RANDOM%${#BIG_TECH_DOMAINS[@]}]}"; }
-server_ip() {
-  local ip
-  ip=$(curl -4fsSL --max-time 5 https://api.ipify.org || true)
-  [[ -z $ip ]] && ip=$(hostname -I 2>/dev/null | awk '{print $1}')
-  printf %s "${ip:-YOUR_SERVER_IP}"
+resolve_public_ip() {
+  local ip endpoint
+  if [[ -n "$PUBLIC_IP" ]]; then
+    is_ipv4_address "$PUBLIC_IP" || fail "--public-ip 必须是有效 IPv4 地址：${PUBLIC_IP}"
+    printf %s "$PUBLIC_IP"
+    return
+  fi
+
+  for endpoint in https://api.ipify.org https://ipv4.icanhazip.com https://ifconfig.me/ip; do
+    ip=$(curl -4fsSL --connect-timeout 5 --max-time 10 "$endpoint" 2>/dev/null | tr -d '[:space:]' || true)
+    if is_ipv4_address "$ip"; then
+      printf %s "$ip"
+      return
+    fi
+  done
+  fail "无法可靠获取公网 IPv4；请通过 --public-ip 明确指定。"
 }
 random_password() { openssl rand -hex 16; }
 random_uuid() {
@@ -177,7 +248,21 @@ random_uuid() {
   fi
 }
 require_arg_value() { [[ -n ${2:-} && $2 != --* ]] || fail "$1 后面需要参数值。"; }
-open_firewall_port() { command -v ufw >/dev/null && ufw allow "$1/$2" >/dev/null || true; }
+open_firewall_port() {
+  local port=$1 proto=$2
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+    ufw allow "${port}/${proto}" >/dev/null && ok "已通过 UFW 放行 ${port}/${proto}。"
+  elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --permanent --add-port="${port}/${proto}" >/dev/null
+    firewall-cmd --reload >/dev/null
+    ok "已通过 firewalld 放行 ${port}/${proto}。"
+  elif command -v nft >/dev/null 2>&1; then
+    warn "检测到 nftables；未自动修改规则。请确认 input 链允许 ${port}/${proto}。"
+  else
+    warn "未检测到活动的 UFW/firewalld；请自行确认主机防火墙允许 ${port}/${proto}。"
+  fi
+  warn "还需在云安全组/网络 ACL 放行入站 ${port}/${proto}，建议仅允许你的客户端 IP/CIDR。"
+}
 
 service_state() {
   local s=$1 b=$2
@@ -218,6 +303,7 @@ parse_xray_args() {
       --sni) require_arg_value "$1" "${2:-}"; XRAY_SNI=$2; shift 2 ;;
       --target) require_arg_value "$1" "${2:-}"; XRAY_TARGET=$2; shift 2 ;;
       --uuid) require_arg_value "$1" "${2:-}"; XRAY_UUID=$2; shift 2 ;;
+      --public-ip) require_arg_value "$1" "${2:-}"; PUBLIC_IP=$2; shift 2 ;;
       --help|-h) usage; exit 0 ;;
       *) fail "未知 Xray 参数：$1" ;;
     esac
@@ -230,6 +316,7 @@ parse_hy2_args() {
       --password) require_arg_value "$1" "${2:-}"; HY2_PASSWORD=$2; shift 2 ;;
       --domain) require_arg_value "$1" "${2:-}"; HY2_DOMAIN=$2; shift 2 ;;
       --masquerade) require_arg_value "$1" "${2:-}"; HY2_MASQUERADE=$2; shift 2 ;;
+      --public-ip) require_arg_value "$1" "${2:-}"; PUBLIC_IP=$2; shift 2 ;;
       --help|-h) usage; exit 0 ;;
       *) fail "未知 Hysteria2 参数：$1" ;;
     esac
@@ -250,20 +337,65 @@ generate_reality_keys() {
   printf '%s\n%s\n' "$priv" "$pub"
 }
 
+xray_config_value() {
+  local key=$1
+  [[ -r "$XRAY_CONFIG" ]] || return 0
+  sed -nE "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\"([^\"]+)\".*/\\1/p" "$XRAY_CONFIG" | head -n1
+}
+
+existing_xray_short_id() {
+  [[ -r "$XRAY_CONFIG" ]] || return 0
+  sed -nE 's/.*"shortIds"[[:space:]]*:[[:space:]]*\\[[[:space:]]*"([A-Fa-f0-9]+)".*/\\1/p' "$XRAY_CONFIG" | head -n1
+}
+
+existing_xray_public_key() {
+  [[ -r "$XRAY_INFO_FILE" ]] || return 0
+  sed -nE 's/^PublicKey:[[:space:]]*([^[:space:]]+).*/\\1/p' "$XRAY_INFO_FILE" | head -n1
+}
+
+derive_reality_public_key() {
+  local private_key=$1 out
+  out=$(xray x25519 -i "$private_key" 2>/dev/null || true)
+  printf '%s\n' "$out" | awk -F': ' '/Password \\(PublicKey\\)|Public key/ {print $2; exit}'
+}
+
 install_xray_reality() {
   parse_xray_args "$@"
   require_root; require_systemd; detect_os; install_base_deps; ensure_dirs
   validate_port "$XRAY_PORT"; validate_target "$XRAY_TARGET"; validate_domain "$XRAY_SNI"
   [[ -z $XRAY_UUID ]] || validate_uuid "$XRAY_UUID"
-  ensure_port_available "$XRAY_PORT" xray "Xray"
+  ensure_port_available "$XRAY_PORT" xray "Xray" tcp
+  ip=$(resolve_public_ip)
+  backup_managed_state xray "$XRAY_CONFIG" "$XRAY_INFO_FILE"
   install_xray_core
+  local short_id keys priv pub link existing_uuid existing_priv existing_pub existing_short
+  existing_uuid=$(xray_config_value id)
+  existing_priv=$(xray_config_value privateKey)
+  existing_pub=$(existing_xray_public_key)
+  existing_short=$(existing_xray_short_id)
+
+  if [[ -z $XRAY_UUID && $existing_uuid =~ ^[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[1-5][A-Fa-f0-9]{3}-[89ABab][A-Fa-f0-9]{3}-[A-Fa-f0-9]{12}$ ]]; then
+    XRAY_UUID=$existing_uuid
+    log "复用已有 Xray UUID。"
+  fi
   [[ -n $XRAY_UUID ]] || XRAY_UUID=$(random_uuid)
-  local short_id keys priv pub ip link
-  short_id=$(openssl rand -hex 8)
-  keys=$(generate_reality_keys)
-  priv=$(printf '%s\n' "$keys" | sed -n '1p')
-  pub=$(printf '%s\n' "$keys" | sed -n '2p')
-  ip=$(server_ip)
+
+  if [[ $existing_priv =~ ^[A-Za-z0-9_-]{20,}$ && $existing_short =~ ^[A-Fa-f0-9]{16}$ ]]; then
+    [[ $existing_pub =~ ^[A-Za-z0-9_-]{20,}$ ]] || existing_pub=$(derive_reality_public_key "$existing_priv")
+    if [[ $existing_pub =~ ^[A-Za-z0-9_-]{20,}$ ]]; then
+      priv=$existing_priv
+      pub=$existing_pub
+      short_id=$existing_short
+      log "复用已有 REALITY 密钥和 ShortId。"
+    fi
+  fi
+
+  if [[ -z ${priv:-} || -z ${pub:-} || -z ${short_id:-} ]]; then
+    short_id=$(openssl rand -hex 8)
+    keys=$(generate_reality_keys)
+    priv=$(printf '%s\n' "$keys" | sed -n '1p')
+    pub=$(printf '%s\n' "$keys" | sed -n '2p')
+  fi
   title "Xray VLESS + REALITY"
   log "写入 Xray 配置..."
   cat >"$XRAY_CONFIG" <<EOF
@@ -311,8 +443,8 @@ ShortId:    ${short_id}
 分享链接:
 ${link}
 EOF
+  chmod 600 "$XRAY_INFO_FILE"
   ok "Xray Reality 已安装并启动。"
-  warn "请确认安全组/防火墙已放行 ${XRAY_PORT}/tcp。"
   printf '\n'; cat "$XRAY_INFO_FILE"
 }
 
@@ -339,7 +471,7 @@ configure_hy2_cert_permissions() {
 check_hy2_config() {
   local tp tc to rc=0
   command -v runuser >/dev/null || fail "缺少 runuser。"
-  tp=$(random_free_port)
+  tp=$(random_free_port udp)
   tc=$(mktemp /tmp/${APP_NAME}.hy2.XXXXXX.yaml)
   to=$(mktemp /tmp/${APP_NAME}.hy2.XXXXXX.log)
   sed -E "s|^listen:.*$|listen: 127.0.0.1:${tp}|" "$HY2_CONFIG" >"$tc"
@@ -355,26 +487,82 @@ hy2_certificate_sha256() {
   printf %s "$fp"
 }
 
+existing_hy2_port() {
+  [[ -r "$HY2_CONFIG" ]] || return 0
+  sed -nE 's/^[[:space:]]*listen:[[:space:]]*:[[:space:]]*([0-9]+).*/\\1/p' "$HY2_CONFIG" | head -n1
+}
+
+existing_hy2_password() {
+  [[ -r "$HY2_CONFIG" ]] || return 0
+  sed -nE 's/^[[:space:]]*password:[[:space:]]*([^[:space:]]+).*/\\1/p' "$HY2_CONFIG" | head -n1
+}
+
+existing_hy2_domain() {
+  [[ -r "$HY2_INFO_FILE" ]] || return 0
+  sed -nE 's/^SNI:[[:space:]]*([^[:space:]]+).*/\\1/p' "$HY2_INFO_FILE" | head -n1
+}
+
+valid_hy2_certificate() {
+  [[ -r "$HY2_CERT_DIR/server.crt" && -r "$HY2_CERT_DIR/server.key" ]] &&
+    openssl x509 -in "$HY2_CERT_DIR/server.crt" -checkend 86400 -noout >/dev/null 2>&1
+}
+
 install_hysteria2() {
   parse_hy2_args "$@"
   require_root; require_systemd; detect_os; install_base_deps; ensure_dirs
+  local existing_port existing_domain existing_password reuse_cert=0
+  existing_port=$(existing_hy2_port)
+  existing_domain=$(existing_hy2_domain)
+  existing_password=$(existing_hy2_password)
+
   if [[ $HY2_PORT_SET_BY_USER == 1 ]]; then
-    validate_port "$HY2_PORT"; ensure_port_available "$HY2_PORT" hysteria-server "Hysteria2"
+    validate_port "$HY2_PORT"
+  elif [[ $existing_port =~ ^[0-9]+$ ]] && ((existing_port >= 1 && existing_port <= 65535)); then
+    HY2_PORT=$existing_port
+    log "复用已有 Hysteria2 端口：$HY2_PORT"
   else
-    HY2_PORT=$(random_free_port); log "未指定端口，已随机：$HY2_PORT"
+    HY2_PORT=$(random_free_port udp)
+    log "未指定端口，已随机：$HY2_PORT"
   fi
-  if [[ -z $HY2_DOMAIN ]]; then HY2_DOMAIN=$(random_big_tech_domain); log "默认大厂域名：$HY2_DOMAIN"
-  else validate_domain "$HY2_DOMAIN"; log "自定义域名：$HY2_DOMAIN"; fi
-  validate_domain "$HY2_DOMAIN"; validate_hy2_masquerade "$HY2_MASQUERADE"
+  ensure_port_available "$HY2_PORT" hysteria-server "Hysteria2" udp
+
+  if [[ -z $HY2_DOMAIN && $existing_domain =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,}$ ]]; then
+    HY2_DOMAIN=$existing_domain
+    if valid_hy2_certificate; then
+      reuse_cert=1
+      log "复用已有 Hysteria2 域名和证书：$HY2_DOMAIN"
+    else
+      log "复用已有 Hysteria2 域名；证书即将过期或不完整，将重新生成。"
+    fi
+  elif [[ -z $HY2_DOMAIN ]]; then
+    HY2_DOMAIN=$(random_big_tech_domain)
+    log "默认大厂域名：$HY2_DOMAIN"
+  else
+    validate_domain "$HY2_DOMAIN"
+    log "自定义域名：$HY2_DOMAIN"
+  fi
+  validate_domain "$HY2_DOMAIN"
+  validate_hy2_masquerade "$HY2_MASQUERADE"
+
+  if [[ -z $HY2_PASSWORD && $existing_password =~ ^[-A-Za-z0-9._~]{1,128}$ ]]; then
+    HY2_PASSWORD=$existing_password
+    log "复用已有 Hysteria2 密码。"
+  fi
   [[ -n $HY2_PASSWORD ]] || HY2_PASSWORD=$(random_password)
   validate_hy2_password "$HY2_PASSWORD"
+  ip=$(resolve_public_ip)
+  backup_managed_state hysteria2 "$HY2_CONFIG" "$HY2_CERT_DIR" "$HY2_INFO_FILE"
   install_hysteria_core
-  local ip sni link cert_sha
-  ip=$(server_ip); sni=$HY2_DOMAIN
+  local sni link cert_sha
+  sni=$HY2_DOMAIN
   install -d -o root -g "$HY2_SERVICE_USER" -m 750 /etc/hysteria
   title "Hysteria2"
-  log "写入自签证书配置..."
-  write_hy2_self_signed_cert "$HY2_CERT_DIR" "$HY2_DOMAIN"
+  if ((reuse_cert)); then
+    log "复用已有自签证书。"
+  else
+    log "生成新的自签证书..."
+    write_hy2_self_signed_cert "$HY2_CERT_DIR" "$HY2_DOMAIN"
+  fi
   configure_hy2_cert_permissions "$HY2_CERT_DIR"
   cert_sha=$(hy2_certificate_sha256 "$HY2_CERT_DIR/server.crt")
   cat >"$HY2_CONFIG" <<EOF
@@ -411,8 +599,8 @@ TLS 模式:   自签证书 + SHA256 指纹校验
 分享链接:
 ${link}
 EOF
+  chmod 600 "$HY2_INFO_FILE"
   ok "Hysteria2 已安装并启动。"
-  warn "请确认安全组/防火墙已放行 ${HY2_PORT}/udp。"
   printf '\n'; cat "$HY2_INFO_FILE"
 }
 
