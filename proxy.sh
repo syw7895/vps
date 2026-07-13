@@ -700,22 +700,13 @@ auto_v2() {
 }
 
 # ---------- 交互菜单 ----------
-# REALITY / HY2 常用 SNI（多样选择，避免大家都挤同一个）
+# REALITY / HY2 常用 SNI（5 个预设 + 随机默认，避免特征聚集）
 SNI_PRESETS=(
   www.cloudflare.com
   www.microsoft.com
   www.apple.com
   www.amazon.com
   www.yahoo.com
-  www.bing.com
-  www.nvidia.com
-  www.samsung.com
-  www.intel.com
-  www.cisco.com
-  gateway.icloud.com
-  addons.mozilla.org
-  www.speedtest.net
-  dl.google.com
 )
 
 prompt() {
@@ -729,28 +720,24 @@ prompt() {
   fi
 }
 
-# 打印 SNI 列表；选中后设置全局 _SNI_CHOSEN
+# 打印 SNI 列表；选中后设置全局 _SNI_CHOSEN（默认 0=随机）
 pick_sni() {
-  local title=${1:-请选择 SNI / 伪装域名} i n c custom
+  local title=${1:-请选择 SNI / 伪装域名} i n c
   n=${#SNI_PRESETS[@]}
   printf '\n  %s%s%s\n' "$B" "$title" "$R"
   hr
+  printf '  %s0%s  随机（默认）\n' "$CYN" "$R"
   for ((i = 0; i < n; i++)); do
-    printf '  %s%2d%s  %s\n' "$GRN" "$((i + 1))" "$R" "${SNI_PRESETS[i]}"
+    printf '  %s%d%s  %s\n' "$GRN" "$((i + 1))" "$R" "${SNI_PRESETS[i]}"
   done
-  printf '  %s%2d%s  随机选择（推荐，降低特征）\n' "$CYN" "$((n + 1))" "$R"
-  printf '  %s%2d%s  自定义\n' "$YEL" "$((n + 2))" "$R"
   hr
-  read -r -p "  请选择 [$((n + 1))]: " c
-  c=${c:-$((n + 1))}
-  if [[ $c =~ ^[0-9]+$ ]] && ((c >= 1 && c <= n)); then
-    _SNI_CHOSEN=${SNI_PRESETS[c - 1]}
-  elif [[ $c == "$((n + 1))" ]]; then
+  read -r -p "  请选择 [0]: " c
+  c=${c:-0}
+  if [[ $c == 0 ]]; then
     _SNI_CHOSEN=${SNI_PRESETS[RANDOM % n]}
     log "随机 SNI: ${_SNI_CHOSEN}"
-  elif [[ $c == "$((n + 2))" ]]; then
-    custom=$(prompt "自定义域名" "www.cloudflare.com")
-    _SNI_CHOSEN=$custom
+  elif [[ $c =~ ^[1-9]$ ]] && ((c >= 1 && c <= n)); then
+    _SNI_CHOSEN=${SNI_PRESETS[c - 1]}
   else
     warn "无效选项，改为随机"
     _SNI_CHOSEN=${SNI_PRESETS[RANDOM % n]}
