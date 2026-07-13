@@ -39,10 +39,22 @@ expect_function_failure() {
 }
 
 test_argument_errors() {
+  local output status
   expect_function_failure '--port 后面需要参数值。' parse_xray_args --port
   expect_function_failure '--domain 后面需要参数值。' parse_hy2_args --domain
   expect_function_failure '端口必须在 1-65535' validate_target www.cloudflare.com:70000
-  expect_function_failure '--public-ip 必须是有效 IPv4' bash -c 'source "$1"; PUBLIC_IP=not-an-ip; resolve_public_ip' bash "$SCRIPT"
+
+  set +e
+  output="$(
+    # shellcheck disable=SC1090
+    source "$SCRIPT"
+    PUBLIC_IP=not-an-ip
+    resolve_public_ip
+  2>&1)"
+  status=$?
+  set -e
+  (( status != 0 )) || fail_test "expected invalid --public-ip to fail"
+  assert_contains "$output" '--public-ip 必须是有效 IPv4'
 }
 
 test_port_reinstall_guard() {
@@ -212,7 +224,7 @@ EOF
 test_hy2_link_pinning() {
   local source_text
   source_text="$(<"$SCRIPT")"
-  assert_contains "$source_text" 'pinSHA256=${cert_sha}'
+  assert_contains "$source_text" "pinSHA256=\${cert_sha}"
 }
 
 test_public_ip_resolution() {
