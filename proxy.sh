@@ -847,7 +847,8 @@ elevate_if_needed() {
   local self
   self=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)
   [[ -n $self && -r $self ]] || self=$0
-  exec sudo -- "$self" "$@"
+  # 用 bash 显式执行，避免 /tmp noexec 或权限导致 sudo 直接跑脚本失败
+  exec sudo -- bash "$self" "$@"
 }
 
 main() {
