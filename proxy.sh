@@ -93,11 +93,28 @@ validate_uuid() {
     || fail "UUID 无效: $1"
 }
 
+is_ipv4() {
+  local ip=$1
+  local -a o
+  local x
+  [[ $ip =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+  IFS=. read -r -a o <<<"$ip"
+  for x in "${o[@]}"; do
+    ((10#$x <= 255)) || return 1
+  done
+  return 0
+}
+
 validate_target() {
   local t=$1 h p
   [[ $t =~ ^[^:[:space:]]+:[0-9]+$ ]] || fail "target 格式应为 host:port"
   h=${t%:*}; p=${t##*:}
-  validate_domain "$h" 2>/dev/null || [[ $h =~ ^[0-9.]+$ ]] || fail "target 主机无效: $h"
+  # 不可调用 validate_domain：失败会 exit，导致 IPv4 target 永远无法通过
+  if [[ $h =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$ ]] || is_ipv4 "$h"; then
+    :
+  else
+    fail "target 主机无效: $h"
+  fi
   validate_port "$p"
 }
 
@@ -428,14 +445,14 @@ issue_cert() {
   chmod 644 "$certdir/fullchain.pem"
   CDN_CERT="$certdir/fullchain.pem"
   CDN_KEY="$certdir/privkey.pem"
-  ((restarted_xray)) && true
+  ((restarted_xray)) && systemctl start xray 2>/dev/null || true
   ok "证书已就绪: $domain"
 }
 
 install_cdn() {
   parse_cdn_args "$@"
+  [[ -n $CDN_DOMAIN ]] || fail "CDN 需要 --domain（例: bash proxy.sh cdn --domain example.com）"
   require_root; require_systemd; detect_os; install_deps; ensure_dirs
-  [[ -n $CDN_DOMAIN ]] || fail "CDN 需要 --domain"
   validate_domain "$CDN_DOMAIN"
   validate_port "$CDN_PORT"
   [[ -z $CDN_UUID ]] || validate_uuid "$CDN_UUID"
@@ -636,10 +653,10 @@ uninstall_hy2() {
   require_root
   systemctl stop hysteria-server 2>/dev/null || true
   systemctl disable hysteria-server 2>/dev/null || true
-  if [[ -x /root/.acme.sh/acme.sh ]]; then true; fi
   bash <(curl -fsSL "$HY2_INSTALLER_URL") --remove 2>/dev/null || true
   rm -f "$HY2_INFO" "$HY2_CONFIG"
   rm -rf "$HY2_CERT_DIR"
+  rmdir /etc/hysteria 2>/dev/null || true
   ok "已卸载 Hysteria2"
 }
 
@@ -819,6 +836,20 @@ main_menu() {
 }
 
 # ---------- 入口 ----------
+# 节点信息保存在 /root/proxy-info（仅 root 可读）。
+# 用 admin 直接跑 v2 会看不到节点，这里自动提权。
+elevate_if_needed() {
+  [[ $EUID -eq 0 ]] && return 0
+  case ${1:-} in
+    -h|--help|help) return 0 ;;
+  esac
+  command -v sudo >/dev/null 2>&1 || fail "请使用 root 运行，或安装 sudo 后执行: sudo $0 $*"
+  local self
+  self=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)
+  [[ -n $self && -r $self ]] || self=$0
+  exec sudo -- "$self" "$@"
+}
+
 main() {
   local cmd=${1:-menu}
   [[ $# -gt 0 ]] && shift
@@ -842,6 +873,7 @@ main() {
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  elevate_if_needed "$@"
   trap 'fail "脚本第 $LINENO 行失败 (exit $?) "' ERR
   main "$@"
 fi
