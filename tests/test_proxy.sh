@@ -45,12 +45,8 @@ test_argument_errors() {
   expect_function_failure '端口必须在 1-65535' validate_target www.cloudflare.com:70000
 
   set +e
-  output="$(
-    # shellcheck disable=SC1090
-    source "$SCRIPT"
-    PUBLIC_IP=not-an-ip
-    resolve_public_ip
-  2>&1)"
+  # Exercise helper in a child shell so fail() exit status is captured cleanly.
+  output="$(bash -c "source \"\$1\"; PUBLIC_IP=not-an-ip; resolve_public_ip" bash "$SCRIPT" 2>&1)"
   status=$?
   set -e
   (( status != 0 )) || fail_test "expected invalid --public-ip to fail"
