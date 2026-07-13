@@ -39,9 +39,10 @@ expect_function_failure() {
 }
 
 test_argument_errors() {
-  expect_function_failure '--port 后面需要填写参数值。' parse_xray_args --port
-  expect_function_failure '--domain 后面需要填写参数值。' parse_hy2_args --domain
+  expect_function_failure '--port 后面需要参数值。' parse_xray_args --port
+  expect_function_failure '--domain 后面需要参数值。' parse_hy2_args --domain
   expect_function_failure '端口必须在 1-65535' validate_target www.cloudflare.com:70000
+  expect_function_failure '--public-ip 必须是有效 IPv4' bash -c 'source "$1"; PUBLIC_IP=not-an-ip; resolve_public_ip' bash "$SCRIPT"
 }
 
 test_port_reinstall_guard() {
@@ -49,23 +50,36 @@ test_port_reinstall_guard() {
 
   output="$(bash -c '
     source "$1"
-    is_port_in_use() { return 0; }
+    port_reserved_by_forwarder() { return 1; }
+    listener_uses_port() { return 0; }
     service_owns_port() { return 0; }
-    ensure_port_available 443 xray Xray
+    ensure_port_available 443 xray Xray tcp
   ' bash "$SCRIPT")"
-  assert_contains "$output" "允许原端口更新"
+  assert_contains "$output" "允许更新"
 
   set +e
   output="$(bash -c '
     source "$1"
-    is_port_in_use() { return 0; }
+    port_reserved_by_forwarder() { return 1; }
+    listener_uses_port() { return 0; }
     service_owns_port() { return 1; }
-    ensure_port_available 443 xray Xray
+    ensure_port_available 443 xray Xray tcp
   ' bash "$SCRIPT" 2>&1)"
   status=$?
   set -e
   (( status != 0 )) || fail_test "expected occupied third-party port to fail"
-  assert_contains "$output" "端口已被其他程序占用：443"
+  assert_contains "$output" "已被其他程序监听"
+
+  set +e
+  output="$(bash -c '
+    source "$1"
+    port_reserved_by_forwarder() { return 0; }
+    ensure_port_available 443 xray Xray tcp
+  ' bash "$SCRIPT" 2>&1)"
+  status=$?
+  set -e
+  (( status != 0 )) || fail_test "expected NAT/forwarder reservation to fail"
+  assert_contains "$output" "NAT 转发占用"
 }
 
 test_download_helpers() {
@@ -77,10 +91,10 @@ test_download_helpers() {
   set +e
   output="$(bash -c '
     source "$1"
-    sha256_matches "$2" "" &&
+    ! sha256_matches "$2" "" &&
       sha256_matches "$2" "$3" &&
       ! sha256_matches "$2" "$4"
-  ' bash "$SCRIPT" "$temp_file" "$actual_sha"     "0000000000000000000000000000000000000000000000000000000000000000" 2>&1)"
+  ' bash "$SCRIPT" "$temp_file" "$actual_sha" "0000000000000000000000000000000000000000000000000000000000000000" 2>&1)"
   status=$?
   set -e
 
@@ -108,27 +122,68 @@ test_v2_download_failure_is_soft() {
   rmdir "$temp_dir"
 }
 
+test_v2_materialize_from_source() {
+  local temp_dir output
+  temp_dir="$(mktemp -d)"
+  output="$(bash -c '
+    source "$1"
+    V2_INSTALL_DIR="$2/v2"
+    V2_SCRIPT_PATH="$V2_INSTALL_DIR/proxy.sh"
+    V2_COMMAND_PATH="$2/v2-command"
+    download_v2_local_copy() { echo "should-not-download"; return 1; }
+    install_v2_shortcut_files
+    [[ -f "$V2_SCRIPT_PATH" ]]
+    # Linux 上是符号链接；部分 Windows/Cygwin 环境会落成可执行副本
+    [[ -e "$V2_COMMAND_PATH" ]]
+    grep -q "^APP_NAME=\"vps-proxy\"\$" "$V2_SCRIPT_PATH"
+  ' bash "$SCRIPT" "$temp_dir")"
+  assert_equals "$output" ""
+  rm -rf "$temp_dir"
+}
+
 test_firewall_and_status_helpers() {
   local output temp_file
   temp_file="$(mktemp)"
 
+  # active UFW should open port
   bash -c '
     source "$1"
     output_file="$2"
-    ufw() { printf "%s\n" "$*" >"$output_file"; }
+    ufw() {
+      if [[ $1 == status ]]; then
+        printf "Status: active\n"
+      else
+        printf "%s\n" "$*" >"$output_file"
+      fi
+    }
     open_firewall_port 443 tcp
   ' bash "$SCRIPT" "$temp_file"
   output="$(<"$temp_file")"
   assert_equals "$output" "allow 443/tcp"
   rm -f "$temp_file"
 
+  # inactive / missing ufw should not hard-fail
+  output="$(bash -c '
+    source "$1"
+    command() {
+      if [[ $1 == -v && $2 == ufw ]]; then return 1; fi
+      if [[ $1 == -v && $2 == firewall-cmd ]]; then return 1; fi
+      if [[ $1 == -v && $2 == nft ]]; then return 1; fi
+      builtin command "$@"
+    }
+    open_firewall_port 8443 udp
+  ' bash "$SCRIPT" 2>&1)"
+  assert_contains "$output" "8443/udp"
+
   output="$(bash -c '
     source "$1"
     service_status_label() { printf "%s" "$1"; }
     print_service_statuses
   ' bash "$SCRIPT")"
-  assert_contains "$output" "Xray      : xray"
-  assert_contains "$output" "Hysteria2 : hysteria-server"
+  assert_contains "$output" "Xray"
+  assert_contains "$output" "xray"
+  assert_contains "$output" "Hysteria2"
+  assert_contains "$output" "hysteria-server"
 }
 
 test_certificate_fingerprint() {
@@ -157,7 +212,17 @@ EOF
 test_hy2_link_pinning() {
   local source_text
   source_text="$(<"$SCRIPT")"
-  assert_contains "$source_text" "pinSHA256=\${cert_sha256}"
+  assert_contains "$source_text" 'pinSHA256=${cert_sha}'
+}
+
+test_public_ip_resolution() {
+  local output
+  output="$(bash -c '
+    source "$1"
+    PUBLIC_IP=203.0.113.10
+    resolve_public_ip
+  ' bash "$SCRIPT")"
+  assert_equals "$output" "203.0.113.10"
 }
 
 test_command_routing() {
@@ -202,8 +267,10 @@ test_argument_errors
 test_port_reinstall_guard
 test_download_helpers
 test_v2_download_failure_is_soft
+test_v2_materialize_from_source
 test_firewall_and_status_helpers
 test_certificate_fingerprint
 test_hy2_link_pinning
+test_public_ip_resolution
 test_command_routing
 printf 'All proxy.sh tests passed.\n'

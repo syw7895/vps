@@ -24,9 +24,9 @@ XRAY_INSTALLER_URL="${XRAY_INSTALLER_URL:-https://raw.githubusercontent.com/XTLS
 HY2_INSTALLER_URL="${HY2_INSTALLER_URL:-https://raw.githubusercontent.com/apernet/hysteria/d1cd1503d35d3cd3fbe176be634b805d560ec7e7/scripts/install_server.sh}"
 XRAY_INSTALLER_SHA256="${XRAY_INSTALLER_SHA256:-7f70c95f6b418da8b4f4883343d602964915e28748993870fd554383afdbe555}"
 HY2_INSTALLER_SHA256="${HY2_INSTALLER_SHA256:-e6b9023dcc0142f155546548b9d7a75ce288704d6dead0c2010d61663b90e217}"
-# v2 快照安装到本地后不会再次在线下载；在线执行请使用主 proxy.sh。
-V2_SCRIPT_URL="${V2_SCRIPT_URL:-}"
-V2_SCRIPT_SHA256="${V2_SCRIPT_SHA256:-}"
+# 默认下载独立 v2 快照；提交时由发布流程填入不可变提交与 SHA256。
+V2_SCRIPT_URL="${V2_SCRIPT_URL:-https://raw.githubusercontent.com/syw7895/vps/b320b4e2635bc968bc7e40bb8d334fa554fe7aa5/v2.sh}"
+V2_SCRIPT_SHA256="${V2_SCRIPT_SHA256:-2657ad384f11f562523ce79b2777cabe8449c23167731256d78ab941d1292ab9}"
 V2_INSTALL_DIR="/usr/local/lib/vps-proxy"
 V2_SCRIPT_PATH="${V2_INSTALL_DIR}/proxy.sh"
 V2_COMMAND_PATH="/usr/local/bin/v2"
@@ -47,8 +47,6 @@ warn() { printf '%s[%s] 提醒:%s %s\n' "$C_YELLOW" "$APP_NAME" "$C_RESET" "$*";
 fail() { printf '%s[%s] 错误:%s %s\n' "$C_RED" "$APP_NAME" "$C_RESET" "$*" >&2; exit 1; }
 hr()   { printf '%s\n' "------------------------------------------------------------"; }
 title(){ printf '\n%s%s%s\n' "$C_BOLD" "$1" "$C_RESET"; hr; }
-trap 'fail "脚本在第 $LINENO 行失败，退出码：$?"' ERR
-
 usage() {
   cat <<'EOF'
 用法:
@@ -160,13 +158,12 @@ validate_hy2_masquerade() {
 }
 
 listener_uses_port() {
-  local port=$1 proto=$2 flags
+  local port=$1 proto=$2
   case $proto in
-    tcp) flags='-H -ltn' ;;
-    udp) flags='-H -lun' ;;
+    tcp) ss -H -ltn 2>/dev/null | grep -qE ":${port}[[:space:]]" ;;
+    udp) ss -H -lun 2>/dev/null | grep -qE ":${port}[[:space:]]" ;;
     *) fail "未知端口协议：$proto" ;;
   esac
-  ss $flags 2>/dev/null | grep -qE ":${port}[[:space:]]"
 }
 
 port_reserved_by_forwarder() {
@@ -345,12 +342,12 @@ xray_config_value() {
 
 existing_xray_short_id() {
   [[ -r "$XRAY_CONFIG" ]] || return 0
-  sed -nE 's/.*"shortIds"[[:space:]]*:[[:space:]]*\\[[[:space:]]*"([A-Fa-f0-9]+)".*/\\1/p' "$XRAY_CONFIG" | head -n1
+  sed -nE 's/.*"shortIds"[[:space:]]*:[[:space:]]*\[[[:space:]]*"([A-Fa-f0-9]+)".*/\1/p' "$XRAY_CONFIG" | head -n1
 }
 
 existing_xray_public_key() {
   [[ -r "$XRAY_INFO_FILE" ]] || return 0
-  sed -nE 's/^PublicKey:[[:space:]]*([^[:space:]]+).*/\\1/p' "$XRAY_INFO_FILE" | head -n1
+  sed -nE 's/^PublicKey:[[:space:]]*([^[:space:]]+).*/\1/p' "$XRAY_INFO_FILE" | head -n1
 }
 
 derive_reality_public_key() {
@@ -489,17 +486,17 @@ hy2_certificate_sha256() {
 
 existing_hy2_port() {
   [[ -r "$HY2_CONFIG" ]] || return 0
-  sed -nE 's/^[[:space:]]*listen:[[:space:]]*:[[:space:]]*([0-9]+).*/\\1/p' "$HY2_CONFIG" | head -n1
+  sed -nE 's/^[[:space:]]*listen:[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$HY2_CONFIG" | head -n1
 }
 
 existing_hy2_password() {
   [[ -r "$HY2_CONFIG" ]] || return 0
-  sed -nE 's/^[[:space:]]*password:[[:space:]]*([^[:space:]]+).*/\\1/p' "$HY2_CONFIG" | head -n1
+  sed -nE 's/^[[:space:]]*password:[[:space:]]*([^[:space:]]+).*/\1/p' "$HY2_CONFIG" | head -n1
 }
 
 existing_hy2_domain() {
   [[ -r "$HY2_INFO_FILE" ]] || return 0
-  sed -nE 's/^SNI:[[:space:]]*([^[:space:]]+).*/\\1/p' "$HY2_INFO_FILE" | head -n1
+  sed -nE 's/^SNI:[[:space:]]*([^[:space:]]+).*/\1/p' "$HY2_INFO_FILE" | head -n1
 }
 
 valid_hy2_certificate() {
@@ -625,15 +622,22 @@ remove_hy2_managed_files() {
 }
 uninstall_xray() {
   require_root; log "卸载 Xray..."
-  run_remote_script "$XRAY_INSTALLER_URL" "$XRAY_INSTALLER_SHA256" remove --purge && {
-    rm -f "$XRAY_INFO_FILE"; cleanup_info_dir; ok "Xray 已卸载。"
-  } || fail "Xray 卸载失败。"
+  if run_remote_script "$XRAY_INSTALLER_URL" "$XRAY_INSTALLER_SHA256" remove --purge; then
+    rm -f "$XRAY_INFO_FILE"
+    cleanup_info_dir
+    ok "Xray 已卸载。"
+  else
+    fail "Xray 卸载失败。"
+  fi
 }
 uninstall_hy2() {
   require_root; log "卸载 Hysteria2..."
-  run_remote_script "$HY2_INSTALLER_URL" "$HY2_INSTALLER_SHA256" --remove && {
-    remove_hy2_managed_files; ok "Hysteria2 已卸载。"
-  } || fail "Hysteria2 卸载失败。"
+  if run_remote_script "$HY2_INSTALLER_URL" "$HY2_INSTALLER_SHA256" --remove; then
+    remove_hy2_managed_files
+    ok "Hysteria2 已卸载。"
+  else
+    fail "Hysteria2 卸载失败。"
+  fi
 }
 uninstall_v2_shortcut() {
   require_root
@@ -656,19 +660,41 @@ download_v2_local_copy() {
   if ! curl_download "$V2_SCRIPT_URL" "$tf" || ! sha256_matches "$tf" "$V2_SCRIPT_SHA256"; then rm -f "$tf"; return 1; fi
   install_v2_local_copy "$tf" || rc=$?; rm -f "$tf"; return $rc
 }
+is_vps_proxy_script() {
+  [[ -r $1 ]] && grep -q '^APP_NAME="vps-proxy"$' "$1"
+}
+
+materialize_running_script() {
+  local dest=$1 src=${BASH_SOURCE[0]:-}
+  [[ -n $src && -r $src ]] || return 1
+  cat "$src" >"$dest" || return 1
+  is_vps_proxy_script "$dest"
+}
+
 install_v2_shortcut_files() {
-  local source_path=""
-  if [[ "${BASH_SOURCE[0]:-}" != bash && "${BASH_SOURCE[0]:-}" != -bash ]]; then
+  local source_path="" tf rc=0
+  if [[ ${BASH_SOURCE[0]:-} != bash && ${BASH_SOURCE[0]:-} != -bash ]]; then
     source_path=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)
   fi
 
-  if [[ -n $source_path && -f $source_path && $source_path != /dev/fd/* ]] &&
-    grep -q '^APP_NAME="vps-proxy"$' "$source_path"; then
+  # 普通文件路径：直接安装当前脚本
+  if [[ -n $source_path && -f $source_path && $source_path != /dev/fd/* && $source_path != /proc/self/fd/* ]] &&
+    is_vps_proxy_script "$source_path"; then
     install_v2_local_copy "$source_path"
-  else
-    log "在线执行模式，下载并校验 v2 快照..."
-    download_v2_local_copy
+    return
   fi
+
+  # 在线 / 进程替换执行：先物化当前脚本，避免强依赖固定哈希
+  tf=$(mktemp /tmp/${APP_NAME}.v2src.XXXXXX.sh)
+  if materialize_running_script "$tf"; then
+    install_v2_local_copy "$tf" || rc=$?
+    rm -f "$tf"
+    return $rc
+  fi
+  rm -f "$tf"
+
+  log "在线执行模式，下载并校验 v2 快照..."
+  download_v2_local_copy
 }
 install_v2_shortcut() {
   require_root
@@ -703,24 +729,31 @@ menu_install_hy2() {
   install_hysteria2 "${a[@]}"
 }
 main_menu() {
-  clear 2>/dev/null || true
-  printf '\n%sVPS 代理控制面板%s\n' "$C_BOLD" "$C_RESET"
-  printf '%sXray Reality · Hysteria2 · 输入 v2 进入此菜单%s\n' "$C_DIM" "$C_RESET"
-  hr
-  printf '  %s1%s  安装 Xray VLESS + REALITY\n' "$C_GREEN" "$C_RESET"
-  printf '  %s2%s  安装 Hysteria2\n' "$C_GREEN" "$C_RESET"
-  printf '  %s3%s  查看节点信息与服务状态\n' "$C_CYAN" "$C_RESET"
-  printf '  %s4%s  卸载 Xray\n' "$C_YELLOW" "$C_RESET"
-  printf '  %s5%s  卸载 Hysteria2\n' "$C_YELLOW" "$C_RESET"
-  printf '  %s0%s  退出\n' "$C_DIM" "$C_RESET"
-  hr; print_service_statuses; hr
-  warn "安装前请确认安全组已放行对应端口。"
-  local c; read -r -p "请选择: " c
-  case $c in
-    1) menu_install_xray ;; 2) menu_install_hy2 ;; 3) show_info ;;
-    4) uninstall_xray ;; 5) uninstall_hy2 ;; 0) exit 0 ;;
-    *) fail "无效选项：$c" ;;
-  esac
+  local c
+  while true; do
+    clear 2>/dev/null || true
+    printf '\n%sVPS 代理控制面板%s\n' "$C_BOLD" "$C_RESET"
+    printf '%sXray Reality · Hysteria2 · 输入 v2 进入此菜单%s\n' "$C_DIM" "$C_RESET"
+    hr
+    printf '  %s1%s  安装 Xray VLESS + REALITY\n' "$C_GREEN" "$C_RESET"
+    printf '  %s2%s  安装 Hysteria2\n' "$C_GREEN" "$C_RESET"
+    printf '  %s3%s  查看节点信息与服务状态\n' "$C_CYAN" "$C_RESET"
+    printf '  %s4%s  卸载 Xray\n' "$C_YELLOW" "$C_RESET"
+    printf '  %s5%s  卸载 Hysteria2\n' "$C_YELLOW" "$C_RESET"
+    printf '  %s0%s  退出\n' "$C_DIM" "$C_RESET"
+    hr; print_service_statuses; hr
+    warn "安装前请确认安全组已放行对应端口。"
+    read -r -p "请选择: " c
+    case $c in
+      1) menu_install_xray; return ;;
+      2) menu_install_hy2; return ;;
+      3) show_info; return ;;
+      4) uninstall_xray; return ;;
+      5) uninstall_hy2; return ;;
+      0) exit 0 ;;
+      *) warn "无效选项：$c"; sleep 1 ;;
+    esac
+  done
 }
 ensure_v2_shortcut_auto() {
   [[ $EUID -ne 0 ]] && { warn "非 root，跳过自动安装 v2。"; return; }
@@ -743,5 +776,6 @@ main() {
   esac
 }
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  trap 'fail "脚本在第 $LINENO 行失败，退出码：$?"' ERR
   main "$@"
 fi
