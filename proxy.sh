@@ -537,8 +537,7 @@ install_hy2() {
   require_root; require_systemd; detect_os; install_deps; ensure_dirs
   [[ -n $HY2_PORT ]] && validate_port "$HY2_PORT" || HY2_PORT=$(random_port)
   [[ -n $HY2_PASSWORD ]] || HY2_PASSWORD=$(random_password)
-  local domains=(www.bing.com www.microsoft.com www.apple.com www.cloudflare.com)
-  [[ -n $HY2_DOMAIN ]] || HY2_DOMAIN=${domains[RANDOM % ${#domains[@]}]}
+  [[ -n $HY2_DOMAIN ]] || HY2_DOMAIN=${SNI_PRESETS[RANDOM % ${#SNI_PRESETS[@]}]}
   validate_domain "$HY2_DOMAIN"
 
   install_hy2_core
@@ -701,6 +700,24 @@ auto_v2() {
 }
 
 # ---------- 交互菜单 ----------
+# REALITY / HY2 常用 SNI（多样选择，避免大家都挤同一个）
+SNI_PRESETS=(
+  www.cloudflare.com
+  www.microsoft.com
+  www.apple.com
+  www.amazon.com
+  www.yahoo.com
+  www.bing.com
+  www.nvidia.com
+  www.samsung.com
+  www.intel.com
+  www.cisco.com
+  gateway.icloud.com
+  addons.mozilla.org
+  www.speedtest.net
+  dl.google.com
+)
+
 prompt() {
   local label=$1 default=$2 val
   if [[ -n $default ]]; then
@@ -709,6 +726,35 @@ prompt() {
   else
     read -r -p "${label}: " val
     printf %s "$val"
+  fi
+}
+
+# 打印 SNI 列表；选中后设置全局 _SNI_CHOSEN
+pick_sni() {
+  local title=${1:-请选择 SNI / 伪装域名} i n c custom
+  n=${#SNI_PRESETS[@]}
+  printf '\n  %s%s%s\n' "$B" "$title" "$R"
+  hr
+  for ((i = 0; i < n; i++)); do
+    printf '  %s%2d%s  %s\n' "$GRN" "$((i + 1))" "$R" "${SNI_PRESETS[i]}"
+  done
+  printf '  %s%2d%s  随机选择（推荐，降低特征）\n' "$CYN" "$((n + 1))" "$R"
+  printf '  %s%2d%s  自定义\n' "$YEL" "$((n + 2))" "$R"
+  hr
+  read -r -p "  请选择 [$((n + 1))]: " c
+  c=${c:-$((n + 1))}
+  if [[ $c =~ ^[0-9]+$ ]] && ((c >= 1 && c <= n)); then
+    _SNI_CHOSEN=${SNI_PRESETS[c - 1]}
+  elif [[ $c == "$((n + 1))" ]]; then
+    _SNI_CHOSEN=${SNI_PRESETS[RANDOM % n]}
+    log "随机 SNI: ${_SNI_CHOSEN}"
+  elif [[ $c == "$((n + 2))" ]]; then
+    custom=$(prompt "自定义域名" "www.cloudflare.com")
+    _SNI_CHOSEN=$custom
+  else
+    warn "无效选项，改为随机"
+    _SNI_CHOSEN=${SNI_PRESETS[RANDOM % n]}
+    log "随机 SNI: ${_SNI_CHOSEN}"
   fi
 }
 
@@ -743,18 +789,9 @@ menu_install() {
       1)
         local port sni target
         port=$(prompt "TCP 端口" "443")
-        printf '\n  伪装目标: 1)cloudflare  2)yahoo  3)microsoft  4)自定义\n'
-        local t
-        read -r -p "  选择 [1]: " t
-        case ${t:-1} in
-          2) sni=www.yahoo.com; target=www.yahoo.com:443 ;;
-          3) sni=www.microsoft.com; target=www.microsoft.com:443 ;;
-          4)
-            sni=$(prompt "SNI 域名" "www.cloudflare.com")
-            target=$(prompt "回落 target" "${sni}:443")
-            ;;
-          *) sni=www.cloudflare.com; target=www.cloudflare.com:443 ;;
-        esac
+        pick_sni "REALITY 伪装目标 / SNI（dest 默认与 SNI 相同）"
+        sni=$_SNI_CHOSEN
+        target=$(prompt "回落 target host:port" "${sni}:443")
         install_reality --port "$port" --sni "$sni" --target "$target"
         auto_v2
         read -r -p $'\n按回车返回...' _
@@ -762,10 +799,10 @@ menu_install() {
       2)
         local hp hd
         hp=$(prompt "UDP 端口（空=随机）" "")
-        hd=$(prompt "SNI 域名（空=随机大厂）" "")
-        local args=()
+        pick_sni "Hysteria2 证书 SNI"
+        hd=$_SNI_CHOSEN
+        local args=(--domain "$hd")
         [[ -n $hp ]] && args+=(--port "$hp")
-        [[ -n $hd ]] && args+=(--domain "$hd")
         install_hy2 "${args[@]}"
         auto_v2
         read -r -p $'\n按回车返回...' _
