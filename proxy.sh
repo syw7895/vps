@@ -246,23 +246,91 @@ install_xray_core() {
   command -v xray >/dev/null || fail "Xray 安装失败"
 }
 
-harden_xray_config() {
-  local xu xg xd
+# 默认官方安装以 nobody 运行；证书不能放在 /root（700）下
+xray_run_user() {
+  local xu
   xu=$(systemctl show -p User --value xray 2>/dev/null || true)
   [[ -z $xu || $xu == - ]] && xu=nobody
   getent passwd "$xu" >/dev/null || xu=nobody
-  xg=$(id -gn "$xu" 2>/dev/null || echo nogroup)
+  printf %s "$xu"
+}
+
+xray_run_group() {
+  id -gn "$(xray_run_user)" 2>/dev/null || echo nogroup
+}
+
+# 证书目录：Xray 配置旁，root:xray组 750，密钥 640（服务用户可读）
+xray_cert_dir() {
+  local domain=$1
+  printf '%s/certs/%s' "$(dirname "$XRAY_CONFIG")" "$domain"
+}
+
+fix_cert_permissions() {
+  local certdir=$1 cert=$2 key=$3
+  local xg
+  xg=$(xray_run_group)
+  install -d -o root -g "$xg" -m 750 "$(dirname "$certdir")"
+  install -d -o root -g "$xg" -m 750 "$certdir"
+  [[ -f $cert ]] && chown "root:$xg" "$cert" && chmod 644 "$cert"
+  [[ -f $key ]] && chown "root:$xg" "$key" && chmod 640 "$key"
+}
+
+harden_xray_config() {
+  local xu xg xd
+  xu=$(xray_run_user)
+  xg=$(xray_run_group)
   xd=$(dirname "$XRAY_CONFIG")
   install -d -o root -g "$xg" -m 750 "$xd"
   chown "root:$xg" "$XRAY_CONFIG"
   chmod 640 "$XRAY_CONFIG"
+  # CDN 证书若在配置目录下，确保服务用户可读
+  if [[ -n ${CDN_CERT:-} && -f ${CDN_CERT:-} ]]; then
+    fix_cert_permissions "$(dirname "$CDN_CERT")" "$CDN_CERT" "${CDN_KEY:-}"
+  fi
   xray run -test -config "$XRAY_CONFIG" >/dev/null
+}
+
+# 旧版把证书放在 /root 下，nobody 读不到；自动迁到配置目录
+migrate_cdn_certs_if_needed() {
+  [[ -f $CDN_STATE ]] || return 0
+  # shellcheck source=/dev/null
+  . "$CDN_STATE"
+  [[ -n ${CDN_DOMAIN:-} && -n ${CDN_CERT:-} && -f ${CDN_CERT:-} ]] || return 0
+  case $CDN_CERT in
+    /root/*|"${CONFIG_DIR}"/*) ;;
+    *)
+      # 已在可读路径则只修权限
+      fix_cert_permissions "$(dirname "$CDN_CERT")" "$CDN_CERT" "${CDN_KEY:-}"
+      return 0
+      ;;
+  esac
+  local newdir cert key
+  newdir=$(xray_cert_dir "$CDN_DOMAIN")
+  install -d -m 750 "$newdir"
+  cert="$newdir/fullchain.pem"
+  key="$newdir/privkey.pem"
+  cp -a "$CDN_CERT" "$cert"
+  [[ -f ${CDN_KEY:-} ]] && cp -a "$CDN_KEY" "$key"
+  fix_cert_permissions "$newdir" "$cert" "$key"
+  CDN_CERT=$cert
+  CDN_KEY=$key
+  write_state "$CDN_STATE" \
+    "CDN_PORT=${CDN_PORT}" \
+    "CDN_UUID=${CDN_UUID}" \
+    "CDN_DOMAIN=${CDN_DOMAIN}" \
+    "CDN_PATH=${CDN_PATH}" \
+    "CDN_CERT=${CDN_CERT}" \
+    "CDN_KEY=${CDN_KEY}"
+  log "CDN 证书已迁移到 Xray 可读路径: $newdir"
 }
 
 build_xray_config() {
   local reality_json="" cdn_json="" inbounds=""
   # shellcheck source=/dev/null
   [[ -f $REALITY_STATE ]] && . "$REALITY_STATE"
+  # shellcheck source=/dev/null
+  [[ -f $CDN_STATE ]] && . "$CDN_STATE"
+  migrate_cdn_certs_if_needed
   # shellcheck source=/dev/null
   [[ -f $CDN_STATE ]] && . "$CDN_STATE"
 
@@ -468,14 +536,27 @@ parse_cdn_args() {
 }
 
 issue_cert() {
-  local domain=$1 email=$2 certdir="${CONFIG_DIR}/certs/${domain}"
-  install -d -m 700 "$certdir"
+  local domain=$1 email=$2
+  # 必须放在 Xray 能读的路径；/root 下 700/600 会导致 nobody 启动失败
+  local certdir olddir
+  certdir=$(xray_cert_dir "$domain")
+  olddir="${CONFIG_DIR}/certs/${domain}"
+  install -d -m 755 "$(dirname "$certdir")"
+  install -d -m 750 "$certdir"
+
+  # 迁移旧路径证书（若曾装在 /root/proxy-info/certs）
+  if [[ ! -f $certdir/fullchain.pem && -f $olddir/fullchain.pem ]]; then
+    cp -a "$olddir/fullchain.pem" "$certdir/fullchain.pem"
+    [[ -f $olddir/privkey.pem ]] && cp -a "$olddir/privkey.pem" "$certdir/privkey.pem"
+    log "已从旧路径迁移证书: $olddir -> $certdir"
+  fi
 
   if [[ -f $certdir/fullchain.pem && -f $certdir/privkey.pem ]]; then
     if openssl x509 -in "$certdir/fullchain.pem" -checkend 604800 -noout 2>/dev/null; then
       log "使用已有证书: $certdir"
       CDN_CERT="$certdir/fullchain.pem"
       CDN_KEY="$certdir/privkey.pem"
+      fix_cert_permissions "$certdir" "$CDN_CERT" "$CDN_KEY"
       return
     fi
   fi
@@ -504,12 +585,11 @@ issue_cert() {
     --key-file "$certdir/privkey.pem" \
     --reloadcmd "systemctl restart xray 2>/dev/null || true"
 
-  chmod 600 "$certdir/privkey.pem"
-  chmod 644 "$certdir/fullchain.pem"
   CDN_CERT="$certdir/fullchain.pem"
   CDN_KEY="$certdir/privkey.pem"
+  fix_cert_permissions "$certdir" "$CDN_CERT" "$CDN_KEY"
   ((restarted_xray)) && systemctl start xray 2>/dev/null || true
-  ok "证书已就绪: $domain"
+  ok "证书已就绪: $certdir"
 }
 
 install_cdn() {
