@@ -18,6 +18,16 @@ V2_SCRIPT="${V2_DIR}/proxy.sh"
 V2_BIN="/usr/local/bin/v2"
 XRAY_INSTALLER_URL="${XRAY_INSTALLER_URL:-https://github.com/XTLS/Xray-install/raw/main/install-release.sh}"
 HY2_INSTALLER_URL="${HY2_INSTALLER_URL:-https://get.hy2.sh/}"
+DEPS_INSTALLED=0
+
+# SNI 预设（5 个 + 随机默认）
+SNI_PRESETS=(
+  www.cloudflare.com
+  www.microsoft.com
+  www.apple.com
+  www.amazon.com
+  www.yahoo.com
+)
 
 # 颜色
 if [[ -t 1 ]]; then
@@ -32,27 +42,22 @@ ok()   { printf '%s[%s]%s %s\n' "$GRN" "OK" "$R" "$*"; }
 warn() { printf '%s[%s]%s %s\n' "$YEL" "!" "$R" "$*"; }
 fail() { printf '%s[%s]%s %s\n' "$RED" "ERR" "$R" "$*" >&2; exit 1; }
 hr()   { printf '%s────────────────────────────────────────%s\n' "$D" "$R"; }
+pause() { read -r -p $'\n按回车返回...' _; }
 
 usage() {
   cat <<'EOF'
 用法:
   bash proxy.sh                 进入菜单
-  bash proxy.sh menu|v2         进入菜单
-  bash proxy.sh xray [参数]     安装 Xray VLESS + REALITY
+  bash proxy.sh xray [参数]     安装 REALITY
   bash proxy.sh hy2  [参数]     安装 Hysteria2
-  bash proxy.sh cdn  [参数]     安装 VLESS + WS + TLS（可走 Cloudflare）
+  bash proxy.sh cdn  [参数]     安装 VLESS+WS+TLS（可走 CF）
   bash proxy.sh show            查看节点与状态
-  bash proxy.sh install-shortcut  安装 v2 快捷命令
+  bash proxy.sh install-shortcut
   bash proxy.sh uninstall-xray | uninstall-hy2 | uninstall-cdn | uninstall-v2
 
-Xray REALITY:
-  --port PORT   --sni DOMAIN   --target HOST:PORT   --uuid UUID
-
-Hysteria2:
-  --port PORT   --password PASS   --domain SNI   --masquerade URL
-
-CDN (WS+TLS):
-  --domain DOMAIN   --port PORT   --path /uri   --uuid UUID   --email EMAIL
+REALITY:  --port --sni --target --uuid
+Hysteria2: --port --password --domain --masquerade
+CDN:      --domain --port --path --uuid --email
 EOF
 }
 
@@ -69,13 +74,23 @@ detect_os() {
 }
 
 install_deps() {
+  ((DEPS_INSTALLED)) && return 0
   log "安装依赖..."
   apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    curl ca-certificates openssl sed grep gawk coreutils unzip iproute2 socat cron >/dev/null
+    curl ca-certificates openssl coreutils iproute2 >/dev/null
+  DEPS_INSTALLED=1
 }
 
 ensure_dirs() { install -d -m 700 "$CONFIG_DIR"; }
+
+prepare_env() {
+  require_root
+  require_systemd
+  detect_os
+  install_deps
+  ensure_dirs
+}
 
 require_arg() { [[ -n ${2:-} && $2 != --* ]] || fail "$1 需要参数值"; }
 
@@ -94,14 +109,11 @@ validate_uuid() {
 }
 
 is_ipv4() {
-  local ip=$1
+  local ip=$1 x
   local -a o
-  local x
   [[ $ip =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
   IFS=. read -r -a o <<<"$ip"
-  for x in "${o[@]}"; do
-    ((10#$x <= 255)) || return 1
-  done
+  for x in "${o[@]}"; do ((10#$x <= 255)) || return 1; done
   return 0
 }
 
@@ -109,7 +121,6 @@ validate_target() {
   local t=$1 h p
   [[ $t =~ ^[^:[:space:]]+:[0-9]+$ ]] || fail "target 格式应为 host:port"
   h=${t%:*}; p=${t##*:}
-  # 不可调用 validate_domain：失败会 exit，导致 IPv4 target 永远无法通过
   if [[ $h =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$ ]] || is_ipv4 "$h"; then
     :
   else
@@ -126,7 +137,6 @@ random_uuid() {
 }
 
 random_password() { openssl rand -hex 16; }
-
 random_path() { printf '/%s' "$(openssl rand -hex 8)"; }
 
 random_port() {
@@ -173,24 +183,32 @@ svc_label() {
   esac
 }
 
+# 组件状态行：有 state 文件才算已配置（子 shell 读配置，避免污染全局变量）
+component_line() {
+  local name=$1 state_file=$2 unit=$3 bin=$4 port_key=$5
+  local st port=""
+  if [[ ! -f $state_file ]]; then
+    printf '  %s- %-10s 未安装%s\n' "$D" "$name" "$R"
+    return
+  fi
+  port=$(grep -E "^${port_key}=" "$state_file" 2>/dev/null | head -n1 | cut -d= -f2- || true)
+  st=$(svc_state "$unit" "$bin")
+  case $st in
+    running) printf '  %s● %-10s 运行中%s' "$GRN" "$name" "$R" ;;
+    stopped) printf '  %s○ %-10s 已停止%s' "$YEL" "$name" "$R" ;;
+    *)       printf '  %s○ %-10s 异常%s' "$YEL" "$name" "$R" ;;
+  esac
+  [[ -n $port ]] && printf '  %s:%s%s' "$D" "$port" "$R"
+  printf '\n'
+}
+
 restart_svc() {
   local unit=$1 name=$2
   systemctl enable "$unit" >/dev/null 2>&1 || true
-  systemctl restart "$unit" || fail "$name 启动失败，请检查: journalctl -u $unit -n 30"
+  systemctl restart "$unit" || fail "$name 启动失败: journalctl -u $unit -n 30"
   sleep 1
   systemctl is-active --quiet "$unit" || fail "$name 未保持运行"
   ok "$name 运行中"
-}
-
-# ---------- Xray 安装与配置合并 ----------
-install_xray_core() {
-  if command -v xray >/dev/null; then
-    log "Xray 已安装: $(xray version 2>/dev/null | head -n1 || echo ok)"
-    return
-  fi
-  log "安装 Xray..."
-  bash -c "$(curl -fsSL "$XRAY_INSTALLER_URL")" @ install
-  command -v xray >/dev/null || fail "Xray 安装失败"
 }
 
 write_state() {
@@ -201,14 +219,51 @@ write_state() {
   chmod 600 "$file"
 }
 
-# shellcheck disable=SC1090
-load_state() { [[ -f $1 ]] && . "$1" || true; }
+save_info() {
+  local file=$1
+  shift
+  umask 077
+  printf '%s\n' "$@" >"$file"
+  chmod 600 "$file"
+}
+
+print_block() {
+  local title=$1 file=$2
+  printf '\n%s%s%s\n' "$B$CYN" "$title" "$R"
+  hr
+  cat "$file"
+  printf '\n'
+}
+
+# ---------- Xray ----------
+install_xray_core() {
+  if command -v xray >/dev/null; then
+    log "Xray 已安装: $(xray version 2>/dev/null | head -n1 || echo ok)"
+    return
+  fi
+  log "安装 Xray..."
+  bash -c "$(curl -fsSL "$XRAY_INSTALLER_URL")" @ install
+  command -v xray >/dev/null || fail "Xray 安装失败"
+}
+
+harden_xray_config() {
+  local xu xg xd
+  xu=$(systemctl show -p User --value xray 2>/dev/null || true)
+  [[ -z $xu || $xu == - ]] && xu=nobody
+  getent passwd "$xu" >/dev/null || xu=nobody
+  xg=$(id -gn "$xu" 2>/dev/null || echo nogroup)
+  xd=$(dirname "$XRAY_CONFIG")
+  install -d -o root -g "$xg" -m 750 "$xd"
+  chown "root:$xg" "$XRAY_CONFIG"
+  chmod 640 "$XRAY_CONFIG"
+  xray run -test -config "$XRAY_CONFIG" >/dev/null
+}
 
 build_xray_config() {
-  local reality_json="" cdn_json="" xu xg xd
-  # shellcheck disable=SC1090
+  local reality_json="" cdn_json="" inbounds=""
+  # shellcheck source=/dev/null
   [[ -f $REALITY_STATE ]] && . "$REALITY_STATE"
-  # shellcheck disable=SC1090
+  # shellcheck source=/dev/null
   [[ -f $CDN_STATE ]] && . "$CDN_STATE"
 
   if [[ -f $REALITY_STATE ]]; then
@@ -268,11 +323,7 @@ EOF
 )
   fi
 
-  if [[ -z $reality_json && -z $cdn_json ]]; then
-    return 0
-  fi
-
-  local inbounds=""
+  [[ -n $reality_json || -n $cdn_json ]] || return 0
   if [[ -n $reality_json && -n $cdn_json ]]; then
     inbounds="${reality_json},${cdn_json}"
   else
@@ -292,16 +343,7 @@ ${inbounds}
   ]
 }
 EOF
-
-  xu=$(systemctl show -p User --value xray 2>/dev/null || true)
-  [[ -z $xu || $xu == - ]] && xu=nobody
-  getent passwd "$xu" >/dev/null || xu=nobody
-  xg=$(id -gn "$xu" 2>/dev/null || echo nogroup)
-  xd=$(dirname "$XRAY_CONFIG")
-  install -d -o root -g "$xg" -m 750 "$xd"
-  chown "root:$xg" "$XRAY_CONFIG"
-  chmod 640 "$XRAY_CONFIG"
-  xray run -test -config "$XRAY_CONFIG" >/dev/null
+  harden_xray_config
 }
 
 # ---------- REALITY ----------
@@ -333,19 +375,42 @@ generate_reality_keys() {
 
 install_reality() {
   parse_reality_args "$@"
-  require_root; require_systemd; detect_os; install_deps; ensure_dirs
+  prepare_env
   validate_port "$REALITY_PORT"
   validate_domain "$REALITY_SNI"
   validate_target "$REALITY_TARGET"
   [[ -z $REALITY_UUID ]] || validate_uuid "$REALITY_UUID"
-  [[ -n $REALITY_UUID ]] || REALITY_UUID=$(random_uuid)
 
   install_xray_core
-  local keys priv pub short ip link
-  keys=$(generate_reality_keys)
-  priv=$(printf '%s\n' "$keys" | sed -n '1p')
-  pub=$(printf '%s\n' "$keys" | sed -n '2p')
-  short=$(openssl rand -hex 8)
+  local keys priv pub short ip link reused=0
+  local want_uuid=$REALITY_UUID
+  local port=$REALITY_PORT sni=$REALITY_SNI target=$REALITY_TARGET
+
+  if [[ -f $REALITY_STATE ]]; then
+    # shellcheck source=/dev/null
+    . "$REALITY_STATE"
+    if [[ -n ${REALITY_PRIV:-} && -n ${REALITY_PUB:-} && -n ${REALITY_SHORT:-} ]]; then
+      priv=$REALITY_PRIV
+      pub=$REALITY_PUB
+      short=$REALITY_SHORT
+      [[ -n $want_uuid ]] || want_uuid=${REALITY_UUID:-}
+      reused=1
+      log "复用已有 REALITY 密钥与 ShortId"
+    fi
+  fi
+
+  REALITY_PORT=$port
+  REALITY_SNI=$sni
+  REALITY_TARGET=$target
+  REALITY_UUID=$want_uuid
+
+  if ((reused == 0)); then
+    keys=$(generate_reality_keys)
+    priv=$(printf '%s\n' "$keys" | sed -n '1p')
+    pub=$(printf '%s\n' "$keys" | sed -n '2p')
+    short=$(openssl rand -hex 8)
+  fi
+  [[ -n $REALITY_UUID ]] || REALITY_UUID=$(random_uuid)
   ip=$(server_ip)
 
   write_state "$REALITY_STATE" \
@@ -363,27 +428,26 @@ install_reality() {
 
   link="vless://${REALITY_UUID}@${ip}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${pub}&sid=${short}&type=tcp&headerType=none#Reality-${ip}"
 
-  cat >"$XRAY_INFO" <<EOF
-Xray VLESS + REALITY（直连）
+  save_info "$XRAY_INFO" \
+    "Xray VLESS + REALITY（直连）" \
+    "" \
+    "地址:      ${ip}" \
+    "端口:      ${REALITY_PORT}" \
+    "UUID:      ${REALITY_UUID}" \
+    "Flow:      xtls-rprx-vision" \
+    "SNI:       ${REALITY_SNI}" \
+    "目标:      ${REALITY_TARGET}" \
+    "PublicKey: ${pub}" \
+    "ShortId:   ${short}" \
+    "" \
+    "分享链接:" \
+    "${link}"
 
-地址:      ${ip}
-端口:      ${REALITY_PORT}
-UUID:      ${REALITY_UUID}
-Flow:      xtls-rprx-vision
-SNI:       ${REALITY_SNI}
-目标:      ${REALITY_TARGET}
-PublicKey: ${pub}
-ShortId:   ${short}
-
-分享链接:
-${link}
-EOF
-  chmod 600 "$XRAY_INFO"
-  ok "REALITY 安装完成"
-  printf '\n'; cat "$XRAY_INFO"
+  if ((reused)); then ok "REALITY 安装完成（已复用密钥）"; else ok "REALITY 安装完成"; fi
+  print_block "节点信息" "$XRAY_INFO"
 }
 
-# ---------- CDN WS+TLS ----------
+# ---------- CDN ----------
 parse_cdn_args() {
   CDN_PORT="${CDN_PORT:-8443}"
   CDN_DOMAIN="${CDN_DOMAIN:-}"
@@ -423,7 +487,6 @@ issue_cert() {
   fi
   [[ -x $acme ]] || fail "acme.sh 安装失败"
 
-  # 临时停占 80 的服务（如有）
   local restarted_xray=0
   if systemctl is-active --quiet xray 2>/dev/null && ss -H -ltn 2>/dev/null | grep -qE ':80[[:space:]]'; then
     systemctl stop xray || true
@@ -433,7 +496,7 @@ issue_cert() {
   "$acme" --set-default-ca --server letsencrypt >/dev/null
   if ! "$acme" --issue -d "$domain" --standalone --keylength ec-256 --force; then
     ((restarted_xray)) && systemctl start xray || true
-    fail "证书申请失败。请确认域名已解析到本机，且 80 端口未被占用/已放行"
+    fail "证书申请失败。请确认域名已解析到本机，且 80 端口可用"
   fi
 
   "$acme" --install-cert -d "$domain" --ecc \
@@ -452,7 +515,7 @@ issue_cert() {
 install_cdn() {
   parse_cdn_args "$@"
   [[ -n $CDN_DOMAIN ]] || fail "CDN 需要 --domain（例: bash proxy.sh cdn --domain example.com）"
-  require_root; require_systemd; detect_os; install_deps; ensure_dirs
+  prepare_env
   validate_domain "$CDN_DOMAIN"
   validate_port "$CDN_PORT"
   [[ -z $CDN_UUID ]] || validate_uuid "$CDN_UUID"
@@ -477,31 +540,29 @@ install_cdn() {
   open_port "$CDN_PORT" tcp
   open_port 80 tcp
 
-  local link
-  link="vless://${CDN_UUID}@${CDN_DOMAIN}:${CDN_PORT}?encryption=none&security=tls&type=ws&host=${CDN_DOMAIN}&sni=${CDN_DOMAIN}&path=$(printf %s "$CDN_PATH" | sed 's|/|%2F|g')#CDN-${CDN_DOMAIN}"
+  local link path_enc
+  path_enc=$(printf %s "$CDN_PATH" | sed 's|/|%2F|g')
+  link="vless://${CDN_UUID}@${CDN_DOMAIN}:${CDN_PORT}?encryption=none&security=tls&type=ws&host=${CDN_DOMAIN}&sni=${CDN_DOMAIN}&path=${path_enc}#CDN-${CDN_DOMAIN}"
 
-  cat >"$CDN_INFO" <<EOF
-Xray VLESS + WS + TLS（可走 Cloudflare CDN）
+  save_info "$CDN_INFO" \
+    "Xray VLESS + WS + TLS（可走 Cloudflare）" \
+    "" \
+    "域名:   ${CDN_DOMAIN}" \
+    "端口:   ${CDN_PORT}" \
+    "UUID:   ${CDN_UUID}" \
+    "传输:   WebSocket" \
+    "TLS:    开启" \
+    "Host:   ${CDN_DOMAIN}" \
+    "SNI:    ${CDN_DOMAIN}" \
+    "Path:   ${CDN_PATH}" \
+    "" \
+    "分享链接:" \
+    "${link}" \
+    "" \
+    "说明: 客户端地址可改为 CF 优选 IP，SNI/Host 保持域名。"
 
-域名:   ${CDN_DOMAIN}
-端口:   ${CDN_PORT}
-UUID:   ${CDN_UUID}
-传输:   WebSocket
-TLS:    开启
-Host:   ${CDN_DOMAIN}
-SNI:    ${CDN_DOMAIN}
-Path:   ${CDN_PATH}
-
-分享链接:
-${link}
-
-说明:
-- 域名请解析到本机；若使用 Cloudflare，可开启代理（橙云），SSL 建议 Full / Full strict。
-- 客户端「地址」可改为自己测得的 CF 优选 IP，SNI 与 Host 保持域名不变。
-EOF
-  chmod 600 "$CDN_INFO"
   ok "CDN 节点安装完成"
-  printf '\n'; cat "$CDN_INFO"
+  print_block "节点信息" "$CDN_INFO"
 }
 
 # ---------- Hysteria2 ----------
@@ -534,14 +595,15 @@ install_hy2_core() {
 
 install_hy2() {
   parse_hy2_args "$@"
-  require_root; require_systemd; detect_os; install_deps; ensure_dirs
+  prepare_env
   [[ -n $HY2_PORT ]] && validate_port "$HY2_PORT" || HY2_PORT=$(random_port)
   [[ -n $HY2_PASSWORD ]] || HY2_PASSWORD=$(random_password)
   [[ -n $HY2_DOMAIN ]] || HY2_DOMAIN=${SNI_PRESETS[RANDOM % ${#SNI_PRESETS[@]}]}
   validate_domain "$HY2_DOMAIN"
 
   install_hy2_core
-  getent passwd "$HY2_USER" >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin "$HY2_USER" 2>/dev/null || true
+  getent passwd "$HY2_USER" >/dev/null 2>&1 \
+    || useradd --system --no-create-home --shell /usr/sbin/nologin "$HY2_USER" 2>/dev/null || true
 
   install -d -o root -g "$HY2_USER" -m 750 "$HY2_CERT_DIR" /etc/hysteria
   openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
@@ -573,46 +635,56 @@ EOF
   chown "root:${HY2_USER}" "$HY2_CONFIG"
   chmod 640 "$HY2_CONFIG"
 
+  # 便于状态栏读端口
+  write_state "${CONFIG_DIR}/hy2.conf" "HY2_PORT=${HY2_PORT}" "HY2_DOMAIN=${HY2_DOMAIN}"
+
   restart_svc hysteria-server "Hysteria2"
   open_port "$HY2_PORT" udp
 
   link="hysteria2://${HY2_PASSWORD}@${ip}:${HY2_PORT}/?sni=${HY2_DOMAIN}&insecure=1&pinSHA256=${cert_sha}#HY2-${ip}"
 
-  cat >"$HY2_INFO" <<EOF
-Hysteria2
+  save_info "$HY2_INFO" \
+    "Hysteria2" \
+    "" \
+    "地址:     ${ip}" \
+    "端口:     ${HY2_PORT}" \
+    "密码:     ${HY2_PASSWORD}" \
+    "SNI:      ${HY2_DOMAIN}" \
+    "证书指纹: ${cert_sha}" \
+    "协议:     UDP" \
+    "" \
+    "分享链接:" \
+    "${link}"
 
-地址:     ${ip}
-端口:     ${HY2_PORT}
-密码:     ${HY2_PASSWORD}
-SNI:      ${HY2_DOMAIN}
-证书指纹: ${cert_sha}
-协议:     UDP
-
-分享链接:
-${link}
-EOF
-  chmod 600 "$HY2_INFO"
   ok "Hysteria2 安装完成"
-  printf '\n'; cat "$HY2_INFO"
+  print_block "节点信息" "$HY2_INFO"
 }
 
 # ---------- 展示 / 卸载 ----------
 show_info() {
-  printf '\n%s%s 节点信息 %s\n' "$B" "$CYN" "$R"
-  hr
-  local f found=0
-  for f in "$XRAY_INFO" "$CDN_INFO" "$HY2_INFO"; do
-    if [[ -f $f ]]; then
-      found=1
-      cat "$f"
-      printf '\n'
-      hr
-    fi
-  done
-  ((found)) || log "暂无已保存节点"
+  local found=0
+  if [[ -f $XRAY_INFO ]]; then print_block "REALITY" "$XRAY_INFO"; found=1; fi
+  if [[ -f $CDN_INFO ]]; then print_block "CDN / WS+TLS" "$CDN_INFO"; found=1; fi
+  if [[ -f $HY2_INFO ]]; then print_block "Hysteria2" "$HY2_INFO"; found=1; fi
+  ((found)) || { printf '\n'; log "暂无已保存节点"; }
+
   printf '\n%s服务状态%s\n' "$B" "$R"
-  printf '  REALITY/CDN (xray) : %b\n' "$(svc_label xray xray)"
-  printf '  Hysteria2          : %b\n' "$(svc_label hysteria-server hysteria)"
+  hr
+  component_line "REALITY" "$REALITY_STATE" xray xray REALITY_PORT
+  component_line "CDN/WS" "$CDN_STATE" xray xray CDN_PORT
+  if [[ -f ${CONFIG_DIR}/hy2.conf ]]; then
+    component_line "Hysteria2" "${CONFIG_DIR}/hy2.conf" hysteria-server hysteria HY2_PORT
+  elif [[ -f $HY2_INFO ]]; then
+    local st
+    st=$(svc_state hysteria-server hysteria)
+    case $st in
+      running) printf '  %s● %-10s 运行中%s\n' "$GRN" "Hysteria2" "$R" ;;
+      stopped) printf '  %s○ %-10s 已停止%s\n' "$YEL" "Hysteria2" "$R" ;;
+      *)       printf '  %s● %-10s 已配置%s\n' "$GRN" "Hysteria2" "$R" ;;
+    esac
+  else
+    printf '  %s- %-10s 未安装%s\n' "$D" "Hysteria2" "$R"
+  fi
   printf '\n'
 }
 
@@ -622,11 +694,9 @@ uninstall_reality() {
   if [[ -f $CDN_STATE ]]; then
     build_xray_config
     restart_svc xray "Xray"
-    ok "已移除 REALITY，保留 CDN 入站"
+    ok "已移除 REALITY，保留 CDN"
   else
-    if command -v xray >/dev/null; then
-      bash -c "$(curl -fsSL "$XRAY_INSTALLER_URL")" @ remove --purge 2>/dev/null || true
-    fi
+    command -v xray >/dev/null && bash -c "$(curl -fsSL "$XRAY_INSTALLER_URL")" @ remove --purge 2>/dev/null || true
     rm -f "$XRAY_CONFIG"
     ok "已卸载 Xray / REALITY"
   fi
@@ -638,13 +708,11 @@ uninstall_cdn() {
   if [[ -f $REALITY_STATE ]]; then
     build_xray_config
     restart_svc xray "Xray"
-    ok "已移除 CDN 入站，保留 REALITY"
+    ok "已移除 CDN，保留 REALITY"
   else
-    if command -v xray >/dev/null && [[ ! -f $REALITY_STATE ]]; then
-      bash -c "$(curl -fsSL "$XRAY_INSTALLER_URL")" @ remove --purge 2>/dev/null || true
-      rm -f "$XRAY_CONFIG"
-    fi
-    ok "已卸载 CDN 节点"
+    command -v xray >/dev/null && bash -c "$(curl -fsSL "$XRAY_INSTALLER_URL")" @ remove --purge 2>/dev/null || true
+    rm -f "$XRAY_CONFIG"
+    ok "已卸载 CDN"
   fi
 }
 
@@ -653,7 +721,7 @@ uninstall_hy2() {
   systemctl stop hysteria-server 2>/dev/null || true
   systemctl disable hysteria-server 2>/dev/null || true
   bash <(curl -fsSL "$HY2_INSTALLER_URL") --remove 2>/dev/null || true
-  rm -f "$HY2_INFO" "$HY2_CONFIG"
+  rm -f "$HY2_INFO" "$HY2_CONFIG" "${CONFIG_DIR}/hy2.conf"
   rm -rf "$HY2_CERT_DIR"
   rmdir /etc/hysteria 2>/dev/null || true
   ok "已卸载 Hysteria2"
@@ -670,7 +738,7 @@ uninstall_v2() {
   fi
 }
 
-# ---------- v2 快捷命令 ----------
+# ---------- v2 ----------
 install_v2_files() {
   local src=${BASH_SOURCE[0]:-} tmp
   install -d -m 755 "$V2_DIR"
@@ -682,7 +750,7 @@ install_v2_files() {
     install -m 755 "$tmp" "$V2_SCRIPT"
     rm -f "$tmp"
   else
-    fail "无法定位当前脚本，请下载后执行: bash proxy.sh install-shortcut"
+    fail "无法定位当前脚本，请: bash proxy.sh install-shortcut"
   fi
   ln -sfn "$V2_SCRIPT" "$V2_BIN" 2>/dev/null || install -m 755 "$V2_SCRIPT" "$V2_BIN"
   ok "已安装快捷命令: v2"
@@ -699,30 +767,20 @@ auto_v2() {
   install_v2_files 2>/dev/null || warn "自动安装 v2 跳过"
 }
 
-# ---------- 交互菜单 ----------
-# REALITY / HY2 常用 SNI（5 个预设 + 随机默认，避免特征聚集）
-SNI_PRESETS=(
-  www.cloudflare.com
-  www.microsoft.com
-  www.apple.com
-  www.amazon.com
-  www.yahoo.com
-)
-
+# ---------- 菜单 ----------
 prompt() {
   local label=$1 default=$2 val
   if [[ -n $default ]]; then
-    read -r -p "${label} [${default}]: " val
+    read -r -p "  ${label} [${default}]: " val
     printf %s "${val:-$default}"
   else
-    read -r -p "${label}: " val
+    read -r -p "  ${label}: " val
     printf %s "$val"
   fi
 }
 
-# 打印 SNI 列表；选中后设置全局 _SNI_CHOSEN（默认 0=随机）
 pick_sni() {
-  local title=${1:-请选择 SNI / 伪装域名} i n c
+  local title=${1:-请选择 SNI} i n c
   n=${#SNI_PRESETS[@]}
   printf '\n  %s%s%s\n' "$B" "$title" "$R"
   hr
@@ -735,28 +793,34 @@ pick_sni() {
   c=${c:-0}
   if [[ $c == 0 ]]; then
     _SNI_CHOSEN=${SNI_PRESETS[RANDOM % n]}
-    log "随机 SNI: ${_SNI_CHOSEN}"
-  elif [[ $c =~ ^[1-9]$ ]] && ((c >= 1 && c <= n)); then
+  elif [[ $c =~ ^[1-5]$ ]] && ((c <= n)); then
     _SNI_CHOSEN=${SNI_PRESETS[c - 1]}
   else
     warn "无效选项，改为随机"
     _SNI_CHOSEN=${SNI_PRESETS[RANDOM % n]}
-    log "随机 SNI: ${_SNI_CHOSEN}"
   fi
+  ok "已选 SNI: ${_SNI_CHOSEN}"
 }
 
 print_banner() {
   clear 2>/dev/null || true
   printf '\n'
-  printf '%s╔══════════════════════════════════════════╗%s\n' "$CYN" "$R"
-  printf '%s║%s  %sVPS 代理控制面板%s                        %s║%s\n' "$CYN" "$R" "$B" "$R" "$CYN" "$R"
-  printf '%s║%s  %sREALITY · Hysteria2 · CF/WS-TLS%s         %s║%s\n' "$CYN" "$R" "$D" "$R" "$CYN" "$R"
-  printf '%s╚══════════════════════════════════════════╝%s\n' "$CYN" "$R"
-  printf '\n'
-  printf '  %s状态%s\n' "$B" "$R"
-  printf '  ├─ REALITY     %b\n' "$( [[ -f $REALITY_STATE ]] && svc_label xray xray || printf '%s- 未安装%s' "$D" "$R" )"
-  printf '  ├─ CDN/WS-TLS  %b\n' "$( [[ -f $CDN_STATE ]] && svc_label xray xray || printf '%s- 未安装%s' "$D" "$R" )"
-  printf '  └─ Hysteria2   %b\n' "$(svc_label hysteria-server hysteria)"
+  printf '%s╔══════════════════════════════════════╗%s\n' "$CYN" "$R"
+  printf '%s║%s  %sVPS 代理控制面板%s                    %s║%s\n' "$CYN" "$R" "$B" "$R" "$CYN" "$R"
+  printf '%s║%s  %sREALITY · HY2 · CF/WS%s               %s║%s\n' "$CYN" "$R" "$D" "$R" "$CYN" "$R"
+  printf '%s╠══════════════════════════════════════╣%s\n' "$CYN" "$R"
+  printf '%s║%s  %s状态%s                                %s║%s\n' "$CYN" "$R" "$B" "$R" "$CYN" "$R"
+  # 状态行放在框外更清晰
+  printf '%s╚══════════════════════════════════════╝%s\n' "$CYN" "$R"
+  component_line "REALITY" "$REALITY_STATE" xray xray REALITY_PORT
+  component_line "CDN/WS" "$CDN_STATE" xray xray CDN_PORT
+  if [[ -f ${CONFIG_DIR}/hy2.conf ]]; then
+    component_line "Hysteria2" "${CONFIG_DIR}/hy2.conf" hysteria-server hysteria HY2_PORT
+  elif [[ -f $HY2_INFO ]]; then
+    printf '  %s● %-10s 已配置%s\n' "$GRN" "Hysteria2" "$R"
+  else
+    printf '  %s- %-10s 未安装%s\n' "$D" "Hysteria2" "$R"
+  fi
   printf '\n'
 }
 
@@ -767,8 +831,8 @@ menu_install() {
     hr
     printf '  %s1%s  Xray VLESS + REALITY（直连）\n' "$GRN" "$R"
     printf '  %s2%s  Hysteria2（UDP）\n' "$GRN" "$R"
-    printf '  %s3%s  VLESS + WS + TLS（可走 Cloudflare）\n' "$GRN" "$R"
-    printf '  %s0%s  返回主菜单\n' "$D" "$R"
+    printf '  %s3%s  VLESS + WS + TLS（可走 CF）\n' "$GRN" "$R"
+    printf '  %s0%s  返回\n' "$D" "$R"
     hr
     local c
     read -r -p "  请选择: " c
@@ -776,23 +840,22 @@ menu_install() {
       1)
         local port sni target
         port=$(prompt "TCP 端口" "443")
-        pick_sni "REALITY 伪装目标 / SNI（dest 默认与 SNI 相同）"
+        pick_sni "REALITY 伪装 / SNI"
         sni=$_SNI_CHOSEN
-        target=$(prompt "回落 target host:port" "${sni}:443")
+        target="${sni}:443"
         install_reality --port "$port" --sni "$sni" --target "$target"
         auto_v2
-        read -r -p $'\n按回车返回...' _
+        pause
         ;;
       2)
-        local hp hd
+        local hp
         hp=$(prompt "UDP 端口（空=随机）" "")
         pick_sni "Hysteria2 证书 SNI"
-        hd=$_SNI_CHOSEN
-        local args=(--domain "$hd")
+        local args=(--domain "$_SNI_CHOSEN")
         [[ -n $hp ]] && args+=(--port "$hp")
         install_hy2 "${args[@]}"
         auto_v2
-        read -r -p $'\n按回车返回...' _
+        pause
         ;;
       3)
         local domain port path email
@@ -805,7 +868,7 @@ menu_install() {
         [[ -n $path ]] && args+=(--path "$path")
         install_cdn "${args[@]}"
         auto_v2
-        read -r -p $'\n按回车返回...' _
+        pause
         ;;
       0) return ;;
       *) warn "无效选项"; sleep 1 ;;
@@ -822,15 +885,15 @@ menu_uninstall() {
     printf '  %s2%s  卸载 CDN (WS+TLS)\n' "$YEL" "$R"
     printf '  %s3%s  卸载 Hysteria2\n' "$YEL" "$R"
     printf '  %s4%s  卸载 v2 快捷命令\n' "$YEL" "$R"
-    printf '  %s0%s  返回主菜单\n' "$D" "$R"
+    printf '  %s0%s  返回\n' "$D" "$R"
     hr
     local c
     read -r -p "  请选择: " c
     case $c in
-      1) uninstall_reality; read -r -p $'\n按回车返回...' _ ;;
-      2) uninstall_cdn; read -r -p $'\n按回车返回...' _ ;;
-      3) uninstall_hy2; read -r -p $'\n按回车返回...' _ ;;
-      4) uninstall_v2; read -r -p $'\n按回车返回...' _ ;;
+      1) uninstall_reality; pause ;;
+      2) uninstall_cdn; pause ;;
+      3) uninstall_hy2; pause ;;
+      4) uninstall_v2; pause ;;
       0) return ;;
       *) warn "无效选项"; sleep 1 ;;
     esac
@@ -850,9 +913,9 @@ main_menu() {
     read -r -p "  请选择: " c
     case $c in
       1) menu_install ;;
-      2) show_info; read -r -p $'按回车返回...' _ ;;
+      2) show_info; pause ;;
       3) menu_uninstall ;;
-      4) install_v2; read -r -p $'\n按回车返回...' _ ;;
+      4) install_v2; pause ;;
       0) printf '\n%s再见%s\n\n' "$D" "$R"; exit 0 ;;
       *) warn "无效选项"; sleep 1 ;;
     esac
@@ -860,18 +923,15 @@ main_menu() {
 }
 
 # ---------- 入口 ----------
-# 节点信息保存在 /root/proxy-info（仅 root 可读）。
-# 用 admin 直接跑 v2 会看不到节点，这里自动提权。
 elevate_if_needed() {
   [[ $EUID -eq 0 ]] && return 0
   case ${1:-} in
     -h|--help|help) return 0 ;;
   esac
-  command -v sudo >/dev/null 2>&1 || fail "请使用 root 运行，或安装 sudo 后执行: sudo $0 $*"
+  command -v sudo >/dev/null 2>&1 || fail "请使用 root 或: sudo $0 $*"
   local self
   self=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)
   [[ -n $self && -r $self ]] || self=$0
-  # 用 bash 显式执行，避免 /tmp noexec 或权限导致 sudo 直接跑脚本失败
   exec sudo -- bash "$self" "$@"
 }
 
@@ -879,10 +939,7 @@ main() {
   local cmd=${1:-menu}
   [[ $# -gt 0 ]] && shift
   case $cmd in
-    menu|v2|"")
-      auto_v2 2>/dev/null || true
-      main_menu
-      ;;
+    menu|v2|"") auto_v2 2>/dev/null || true; main_menu ;;
     xray|reality) install_reality "$@"; auto_v2 ;;
     hy2|hysteria2) install_hy2 "$@"; auto_v2 ;;
     cdn|cf|ws) install_cdn "$@"; auto_v2 ;;
