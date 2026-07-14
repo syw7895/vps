@@ -14,6 +14,7 @@ HY2_INFO="${CONFIG_DIR}/hysteria2.txt"
 XRAY_CONFIG="/usr/local/etc/xray/config.json"
 HY2_CONFIG="/etc/hysteria/config.yaml"
 HY2_CERT_DIR="/etc/hysteria/certs"
+HY2_DROPIN="/etc/systemd/system/hysteria-server.service.d/10-vps-proxy-user.conf"
 HY2_USER="hysteria"
 V2_DIR="/usr/local/lib/vps-proxy"
 V2_SCRIPT="${V2_DIR}/proxy.sh"
@@ -791,13 +792,32 @@ parse_hy2_args() {
   done
 }
 
+ensure_hy2_account() {
+  getent group "$HY2_USER" >/dev/null 2>&1 || groupadd --system "$HY2_USER"
+  getent passwd "$HY2_USER" >/dev/null 2>&1 ||
+    useradd --system --gid "$HY2_USER" --no-create-home --shell /usr/sbin/nologin "$HY2_USER"
+}
+
 install_hy2_core() {
-  if command -v hysteria >/dev/null; then
-    log "Hysteria2 已安装"; return
+  if ! command -v hysteria >/dev/null; then
+    log "安装 Hysteria2（校验远程安装脚本）..."
+    HYSTERIA_USER=$HY2_USER run_verified_script "$HY2_INSTALLER_URL" "$HY2_INSTALLER_SHA256"
+  else
+    log "Hysteria2 已安装"
   fi
-  log "安装 Hysteria2（校验远程安装脚本）..."
-  HYSTERIA_USER=$HY2_USER run_verified_script "$HY2_INSTALLER_URL" "$HY2_INSTALLER_SHA256"
   command -v hysteria >/dev/null || fail "Hysteria2 安装失败"
+}
+
+configure_hy2_service() {
+  install -d -m 755 "$(dirname "$HY2_DROPIN")"
+  cat >"$HY2_DROPIN" <<EOF
+[Service]
+User=${HY2_USER}
+Group=${HY2_USER}
+WorkingDirectory=/etc/hysteria
+EOF
+  chmod 644 "$HY2_DROPIN"
+  systemctl daemon-reload
 }
 
 hy2_cert_valid() {
@@ -857,10 +877,9 @@ install_hy2() {
     log "复用已有 Hysteria2 参数与证书"
   fi
 
+  ensure_hy2_account
   install_hy2_core
-  getent passwd "$HY2_USER" >/dev/null 2>&1 ||
-    useradd --system --no-create-home --shell /usr/sbin/nologin "$HY2_USER"
-  backup_paths hy2 "$HY2_STATE" "$HY2_INFO" "$HY2_CONFIG" "$HY2_CERT_DIR"
+  backup_paths hy2 "$HY2_STATE" "$HY2_INFO" "$HY2_CONFIG" "$HY2_CERT_DIR" "$HY2_DROPIN"
 
   install -d -o root -g "$HY2_USER" -m 750 "$HY2_CERT_DIR" /etc/hysteria
   if ((reuse_cert == 0)); then
@@ -894,6 +913,7 @@ EOF
   mv -f "$config_tmp" "$HY2_CONFIG"
   write_kv_file "$HY2_STATE"     "HY2_PORT=${HY2_PORT}" "HY2_DOMAIN=${HY2_DOMAIN}" "HY2_MASQUERADE=${HY2_MASQUERADE}"
 
+  configure_hy2_service
   restart_svc hysteria-server "Hysteria2"
   open_port "$HY2_PORT" udp
 
@@ -968,9 +988,9 @@ uninstall_hy2() {
       fail "Hysteria2 卸载器执行失败"
   fi
   systemctl disable hysteria-server 2>/dev/null || true
-  rm -f "$HY2_INFO" "$HY2_CONFIG" "$HY2_STATE"
+  rm -f "$HY2_INFO" "$HY2_CONFIG" "$HY2_STATE" "$HY2_DROPIN"
   rm -rf "$HY2_CERT_DIR"
-  rmdir /etc/hysteria 2>/dev/null || true
+  rmdir "$(dirname "$HY2_DROPIN")" /etc/hysteria 2>/dev/null || true
   userdel -r "$HY2_USER" 2>/dev/null || true
   ok "已卸载 Hysteria2"
 }
