@@ -29,8 +29,8 @@ HY2_INSTALLER_SHA256="${HY2_INSTALLER_SHA256:-e6b9023dcc0142f155546548b9d7a75ce2
 ACME_INSTALLER_URL="${ACME_INSTALLER_URL:-https://raw.githubusercontent.com/acmesh-official/acme.sh/3.1.0/acme.sh}"
 ACME_INSTALLER_SHA256="${ACME_INSTALLER_SHA256:-5afa747a59a2dad83ac4775c6d67bb3152cef495bf5f2d59bd0b1bf51c2ffb92}"
 # 在线执行时使用独立、不可变的 v2.sh 快照。
-V2_SCRIPT_URL="${V2_SCRIPT_URL:-}"
-V2_SCRIPT_SHA256="${V2_SCRIPT_SHA256:-}"
+V2_SCRIPT_URL="${V2_SCRIPT_URL:-https://raw.githubusercontent.com/syw7895/vps/9ed0732147384bf7d6b53f8a79b604e9ab4d409e/v2.sh}"
+V2_SCRIPT_SHA256="${V2_SCRIPT_SHA256:-72c36b653fc8146f285ce9bd7c1fc74ac199dffd04b48105f8794cd651e3689c}"
 
 SNI_PRESETS=(
   www.cloudflare.com
