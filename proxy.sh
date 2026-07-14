@@ -513,7 +513,7 @@ EOF
   [[ -z $reality || -z $cdn ]] && inbounds="${reality}${cdn}" || inbounds="${reality},${cdn}"
 
   install -d -m 755 "$(dirname "$XRAY_CONFIG")"
-  tmp=$(mktemp "$(dirname "$XRAY_CONFIG")/.config.XXXXXX")
+  tmp=$(mktemp "$(dirname "$XRAY_CONFIG")/.config.XXXXXX.json")
   cat >"$tmp" <<EOF
 {
   "log": { "loglevel": "warning" },
