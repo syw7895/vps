@@ -388,8 +388,8 @@ restart_svc() {
   systemctl restart "$unit" || fail "$name 启动失败: journalctl -u $unit -n 30 --no-pager"
   local i
   for ((i = 1; i <= 8; i++)); do
-    systemctl is-active --quiet "$unit" && { ok "$name 运行中"; return; }
     sleep 1
+    systemctl is-active --quiet "$unit" && { ok "$name 运行中"; return; }
   done
   fail "$name 未保持运行: journalctl -u $unit -n 40 --no-pager"
 }
