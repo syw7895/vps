@@ -14,16 +14,6 @@
 
 ## 推荐安装方式
 
-**方式 A（推荐，可复查文件后再执行）：**
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/proxy.sh -o proxy.sh
-# 可选: less proxy.sh
-bash proxy.sh
-```
-
-**方式 B（一行进菜单）：**
-
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/proxy.sh)
 ```
