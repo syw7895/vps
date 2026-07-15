@@ -3,8 +3,11 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
+VERSION="1.3.0"
 CONFIG_DIR="/root/proxy-info"
 BACKUP_DIR="${CONFIG_DIR}/backups"
+BACKUP_KEEP="${BACKUP_KEEP:-15}"
+LAST_BACKUP=""
 REALITY_STATE="${CONFIG_DIR}/reality.conf"
 CDN_STATE="${CONFIG_DIR}/cdn.conf"
 HY2_STATE="${CONFIG_DIR}/hy2.conf"
@@ -56,8 +59,8 @@ hr()   { printf '%s────────────────────�
 pause() { read -r -p $'\n按回车返回...' _; }
 
 usage() {
-  cat <<'EOF'
-用法:
+  cat <<EOF
+用法 (v${VERSION}):
   bash proxy.sh                 进入菜单
   bash proxy.sh xray [参数]     安装/更新 REALITY（默认复用已有节点参数）
   bash proxy.sh hy2  [参数]     安装/更新 Hysteria2（默认复用）
@@ -73,6 +76,8 @@ usage() {
 REALITY:  --port --sni --target --uuid
 Hysteria2: --port --password --domain --masquerade
 CDN:      --domain --port --path --uuid --email
+
+环境变量可覆盖安装器 pin（见 README）。
 EOF
 }
 
@@ -197,6 +202,36 @@ prepare_env() {
   ensure_dirs
 }
 
+# 成功备份后只保留最近 BACKUP_KEEP 份（默认 15）
+prune_backups() {
+  local keep=${BACKUP_KEEP:-15} i
+  local -a files=()
+  [[ $keep =~ ^[0-9]+$ ]] && ((keep >= 1)) || keep=15
+  [[ -d $BACKUP_DIR ]] || return 0
+  mapfile -t files < <(ls -1t "$BACKUP_DIR"/*.tar.gz 2>/dev/null || true)
+  for ((i = keep; i < ${#files[@]}; i++)); do
+    rm -f -- "${files[i]}"
+  done
+}
+
+hint_restore() {
+  local unit=${1:-} name=${2:-服务}
+  warn "${name} 启动失败。配置可能已写入；可用最近备份手动恢复。"
+  if [[ -n ${LAST_BACKUP:-} && -f $LAST_BACKUP ]]; then
+    warn "最近备份: ${LAST_BACKUP}"
+    warn "恢复示例（确认内容后再执行）:"
+    warn "  tar -tzf ${LAST_BACKUP}"
+    warn "  tar -C / -xzf ${LAST_BACKUP}"
+  else
+    warn "备份目录: ${BACKUP_DIR}"
+    warn "  ls -lt ${BACKUP_DIR}"
+  fi
+  if [[ -n $unit ]]; then
+    warn "  systemctl restart ${unit}"
+    warn "  journalctl -u ${unit} -n 40 --no-pager"
+  fi
+}
+
 backup_paths() {
   local label=$1 stamp archive
   shift
@@ -213,6 +248,8 @@ backup_paths() {
     fail "备份失败，已停止覆盖: $label"
   fi
   chmod 600 "$archive" || fail "无法收紧备份权限: $archive"
+  LAST_BACKUP=$archive
+  prune_backups
   ok "已备份: $archive"
 }
 
@@ -385,12 +422,16 @@ print_component_statuses() {
 restart_svc() {
   local unit=$1 name=$2
   systemctl enable "$unit" >/dev/null 2>&1 || true
-  systemctl restart "$unit" || fail "$name 启动失败: journalctl -u $unit -n 30 --no-pager"
+  if ! systemctl restart "$unit"; then
+    hint_restore "$unit" "$name"
+    fail "$name 启动失败: journalctl -u $unit -n 30 --no-pager"
+  fi
   local i
   for ((i = 1; i <= 8; i++)); do
     sleep 1
     systemctl is-active --quiet "$unit" && { ok "$name 运行中"; return; }
   done
+  hint_restore "$unit" "$name"
   fail "$name 未保持运行: journalctl -u $unit -n 40 --no-pager"
 }
 
@@ -1108,7 +1149,7 @@ print_banner() {
   clear 2>/dev/null || true
   printf '\n'
   printf '%s╔══════════════════════════════════════╗%s\n' "$CYN" "$R"
-  printf '%s║%s  %sVPS 代理控制面板%s                    %s║%s\n' "$CYN" "$R" "$B" "$R" "$CYN" "$R"
+  printf '%s║%s  %sVPS 代理控制面板%s  %sv%s            %s║%s\n' "$CYN" "$R" "$B" "$R" "$D" "$VERSION" "$CYN" "$R"
   printf '%s║%s  %sREALITY · HY2 · CF/WS%s               %s║%s\n' "$CYN" "$R" "$D" "$R" "$CYN" "$R"
   printf '%s╚══════════════════════════════════════╝%s\n' "$CYN" "$R"
   print_component_statuses
