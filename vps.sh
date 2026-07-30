@@ -6,7 +6,7 @@
 set -Eeuo pipefail
 
 APP_NAME="syw-vps"
-VERSION="1.0.0"
+VERSION="1.0.1"
 LIB_DIR="/usr/local/lib/syw-vps"
 BIN_VPS="/usr/local/bin/vps"
 MARKER="syw-vps-entrypoint"
@@ -156,19 +156,40 @@ run_module() {
     return 1
   fi
   # 模块失败不拖垮入口。
-  # 重要：curl|bash 安装后 stdin 是管道（已 EOF）。proxy.sh 用 read 读 stdin，
-  # 若不改绑到终端，会在菜单 read 处失败（set -e + ERR trap → exit 1）。
-  # 不修改 proxy.sh；由此处把模块的 stdin 接到 /dev/tty。
+  # 重要：curl|bash / 非交互 sudo 后，stdin 常是管道 EOF。
+  # proxy.sh 用 read 读 stdin（非 /dev/tty），且 set -e + ERR trap，
+  # 读失败会报「脚本第 1237 行失败」。不修改 proxy.sh，在此强制把
+  # stdin/stdout/stderr 绑到真实终端后再 exec 模块。
   set +e
-  if [[ -r /dev/tty ]]; then
-    bash "$path" </dev/tty
+  local rc=0
+  if [[ -e /dev/tty ]]; then
+    # 子 shell 内 exec 重定向，避免仅 </dev/tty 在部分环境下无效
+    bash -c 'exec </dev/tty >/dev/tty 2>/dev/tty || exit 125; exec bash "$@"' _ "$path"
+    rc=$?
+    if [[ $rc -eq 125 ]]; then
+      warn "无法绑定 /dev/tty，尝试 script 伪终端…"
+      if command -v script >/dev/null 2>&1; then
+        # Debian/Ubuntu: util-linux script
+        script -q -e -c "bash $(printf '%q' "$path")" /dev/null
+        rc=$?
+      else
+        bash "$path"
+        rc=$?
+      fi
+    fi
   else
+    warn "当前无 /dev/tty。请用 SSH 交互登录后执行: sudo vps"
+    warn "或直接: sudo bash ${path}"
     bash "$path"
+    rc=$?
   fi
-  local rc=$?
   set -e
   if [[ $rc -ne 0 ]]; then
     warn "$label 退出码: $rc"
+    if [[ $rc -eq 1 ]]; then
+      warn "若刚用 curl|bash 安装：请先退出，再执行 sudo vps（不要用管道挂着交互）。"
+      warn "也可直接: sudo v2   或   sudo bash ${PROXY_SH_LOCAL}"
+    fi
   fi
   return 0
 }
