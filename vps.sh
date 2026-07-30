@@ -160,14 +160,19 @@ run_module() {
 }
 
 main_menu() {
-  local c
+  local c D
+  if [[ -t 1 ]]; then D=$'\033[2m'; else D=''; fi
   while true; do
-    printf '\n%s%sVPS 管理%s\n' "$B" "$CYN" "$R"
-    printf '  1. 代理管理\n'
-    printf '  2. 流量管理\n'
-    printf '  0. 退出\n'
+    printf '\n'
+    printf '  %s╭──────────────────────────────╮%s\n' "$D" "$R"
+    printf '  %s│%s  %sVPS 管理%s  %sv%s%s\n' "$D" "$R" "$B$CYN" "$R" "$D" "$VERSION" "$R"
+    printf '  %s├──────────────────────────────┤%s\n' "$D" "$R"
+    printf '  %s│%s   1  代理管理\n' "$D" "$R"
+    printf '  %s│%s   2  流量管理\n' "$D" "$R"
+    printf '  %s│%s   0  退出\n' "$D" "$R"
+    printf '  %s╰──────────────────────────────╯%s\n' "$D" "$R"
     c=""
-    read_tty -p "请选择: " c || c=0
+    read_tty -p "  请选择 › " c || c=0
     case $c in
       1) run_module "$PROXY_SH_LOCAL" || true ;;
       2) run_module "$TRAFFIC_SH_LOCAL" || true ;;
