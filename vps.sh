@@ -155,9 +155,16 @@ run_module() {
     warn "$label 语法检查失败，已中止调用（不影响另一模块）"
     return 1
   fi
-  # 模块失败不拖垮入口
+  # 模块失败不拖垮入口。
+  # 重要：curl|bash 安装后 stdin 是管道（已 EOF）。proxy.sh 用 read 读 stdin，
+  # 若不改绑到终端，会在菜单 read 处失败（set -e + ERR trap → exit 1）。
+  # 不修改 proxy.sh；由此处把模块的 stdin 接到 /dev/tty。
   set +e
-  bash "$path"
+  if [[ -r /dev/tty ]]; then
+    bash "$path" </dev/tty
+  else
+    bash "$path"
+  fi
   local rc=$?
   set -e
   if [[ $rc -ne 0 ]]; then
