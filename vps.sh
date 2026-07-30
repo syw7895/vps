@@ -6,7 +6,7 @@
 set -Eeuo pipefail
 
 APP_NAME="syw-vps"
-VERSION="1.0.1"
+VERSION="1.0.2"
 LIB_DIR="/usr/local/lib/syw-vps"
 BIN_VPS="/usr/local/bin/vps"
 MARKER="syw-vps-entrypoint"
@@ -79,7 +79,6 @@ download_to() {
     fail "bash -n 语法检查失败: $url"
   fi
   install -m 0755 "$tmp" "$dest"
-  ok "已安装 $(basename "$dest")"
 }
 
 install_self_from_running() {
@@ -103,19 +102,16 @@ install_self_from_running() {
   bash -n "$tmp" || fail "vps.sh bash -n 失败"
   install -m 0755 "$tmp" "$VPS_SH_LOCAL"
   rm -f "$tmp"
-  ok "已刷新 $VPS_SH_LOCAL"
 }
 
 ensure_module() {
   local name=$1 url=$2 dest=$3
   if [[ -f $dest && -s $dest ]]; then
-    log "已存在模块，跳过下载: $dest"
     if ! bash -n "$dest" 2>/dev/null; then
       warn "$dest 语法检查失败，请手动修复或删除后重装"
     fi
     return 0
   fi
-  log "下载缺失模块: $name"
   download_to "$url" "$dest"
 }
 
@@ -131,17 +127,14 @@ set -Eeuo pipefail
 exec bash "${VPS_SH_LOCAL}" --menu-only "\$@"
 EOF
   chmod 0755 "$BIN_VPS"
-  ok "快捷命令: $BIN_VPS"
 }
 
 do_install() {
   require_root
-  log "安装 / 刷新统一入口 (${VERSION})"
   install_self_from_running
   ensure_module "proxy.sh" "${RAW_BASE}/proxy.sh" "$PROXY_SH_LOCAL"
   ensure_module "traffic.sh" "${RAW_BASE}/traffic.sh" "$TRAFFIC_SH_LOCAL"
   install_bin_vps
-  ok "安装完成。日常使用: vps"
 }
 
 run_module() {
@@ -167,9 +160,7 @@ run_module() {
     bash -c 'exec </dev/tty >/dev/tty 2>/dev/tty || exit 125; exec bash "$@"' _ "$path"
     rc=$?
     if [[ $rc -eq 125 ]]; then
-      warn "无法绑定 /dev/tty，尝试 script 伪终端…"
       if command -v script >/dev/null 2>&1; then
-        # Debian/Ubuntu: util-linux script
         script -q -e -c "bash $(printf '%q' "$path")" /dev/null
         rc=$?
       else
@@ -178,19 +169,10 @@ run_module() {
       fi
     fi
   else
-    warn "当前无 /dev/tty。请用 SSH 交互登录后执行: sudo vps"
-    warn "或直接: sudo bash ${path}"
     bash "$path"
     rc=$?
   fi
   set -e
-  if [[ $rc -ne 0 ]]; then
-    warn "$label 退出码: $rc"
-    if [[ $rc -eq 1 ]]; then
-      warn "若刚用 curl|bash 安装：请先退出，再执行 sudo vps（不要用管道挂着交互）。"
-      warn "也可直接: sudo v2   或   sudo bash ${PROXY_SH_LOCAL}"
-    fi
-  fi
   return 0
 }
 
