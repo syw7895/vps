@@ -44,10 +44,10 @@ TC_HANDLE_MAJOR="1abc"
 TC_ROOT_HANDLE="${TC_HANDLE_MAJOR}:"
 
 if [[ -t 1 ]]; then
-  R=$'\033[0m' B=$'\033[1m' D=$'\033[2m'
+  R=$'\033[0m' B=$'\033[1m'
   RED=$'\033[31m' GRN=$'\033[32m' YEL=$'\033[33m' CYN=$'\033[36m'
 else
-  R='' B='' D='' RED='' GRN='' YEL='' CYN=''
+  R='' B='' RED='' GRN='' YEL='' CYN=''
 fi
 
 log()  { printf '%s[%s]%s %s\n' "$CYN" "$APP_NAME" "$R" "$*"; }
@@ -67,10 +67,10 @@ read_tty() {
   local __var=${1:-REPLY}
   if [[ -r /dev/tty ]]; then
     # shellcheck disable=SC2162
-    read -r -p "$prompt" "$__var" </dev/tty || return 1
+    read -r -p "$prompt" "${__var?}" </dev/tty || return 1
   else
     # shellcheck disable=SC2162
-    read -r -p "$prompt" "$__var" || return 1
+    read -r -p "$prompt" "${__var?}" || return 1
   fi
 }
 
@@ -510,7 +510,7 @@ run_check() {
   load_config
   load_state
 
-  local iface tx thr_bytes quota ratio_x100 action
+  local iface tx thr_bytes quota ratio_x100
   local now_ts month_key
 
   now_ts=$(date +%s)
@@ -570,7 +570,6 @@ run_check() {
   log "iface=$iface tx=$tx bytes quota=$quota thr=$thr_bytes ratio=${ratio_x100}% rate=$LIMIT_RATE"
 
   if (( tx < thr_bytes )); then
-    action="below_threshold"
     if [[ $LIMIT_ACTIVE == true || $OWNED_BY_TOOL == true ]] || has_our_qdisc "$iface"; then
       log "低于阈值，解除本工具限速"
       if remove_limit "$iface"; then
@@ -589,7 +588,6 @@ run_check() {
   fi
 
   # 达到或超过阈值
-  action="over_threshold"
   if has_our_qdisc "$iface"; then
     LIMIT_ACTIVE=true
     OWNED_BY_TOOL=true
@@ -752,7 +750,9 @@ cmd_set_threshold() {
   load_config
   local p
   read_tty -p "触发比例 %（当前 ${THRESHOLD_PERCENT}）: " p
-  [[ $p =~ ^[0-9]+$ ]] && (( p > 0 && p <= 100 )) || fail "比例须为 1-100 整数"
+  if ! [[ $p =~ ^[0-9]+$ ]] || (( p <= 0 || p > 100 )); then
+    fail "比例须为 1-100 整数"
+  fi
   {
     echo "# vps-traffic 配置（十进制 GB：1 GB = 1000000000 bytes）"
     echo "MONTHLY_QUOTA_GB=${MONTHLY_QUOTA_GB}"

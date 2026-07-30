@@ -18,10 +18,10 @@ PROXY_SH_LOCAL="${LIB_DIR}/proxy.sh"
 TRAFFIC_SH_LOCAL="${LIB_DIR}/traffic.sh"
 
 if [[ -t 1 ]]; then
-  R=$'\033[0m' B=$'\033[1m' D=$'\033[2m'
+  R=$'\033[0m' B=$'\033[1m'
   RED=$'\033[31m' GRN=$'\033[32m' YEL=$'\033[33m' CYN=$'\033[36m'
 else
-  R='' B='' D='' RED='' GRN='' YEL='' CYN=''
+  R='' B='' RED='' GRN='' YEL='' CYN=''
 fi
 
 log()  { printf '%s[%s]%s %s\n' "$CYN" "$APP_NAME" "$R" "$*"; }
@@ -32,7 +32,7 @@ fail() { printf '%s[%s]%s %s\n' "$RED" "ERR" "$R" "$*" >&2; exit 1; }
 # 管道安装时 stdin 非终端，交互一律走 /dev/tty
 read_tty() {
   # usage: read_tty [-p prompt] var
-  local prompt="" opt
+  local prompt=""
   while [[ $# -gt 0 ]]; do
     case $1 in
       -p) prompt=$2; shift 2 ;;
@@ -43,10 +43,10 @@ read_tty() {
   local __var=${1:-REPLY}
   if [[ -r /dev/tty ]]; then
     # shellcheck disable=SC2162
-    read -r -p "$prompt" "$__var" </dev/tty || return 1
+    read -r -p "$prompt" "${__var?}" </dev/tty || return 1
   else
     # shellcheck disable=SC2162
-    read -r -p "$prompt" "$__var" || return 1
+    read -r -p "$prompt" "${__var?}" || return 1
   fi
 }
 
