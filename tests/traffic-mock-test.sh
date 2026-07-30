@@ -127,6 +127,26 @@ source "$TMP/var/state"
 assert "foreign qdisc not owned" '[[ "${OWNED_BY_TOOL}" == "false" ]]'
 assert "foreign qdisc unchanged" '[[ "$(qdisc_file)" == "qdisc htb 1: root refcnt 2" ]]'
 
+# 7) 无害默认 fq_codel 可被替换为本工具限速
+printf '%s\n' "qdisc fq_codel 0: root refcnt 2 limit 10240p" >"$TMP/mock_tc_qdisc"
+cat >"$TMP/var/state" <<EOF
+LIMIT_ACTIVE=false
+LIMIT_IFACE=
+LIMIT_HANDLE=
+LAST_REASON=
+LAST_CHECK_TS=
+LAST_TX_BYTES=
+LAST_MONTH=
+LAST_RATIO=
+OWNED_BY_TOOL=false
+EOF
+export MOCK_TX_BYTES=$((95 * 1000000000))
+run_check
+# shellcheck disable=SC1091
+source "$TMP/var/state"
+assert "harmless fq_codel allows limit" '[[ "${OWNED_BY_TOOL}" == "true" ]]'
+assert "replaced with our handle" '[[ "$(qdisc_file)" == *"1abc:"* ]]'
+
 echo ""
 echo "PASS=$pass FAIL=$fail"
 [[ $fail -eq 0 ]]
