@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-traffic"
-VERSION="1.1.0"
+VERSION="1.2.0"
 LIB_DIR="/usr/local/lib/syw-vps"
 SELF_LOCAL="${LIB_DIR}/traffic.sh"
 RAW_BASE="${SYW_VPS_RAW_BASE:-https://raw.githubusercontent.com/syw7895/vps/main}"
@@ -37,8 +37,9 @@ UNIT_TIMER="/etc/systemd/system/vps-traffic-check.timer"
 TC_HANDLE_MAJOR="1abc"
 TC_ROOT_HANDLE="${TC_HANDLE_MAJOR}:"
 
-# 常见默认 root qdisc：不当作「冲突限速」
-HARMLESS_QDISC_RE='qdisc (fq_codel|fq|noqueue|pfifo_fast|cake)[[:space:]]'
+# 常见默认 root qdisc：可替换，不当作「冲突限速」
+# mq 为多队列网卡常见 root（如 AWS ens5）
+HARMLESS_QDISC_RE='qdisc (fq_codel|fq|noqueue|pfifo_fast|cake|mq)[[:space:]]'
 
 if [[ -t 1 ]]; then
   R=$'\033[0m' B=$'\033[1m'
@@ -341,13 +342,11 @@ apply_limit() {
     return 0
   fi
 
-  # 若仅有无害默认 root，先删再挂我们的（仅当没有我们的 handle）
+  # 无害默认 root（含 mq/fq）：先删再挂本工具 tbf
   local show
   show=$(tc_qdisc_show "$iface")
-  if [[ $show == *root* ]] && ! has_our_qdisc "$iface"; then
-    if [[ $show =~ $HARMLESS_QDISC_RE ]]; then
-      $TC_BIN qdisc del dev "$iface" root 2>/dev/null || true
-    fi
+  if [[ $show == *root* ]] && ! has_our_qdisc "$iface" && ! has_blocking_qdisc "$iface"; then
+    $TC_BIN qdisc del dev "$iface" root 2>/dev/null || true
   fi
 
   if ! $TC_BIN qdisc add dev "$iface" root handle "${TC_ROOT_HANDLE}" tbf \
@@ -604,35 +603,146 @@ cmd_set_rate() {
   ok "限速 ${r}"
 }
 
+# 进度条：pct 0-100，宽 width
+progress_bar() {
+  local pct=$1 width=${2:-28} fill empty i n
+  (( pct < 0 )) && pct=0
+  (( pct > 100 )) && pct=100
+  n=$((pct * width / 100))
+  fill="" empty=""
+  for ((i = 0; i < n; i++)); do fill+="█"; done
+  for ((i = n; i < width; i++)); do empty+="░"; done
+  printf '%s' "${fill}${empty}"
+}
+
+fmt_reason() {
+  case ${1:-} in
+    quota_unset) echo "未设置月额度" ;;
+    paused) echo "自动检查已暂停" ;;
+    ok_below_threshold) echo "低于阈值 · 正常" ;;
+    applied_limit) echo "已触发限速" ;;
+    already_limited) echo "保持限速" ;;
+    removed_below_threshold) echo "已自动解除限速" ;;
+    manual_remove) echo "已手动解除" ;;
+    conflict_foreign_qdisc) echo "网卡存在其它限速，已跳过" ;;
+    vnstat_unavailable_or_bad_month) echo "流量数据暂不可用" ;;
+    iface_unresolved) echo "网卡未识别" ;;
+    "") echo "—" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+fmt_time() {
+  local ts=${1:-}
+  if [[ $ts =~ ^[0-9]+$ ]] && (( ts > 1000000000 )); then
+    date -d "@$ts" '+%Y-%m-%d %H:%M:%S' 2>/dev/null \
+      || date -r "$ts" '+%Y-%m-%d %H:%M:%S' 2>/dev/null \
+      || echo "$ts"
+  else
+    echo "${ts:-—}"
+  fi
+}
+
+ui_line() { printf '  %s│%s %-48s %s│%s\n' "$D" "$R" "$1" "$D" "$R"; }
+ui_rule() { printf '  %s%s%s\n' "$D" "$1" "$R"; }
+
 cmd_status() {
   load_config
   load_state
-  local iface tx gb
+  local iface tx= gb="—" pct=0 bar thr_gb="—" status_icon status_txt status_col
+  local qdisc_brief paused_txt limit_txt
+
+  if [[ -z ${D:-} ]]; then
+    if [[ -t 1 ]]; then D=$'\033[2m'; else D=''; fi
+  fi
+
   set +e
   iface=$(resolve_iface 2>/dev/null)
   set -e
-  printf '\n%s流量与限速状态%s\n' "$B" "$R"
-  printf '  月额度: %s GB\n' "${MONTHLY_QUOTA_GB:-未设置}"
-  printf '  触发: %s%%  限速: %s\n' "$THRESHOLD_PERCENT" "$LIMIT_RATE"
-  printf '  网卡: %s (IFACE=%s)  暂停: %s\n' "${iface:-?}" "$IFACE" "$PAUSED"
-  printf '  限速中: %s  持有: %s  handle=%s\n' "$LIMIT_ACTIVE" "$OWNED_BY_TOOL" "${LIMIT_HANDLE:-}"
-  printf '  上次: month=%s tx=%s ratio=%s%% reason=%s\n' \
-    "${LAST_MONTH:-}" "${LAST_TX_BYTES:-}" "${LAST_RATIO:-}" "${LAST_REASON:-}"
-  if [[ -n ${iface:-} ]]; then
-    set +e
-    tx=$(read_monthly_tx_bytes "$iface" 2>/dev/null)
-    set -e
-    if [[ -n ${tx:-} ]]; then
-      gb=$(awk -v t="$tx" 'BEGIN{printf "%.3f", t/1000000000}')
-      printf '  本月 TX: %s bytes (~%s GB)\n' "$tx" "$gb"
-    else
-      printf '  本月 TX: 暂无数据\n'
+  iface=${iface:-—}
+
+  set +e
+  tx=$(read_monthly_tx_bytes "$iface" 2>/dev/null)
+  set -e
+  if [[ -n ${tx:-} && $tx =~ ^[0-9]+$ ]]; then
+    gb=$(awk -v t="$tx" 'BEGIN{printf "%.3f", t/1000000000}')
+    if [[ -n ${MONTHLY_QUOTA_GB:-} ]]; then
+      pct=$(awk -v t="$tx" -v g="$MONTHLY_QUOTA_GB" 'BEGIN{
+        if(g<=0){print 0; exit}
+        p=t*100/(g*1000000000)
+        if(p>100)p=100
+        printf "%.0f", p
+      }')
+      thr_gb=$(awk -v g="$MONTHLY_QUOTA_GB" -v p="$THRESHOLD_PERCENT" 'BEGIN{printf "%.1f", g*p/100}')
     fi
-    printf '  qdisc:\n'
-    tc_qdisc_show "$iface" | sed 's/^/    /' || true
+  else
+    gb="—"
+    pct=0
   fi
-  printf '\n%s注意:%s %s 持续约一天仍可能产生约 10.8 GB，不能保证额度绝对不超。\n' \
-    "$YEL" "$R" "$LIMIT_RATE"
+
+  bar=$(progress_bar "$pct" 24)
+
+  if [[ $LIMIT_ACTIVE == true || $OWNED_BY_TOOL == true ]]; then
+    status_col=$RED
+    status_icon="●"
+    status_txt="限速中 ${LIMIT_RATE}"
+  elif [[ $PAUSED == true ]]; then
+    status_col=$YEL
+    status_icon="◐"
+    status_txt="检查已暂停"
+  elif [[ -z ${MONTHLY_QUOTA_GB:-} ]]; then
+    status_col=$YEL
+    status_icon="○"
+    status_txt="待设置额度"
+  elif [[ -n ${tx:-} && -n ${MONTHLY_QUOTA_GB:-} ]] && (( pct >= THRESHOLD_PERCENT )); then
+    status_col=$RED
+    status_icon="●"
+    status_txt="已达阈值 ${THRESHOLD_PERCENT}%"
+  else
+    status_col=$GRN
+    status_icon="●"
+    status_txt="正常放行"
+  fi
+
+  paused_txt=$([[ $PAUSED == true ]] && echo "是" || echo "否")
+  limit_txt=$([[ $LIMIT_ACTIVE == true ]] && echo "是" || echo "否")
+
+  qdisc_brief=$(tc_qdisc_show "$iface" 2>/dev/null | head -n1 | sed 's/^[[:space:]]*//' || true)
+  [[ -n $qdisc_brief ]] || qdisc_brief="—"
+  # 过长则截断
+  if (( ${#qdisc_brief} > 42 )); then
+    qdisc_brief="${qdisc_brief:0:39}..."
+  fi
+
+  printf '\n'
+  ui_rule "╭────────────────────────────────────────────────╮"
+  printf '  %s│%s  %s流量监控%s  %sv%s%s\n' "$D" "$R" "$B$CYN" "$R" "$D" "$VERSION" "$R"
+  ui_rule "├────────────────────────────────────────────────┤"
+  printf '  %s│%s  状态  %s%s %s%s\n' "$D" "$R" "$status_col" "$status_icon" "$status_txt" "$R"
+  ui_rule "├────────────────────────────────────────────────┤"
+
+  if [[ -n ${MONTHLY_QUOTA_GB:-} ]]; then
+    printf '  %s│%s  本月上行  %s%s%s%s %s%3s%%%s\n' \
+      "$D" "$R" "$CYN" "$bar" "$R" "" "$B" "$pct" "$R"
+    printf '  %s│%s  用量      %s%s%s / %s GB   阈值 %s GB @%s%%\n' \
+      "$D" "$R" "$B" "$gb" "$R" "$MONTHLY_QUOTA_GB" "$thr_gb" "$THRESHOLD_PERCENT"
+  else
+    printf '  %s│%s  本月上行  %s%s%s  %s GB\n' "$D" "$R" "$B" "$gb" "$R" 
+    printf '  %s│%s  %s月额度未设置%s  → 菜单选 2 设置\n' "$D" "$R" "$YEL" "$R"
+  fi
+
+  ui_rule "├────────────────────────────────────────────────┤"
+  printf '  %s│%s  网卡      %-10s  限速策略  %s\n' "$D" "$R" "$iface" "$LIMIT_RATE"
+  printf '  %s│%s  自动检查  %-10s  当前限速  %s\n' "$D" "$R" "$paused_txt" "$limit_txt"
+  printf '  %s│%s  规则      %-10s  handle    %s\n' \
+    "$D" "$R" "$([[ $OWNED_BY_TOOL == true ]] && echo 本工具 || echo 无)" "${LIMIT_HANDLE:-—}"
+  ui_rule "├────────────────────────────────────────────────┤"
+  printf '  %s│%s  上次检查  %s\n' "$D" "$R" "$(fmt_time "${LAST_CHECK_TS:-}")"
+  printf '  %s│%s  原因      %s\n' "$D" "$R" "$(fmt_reason "${LAST_REASON:-}")"
+  printf '  %s│%s  队列      %s\n' "$D" "$R" "$qdisc_brief"
+  ui_rule "╰────────────────────────────────────────────────╯"
+  printf '  %s提示%s  %s 约 10.8 GB/天量级，不能保证绝对不超额度\n' "$D" "$R" "$LIMIT_RATE"
+  printf '  %s    %s vnStat 与云厂商后台可能有误差\n\n' "$D" "$R"
 }
 
 cmd_check_now() { require_root; with_lock run_check; }
@@ -724,22 +834,33 @@ cmd_uninstall() {
 
 main_menu() {
   local c
+  if [[ -z ${D:-} ]]; then
+    if [[ -t 1 ]]; then D=$'\033[2m'; else D=''; fi
+  fi
   while true; do
-    printf '\n%s%s流量管理%s\n' "$B" "$CYN" "$R"
-    printf '  1. 安装流量监控\n'
-    printf '  2. 设置每月流量额度\n'
-    printf '  3. 查看本月流量和限速状态\n'
-    printf '  4. 修改触发比例\n'
-    printf '  5. 修改限速速度\n'
-    printf '  6. 立即检查\n'
-    printf '  7. 解除当前限速\n'
-    printf '  8. 暂停自动检查\n'
-    printf '  9. 恢复自动检查\n'
-    printf '  10. 更新流量模块\n'
-    printf '  11. 卸载流量模块\n'
-    printf '  0. 返回\n'
+    printf '\n'
+    printf '  %s╭────────────────────────────────────────╮%s\n' "$D" "$R"
+    printf '  %s│%s  %s流量管理%s  %sv%s%s\n' "$D" "$R" "$B$CYN" "$R" "$D" "$VERSION" "$R"
+    printf '  %s├────────────────────────────────────────┤%s\n' "$D" "$R"
+    printf '  %s│%s  %s监控%s\n' "$D" "$R" "$B" "$R"
+    printf '  %s│%s   1  安装流量监控\n' "$D" "$R"
+    printf '  %s│%s   2  设置每月流量额度\n' "$D" "$R"
+    printf '  %s│%s   3  查看状态 / 仪表盘\n' "$D" "$R"
+    printf '  %s│%s  %s策略%s\n' "$D" "$R" "$B" "$R"
+    printf '  %s│%s   4  修改触发比例\n' "$D" "$R"
+    printf '  %s│%s   5  修改限速速度\n' "$D" "$R"
+    printf '  %s│%s  %s运维%s\n' "$D" "$R" "$B" "$R"
+    printf '  %s│%s   6  立即检查\n' "$D" "$R"
+    printf '  %s│%s   7  解除当前限速\n' "$D" "$R"
+    printf '  %s│%s   8  暂停自动检查\n' "$D" "$R"
+    printf '  %s│%s   9  恢复自动检查\n' "$D" "$R"
+    printf '  %s│%s  %s系统%s\n' "$D" "$R" "$B" "$R"
+    printf '  %s│%s  10  更新流量模块\n' "$D" "$R"
+    printf '  %s│%s  11  卸载流量模块\n' "$D" "$R"
+    printf '  %s│%s   0  返回\n' "$D" "$R"
+    printf '  %s╰────────────────────────────────────────╯%s\n' "$D" "$R"
     c=""
-    read_tty -p "请选择: " c || c=0
+    read_tty -p "  请选择 › " c || c=0
     case $c in
       1) cmd_install ;;
       2) cmd_set_quota ;;
@@ -755,7 +876,7 @@ main_menu() {
       0) return 0 ;;
       *) warn "无效选项"; continue ;;
     esac
-    [[ $c == 0 || $c == 11 ]] || read_tty -p "按回车继续..." _ || true
+    [[ $c == 0 || $c == 11 ]] || read_tty -p "  按回车继续…" _ || true
   done
 }
 
