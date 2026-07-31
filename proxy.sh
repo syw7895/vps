@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
-VERSION="1.4.0"
+VERSION="1.4.1"
 CONFIG_DIR="/root/proxy-info"
 BACKUP_DIR="${CONFIG_DIR}/backups"
 BACKUP_KEEP="${BACKUP_KEEP:-15}"
@@ -55,16 +55,26 @@ log()  { printf '%s[%s]%s %s\n' "$CYN" "$APP_NAME" "$R" "$*"; }
 ok()   { printf '%s[%s]%s %s\n' "$GRN" "OK" "$R" "$*"; }
 warn() { printf '%s[%s]%s %s\n' "$YEL" "!" "$R" "$*"; }
 fail() { printf '%s[%s]%s %s\n' "$RED" "ERR" "$R" "$*" >&2; exit 1; }
-# UI
-ui_init() { :; }
+# UI（扁平，无边框）
 ui_head() { printf '\n  %s%s%s  %s%s%s\n' "$B$CYN" "$1" "$R" "$D" "$2" "$R"; }
 ui_status() { printf '  %s\n' "$1"; }
 ui_gap() { printf '\n'; }
-ui_group() { printf '  %s%s%s\n' "$D" "$1" "$R"; }
+# $1 序号 $2 文案 $3 可选语义: danger|muted
 ui_item() {
-  printf '  %s%2s%s  %s\n' "$CYN" "$1" "$R" "$2"
+  local num=$1 text=$2 style=${3:-} nc=$CYN tc=
+  case $style in
+    danger) nc=$RED; tc=$RED ;;
+    muted)  nc=$D; tc=$D ;;
+  esac
+  printf '  %s%2s%s  %s%s%s\n' "$nc" "$num" "$R" "$tc" "$text" "$R"
 }
-ui_foot() { printf '\n'; }
+ui_prompt() {
+  # 提示写到 stderr，避免 $(ui_prompt) 把提示混入返回值
+  local c
+  printf '  %s请选择 [0-4] › %s' "$CYN" "$R" >&2
+  read -r c || return 1
+  printf '%s' "$c"
+}
 hr() { printf '  %s···············%s\n' "$D" "$R"; }
 pause() { read -r -p $'\n  按回车返回…' _; }
 
@@ -433,28 +443,36 @@ print_component_statuses() {
 
 # 菜单顶栏一行状态
 proxy_status_line() {
-  local any=0 run=0 stop=0
+  local any=0 run=0 stop=0 bad=0
   local st
   if [[ -f $REALITY_STATE || -f $CDN_STATE ]]; then
     any=1
     st=$(svc_state xray xray)
-    [[ $st == running ]] && run=1
-    [[ $st == stopped ]] && stop=1
+    case $st in
+      running) run=1 ;;
+      stopped) stop=1 ;;
+      *) bad=1 ;;
+    esac
   fi
   if [[ -f $HY2_STATE ]]; then
     any=1
     st=$(svc_state hysteria-server hysteria)
-    [[ $st == running ]] && run=1
-    [[ $st == stopped ]] && stop=1
+    case $st in
+      running) run=1 ;;
+      stopped) stop=1 ;;
+      *) bad=1 ;;
+    esac
   fi
   if (( any == 0 )); then
-    printf '%s○%s  未安装组件' "$YEL" "$R"
+    printf '%s○%s  暂无代理' "$YEL" "$R"
+  elif (( bad == 1 )); then
+    printf '%s×%s  配置异常' "$RED" "$R"
   elif (( run == 1 && stop == 0 )); then
-    printf '%s●%s  服务正常' "$GRN" "$R"
+    printf '%s●%s  代理运行中' "$GRN" "$R"
   elif (( run == 1 )); then
-    printf '%s○%s  部分运行' "$YEL" "$R"
+    printf '%s!%s  部分服务停止' "$YEL" "$R"
   else
-    printf '%s○%s  服务已停止' "$YEL" "$R"
+    printf '%s○%s  暂无代理' "$YEL" "$R"
   fi
 }
 
@@ -1196,7 +1214,6 @@ pick_sni() {
 
 print_banner() {
   clear 2>/dev/null || true
-  ui_init
   ui_head "代理管理" "v${VERSION}"
   ui_status "$(proxy_status_line)"
   ui_gap
@@ -1205,15 +1222,15 @@ print_banner() {
 menu_install() {
   while true; do
     print_banner
-    ui_group "安装"
     ui_item 1 "Xray VLESS + REALITY"
     ui_item 2 "Hysteria2"
     ui_item 3 "VLESS + WS + TLS（CF）"
     ui_gap
-    ui_item 0 "返回"
-    ui_foot
+    ui_item 0 "返回" muted
+    ui_gap
     local c
-    read -r -p "  请选择 [0-3]: " c || { warn "读取输入失败"; return 1; }
+    printf '  %s请选择 [0-3] › %s' "$CYN" "$R"
+    read -r c || { warn "读取输入失败"; return 1; }
     c=${c//[[:space:]]/}
     case $c in
       1)
@@ -1258,16 +1275,16 @@ menu_install() {
 menu_uninstall() {
   while true; do
     print_banner
-    ui_group "卸载"
-    ui_item 1 "卸载 REALITY"
-    ui_item 2 "卸载 CDN"
-    ui_item 3 "卸载 Hysteria2"
-    ui_item 4 "卸载 v2"
+    ui_item 1 "卸载 REALITY" danger
+    ui_item 2 "卸载 CDN" danger
+    ui_item 3 "卸载 Hysteria2" danger
+    ui_item 4 "卸载 v2" danger
     ui_gap
-    ui_item 0 "返回"
-    ui_foot
+    ui_item 0 "返回" muted
+    ui_gap
     local c
-    read -r -p "  请选择 [0-4]: " c || { warn "读取输入失败"; return 1; }
+    printf '  %s请选择 [0-4] › %s' "$CYN" "$R"
+    read -r c || { warn "读取输入失败"; return 1; }
     c=${c//[[:space:]]/}
     case $c in
       1) uninstall_reality; pause ;;
@@ -1283,28 +1300,25 @@ menu_uninstall() {
 main_menu() {
   while true; do
     print_banner
-    ui_group "管理"
     ui_item 1 "安装代理"
-    ui_item 2 "查看节点 / 状态"
+    ui_item 2 "节点与状态"
+    ui_item 3 "安装 / 更新 v2"
+    ui_item 4 "卸载" danger
     ui_gap
-    ui_group "系统"
-    ui_item 3 "卸载"
-    ui_item 4 "安装 / 更新 v2"
+    ui_item 0 "返回" muted
     ui_gap
-    ui_item 0 "退出"
-    ui_foot
     local c
-    read -r -p "  请选择 [0-4]: " c || {
+    c=$(ui_prompt) || {
       warn "读取输入失败"
-      exit 1
+      return 1
     }
     c=${c//[[:space:]]/}
     case $c in
       1) menu_install ;;
       2) show_info; pause ;;
-      3) menu_uninstall ;;
-      4) install_v2; pause ;;
-      0) printf '\n  %s再见%s\n\n' "$D" "$R"; exit 0 ;;
+      3) install_v2; pause ;;
+      4) menu_uninstall ;;
+      0) return 0 ;;
       "") continue ;;
       *) warn "无效选项"; sleep 1 ;;
     esac
