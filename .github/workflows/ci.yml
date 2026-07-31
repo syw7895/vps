@@ -12,12 +12,15 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Syntax check
-        run: >
+        run: |
           bash -n vps.sh proxy.sh traffic.sh
-          tests/vps-menu-test.sh tests/traffic-mock-test.sh
+          bash -n tests/*.sh
 
       - name: VPS menu tests
         run: bash tests/vps-menu-test.sh
+
+      - name: Proxy menu tests
+        run: bash tests/proxy-menu-test.sh
 
       - name: Traffic mock tests
         run: bash tests/traffic-mock-test.sh
