@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
-VERSION="1.3.6"
+VERSION="1.4.0"
 CONFIG_DIR="/root/proxy-info"
 BACKUP_DIR="${CONFIG_DIR}/backups"
 BACKUP_KEEP="${BACKUP_KEEP:-15}"
@@ -55,15 +55,14 @@ log()  { printf '%s[%s]%s %s\n' "$CYN" "$APP_NAME" "$R" "$*"; }
 ok()   { printf '%s[%s]%s %s\n' "$GRN" "OK" "$R" "$*"; }
 warn() { printf '%s[%s]%s %s\n' "$YEL" "!" "$R" "$*"; }
 fail() { printf '%s[%s]%s %s\n' "$RED" "ERR" "$R" "$*" >&2; exit 1; }
-# UI：无重框线
+# UI
 ui_init() { :; }
 ui_head() { printf '\n  %s%s%s  %s%s%s\n' "$B$CYN" "$1" "$R" "$D" "$2" "$R"; }
-ui_sub() { printf '  %s%s%s\n' "$D" "$1" "$R"; }
+ui_status() { printf '  %s\n' "$1"; }
 ui_gap() { printf '\n'; }
 ui_group() { printf '  %s%s%s\n' "$D" "$1" "$R"; }
 ui_item() {
   printf '  %s%2s%s  %s\n' "$CYN" "$1" "$R" "$2"
-  [[ -n ${3:-} ]] && printf '      %s%s%s\n' "$D" "$3" "$R"
 }
 ui_foot() { printf '\n'; }
 hr() { printf '  %s···············%s\n' "$D" "$R"; }
@@ -430,6 +429,33 @@ print_component_statuses() {
   component_line "REALITY" "$REALITY_STATE" xray xray REALITY_PORT
   component_line "CDN/WS" "$CDN_STATE" xray xray CDN_PORT
   component_line "Hysteria2" "$HY2_STATE" hysteria-server hysteria HY2_PORT
+}
+
+# 菜单顶栏一行状态
+proxy_status_line() {
+  local any=0 run=0 stop=0
+  local st
+  if [[ -f $REALITY_STATE || -f $CDN_STATE ]]; then
+    any=1
+    st=$(svc_state xray xray)
+    [[ $st == running ]] && run=1
+    [[ $st == stopped ]] && stop=1
+  fi
+  if [[ -f $HY2_STATE ]]; then
+    any=1
+    st=$(svc_state hysteria-server hysteria)
+    [[ $st == running ]] && run=1
+    [[ $st == stopped ]] && stop=1
+  fi
+  if (( any == 0 )); then
+    printf '%s○%s  未安装组件' "$YEL" "$R"
+  elif (( run == 1 && stop == 0 )); then
+    printf '%s●%s  服务正常' "$GRN" "$R"
+  elif (( run == 1 )); then
+    printf '%s○%s  部分运行' "$YEL" "$R"
+  else
+    printf '%s○%s  服务已停止' "$YEL" "$R"
+  fi
 }
 
 restart_svc() {
@@ -1171,10 +1197,9 @@ pick_sni() {
 print_banner() {
   clear 2>/dev/null || true
   ui_init
-  ui_head "代理" "v${VERSION}"
-  ui_sub "REALITY · HY2 · CDN"
-  print_component_statuses
-  printf '\n'
+  ui_head "代理管理" "v${VERSION}"
+  ui_status "$(proxy_status_line)"
+  ui_gap
 }
 
 menu_install() {
@@ -1188,7 +1213,7 @@ menu_install() {
     ui_item 0 "返回"
     ui_foot
     local c
-    read -r -p "  请选择: " c || { warn "读取输入失败"; return 1; }
+    read -r -p "  请选择 [0-3]: " c || { warn "读取输入失败"; return 1; }
     c=${c//[[:space:]]/}
     case $c in
       1)
@@ -1224,7 +1249,7 @@ menu_install() {
         install_cdn "${args[@]}"
         auto_v2; pause
         ;;
-      0) return ;;
+      0|"") return ;;
       *) warn "无效选项"; sleep 1 ;;
     esac
   done
@@ -1233,7 +1258,7 @@ menu_install() {
 menu_uninstall() {
   while true; do
     print_banner
-    ui_group "卸载（不可自动恢复）"
+    ui_group "卸载"
     ui_item 1 "卸载 REALITY"
     ui_item 2 "卸载 CDN"
     ui_item 3 "卸载 Hysteria2"
@@ -1242,7 +1267,7 @@ menu_uninstall() {
     ui_item 0 "返回"
     ui_foot
     local c
-    read -r -p "  请选择: " c || { warn "读取输入失败"; return 1; }
+    read -r -p "  请选择 [0-4]: " c || { warn "读取输入失败"; return 1; }
     c=${c//[[:space:]]/}
     case $c in
       1) uninstall_reality; pause ;;
@@ -1258,16 +1283,19 @@ menu_uninstall() {
 main_menu() {
   while true; do
     print_banner
-    ui_item 1 "安装代理" "REALITY · HY2 · CDN"
+    ui_group "管理"
+    ui_item 1 "安装代理"
     ui_item 2 "查看节点 / 状态"
+    ui_gap
+    ui_group "系统"
     ui_item 3 "卸载"
     ui_item 4 "安装 / 更新 v2"
     ui_gap
     ui_item 0 "退出"
     ui_foot
     local c
-    read -r -p "  请选择: " c || {
-      warn "读取输入失败。请交互终端执行: sudo vps 或 sudo v2"
+    read -r -p "  请选择 [0-4]: " c || {
+      warn "读取输入失败"
       exit 1
     }
     c=${c//[[:space:]]/}
@@ -1276,7 +1304,8 @@ main_menu() {
       2) show_info; pause ;;
       3) menu_uninstall ;;
       4) install_v2; pause ;;
-      0|"") printf '\n  %s再见%s\n\n' "$D" "$R"; exit 0 ;;
+      0) printf '\n  %s再见%s\n\n' "$D" "$R"; exit 0 ;;
+      "") continue ;;
       *) warn "无效选项"; sleep 1 ;;
     esac
   done

@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="syw-vps"
-VERSION="1.1.6"
+VERSION="1.1.7"
 LIB_DIR="/usr/local/lib/syw-vps"
 BIN_VPS="/usr/local/bin/vps"
 MARKER="syw-vps-entrypoint"
@@ -126,13 +126,9 @@ install_self_from_running() {
   rm -f "$tmp"
 }
 
-# 本地已有则保留；缺了才下载
+# 安装时拉取最新模块脚本（只覆盖 .sh，不动节点/证书配置）
 ensure_module() {
   local dest=$1 url=$2
-  if [[ -f $dest && -s $dest ]]; then
-    bash -n "$dest" 2>/dev/null || warn "$dest 语法检查失败"
-    return 0
-  fi
   download_to "$url" "$dest"
 }
 
