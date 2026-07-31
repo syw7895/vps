@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="syw-vps"
-VERSION="1.0.4"
+VERSION="1.0.5"
 LIB_DIR="/usr/local/lib/syw-vps"
 BIN_VPS="/usr/local/bin/vps"
 MARKER="syw-vps-entrypoint"
@@ -12,8 +12,8 @@ MARKER="syw-vps-entrypoint"
 SYW_VPS_REF="${SYW_VPS_REF:-main}"
 RAW_BASE="${SYW_VPS_RAW_BASE:-https://raw.githubusercontent.com/syw7895/vps/${SYW_VPS_REF}}"
 # 模块期望 SHA-256（scripts/update-checksums.sh 维护；环境变量可覆盖）
-PROXY_SHA256="${SYW_VPS_PROXY_SHA256:-defe9da1a43b745a634b2c829d6e6da87f58fb139f12fb3eb5592c094d4bd0e9}"
-TRAFFIC_SHA256="${SYW_VPS_TRAFFIC_SHA256:-4f2a40f2a1dc4964bb0a1362784c0c23ae41006cb6f26e6986d750a5da40df0e}"
+PROXY_SHA256="${SYW_VPS_PROXY_SHA256:-bdf67419e9e3efd4796a3a8455279f13a86c6b6e03f22a5ef2d98938b3e2efc1}"
+TRAFFIC_SHA256="${SYW_VPS_TRAFFIC_SHA256:-56a456e59486d44dd1c838c4e36dccc64ce7f6ab0a2efd0255d266f4efe4f7a2}"
 INTEGRITY_FILE="${LIB_DIR}/checksums.sha256"
 
 VPS_SH_LOCAL="${LIB_DIR}/vps.sh"
@@ -40,7 +40,10 @@ ui_init() {
   if [[ -z $cols && -t 1 ]]; then cols=$(tput cols 2>/dev/null || echo 80); fi
   cols=${cols:-80}
   UI_BOX=1
-  (( cols < UI_W + 6 )) && UI_BOX=0
+  # 勿写 (( cond )) && …：cond 为假时 (( )) 返回 1，会触发 set -e 直接退出
+  if (( cols < UI_W + 6 )); then
+    UI_BOX=0
+  fi
 }
 ui_box_top() { (( UI_BOX )) && printf '  %s╭%s╮%s\n' "$D" "$UI_RULE" "$R" || true; }
 ui_box_mid() { (( UI_BOX )) && printf '  %s├%s┤%s\n' "$D" "$UI_RULE" "$R" || printf '  %s%s%s\n' "$D" "$UI_RULE" "$R"; }

@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-traffic"
-VERSION="1.2.3"
+VERSION="1.2.4"
 LIB_DIR="/usr/local/lib/syw-vps"
 SELF_LOCAL="${LIB_DIR}/traffic.sh"
 # 默认 main；生产建议 SYW_VPS_REF=<commit|tag>
@@ -715,7 +715,10 @@ ui_init() {
   if [[ -z $cols && -t 1 ]]; then cols=$(tput cols 2>/dev/null || echo 80); fi
   cols=${cols:-80}
   UI_BOX=1
-  (( cols < UI_W + 6 )) && UI_BOX=0
+  # 勿写 (( cond )) && …：cond 为假时 (( )) 返回 1，会触发 set -e 直接退出
+  if (( cols < UI_W + 6 )); then
+    UI_BOX=0
+  fi
 }
 ui_rule() { printf '  %s%s%s\n' "$D" "$1" "$R"; }
 ui_box_top() { (( UI_BOX )) && ui_rule "╭${UI_RULE}╮" || true; }

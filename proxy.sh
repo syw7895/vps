@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
-VERSION="1.3.2"
+VERSION="1.3.3"
 CONFIG_DIR="/root/proxy-info"
 BACKUP_DIR="${CONFIG_DIR}/backups"
 BACKUP_KEEP="${BACKUP_KEEP:-15}"
@@ -64,7 +64,10 @@ ui_init() {
   if [[ -z $cols && -t 1 ]]; then cols=$(tput cols 2>/dev/null || echo 80); fi
   cols=${cols:-80}
   UI_BOX=1
-  (( cols < UI_W + 6 )) && UI_BOX=0
+  # 勿写 (( cond )) && …：cond 为假时 (( )) 返回 1，会触发 set -e 直接退出
+  if (( cols < UI_W + 6 )); then
+    UI_BOX=0
+  fi
 }
 hr() {
   if (( UI_BOX )); then
