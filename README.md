@@ -85,6 +85,7 @@ VPS 管理
 - **1 Mbit/s 持续约一天仍可能产生约 10.8 GB 流量**，不能绝对保证额度不会用完。  
 - vnStat 与云厂商后台统计可能存在误差。  
 - 默认统计默认 IPv4 出口网卡的 **TX**（`ip -4 route get 1.1.1.1`）；可在 `/etc/vps-traffic/config` 用 `IFACE=` 覆盖。  
+- 默认出口网卡变更时，会先按状态中的 `LIMIT_IFACE` 清理旧网卡上的本工具限速，再按当前网卡决策，避免遗留或双限速。  
 - 依赖：**vnStat 2.6+、python3、iproute2**（安装流量监控时会 apt 安装）。  
 - 默认 `fq` / `fq_codel` / `noqueue` 等系统 qdisc 不视为冲突；HTB/其它限速会跳过以免覆盖。
 

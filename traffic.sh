@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-traffic"
-VERSION="1.2.0"
+VERSION="1.2.1"
 LIB_DIR="/usr/local/lib/syw-vps"
 SELF_LOCAL="${LIB_DIR}/traffic.sh"
 RAW_BASE="${SYW_VPS_RAW_BASE:-https://raw.githubusercontent.com/syw7895/vps/main}"
@@ -19,14 +19,13 @@ if [[ ${VPS_TRAFFIC_MOCK} == 1 ]]; then
   CONFIG_DIR="${_MOCK_ROOT}/etc"
   STATE_DIR="${_MOCK_ROOT}/var"
   LOCK_FILE="${_MOCK_ROOT}/vps-traffic.lock"
-  MOCK_TC_FILE="${_MOCK_ROOT}/mock_tc_qdisc"
-  mkdir -p "$CONFIG_DIR" "$STATE_DIR"
-  [[ -f $MOCK_TC_FILE ]] || : >"$MOCK_TC_FILE"
+  MOCK_TC_DIR="${_MOCK_ROOT}/mock_tc"
+  mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$MOCK_TC_DIR"
 else
   CONFIG_DIR="/etc/vps-traffic"
   STATE_DIR="/var/lib/vps-traffic"
   LOCK_FILE="/var/lock/vps-traffic.lock"
-  MOCK_TC_FILE=""
+  MOCK_TC_DIR=""
 fi
 CONFIG_FILE="${CONFIG_DIR}/config"
 STATE_FILE="${STATE_DIR}/state"
@@ -286,10 +285,17 @@ sys.exit(2)
 }
 
 # ---------- tc ----------
+# mock：按网卡分文件，便于模拟默认出口变更
+mock_tc_path() {
+  local iface=$1
+  [[ $iface =~ ^[A-Za-z0-9._-]+$ ]] || iface="invalid"
+  printf '%s/%s' "${MOCK_TC_DIR}" "$iface"
+}
+
 tc_qdisc_show() {
   local iface=$1
   if [[ $VPS_TRAFFIC_MOCK == 1 ]]; then
-    cat "${MOCK_TC_FILE:-/dev/null}" 2>/dev/null || true
+    cat "$(mock_tc_path "$iface")" 2>/dev/null || true
     return 0
   fi
   $TC_BIN qdisc show dev "$iface" 2>/dev/null || true
@@ -338,7 +344,7 @@ apply_limit() {
 
   if [[ $VPS_TRAFFIC_MOCK == 1 ]]; then
     # mock：若存在非无害 root 已在 has_blocking 处理；此处可替换默认 qdisc
-    printf 'qdisc tbf %s root refcnt 2 rate %s\n' "${TC_ROOT_HANDLE}" "$rate" >"$MOCK_TC_FILE"
+    printf 'qdisc tbf %s root refcnt 2 rate %s\n' "${TC_ROOT_HANDLE}" "$rate" >"$(mock_tc_path "$iface")"
     return 0
   fi
 
@@ -370,7 +376,7 @@ remove_limit() {
   fi
 
   if [[ $VPS_TRAFFIC_MOCK == 1 ]]; then
-    : >"$MOCK_TC_FILE"
+    : >"$(mock_tc_path "$iface")"
     LIMIT_ACTIVE=false OWNED_BY_TOOL=false LIMIT_HANDLE= LIMIT_IFACE=
     write_state
     return 0
@@ -397,11 +403,33 @@ quota_bytes() {
   awk -v g="$MONTHLY_QUOTA_GB" 'BEGIN{printf "%.0f", g * 1000000000}'
 }
 
+# 默认出口变更时：先清状态记录的 LIMIT_IFACE 上本工具规则，再按当前网卡决策
+reconcile_limit_iface() {
+  local current=$1
+  local old=${LIMIT_IFACE:-}
+
+  [[ -n $old ]] || return 0
+  [[ $old == "$current" ]] && return 0
+
+  log "网卡变更: 记录=${old} → 当前=${current}，清理旧网卡本工具限速"
+  if has_our_qdisc "$old"; then
+    if ! remove_limit "$old"; then
+      warn "清理旧网卡 ${old} 限速失败"
+      return 1
+    fi
+  else
+    LIMIT_ACTIVE=false OWNED_BY_TOOL=false LIMIT_HANDLE= LIMIT_IFACE=
+    write_state
+  fi
+  load_state
+  return 0
+}
+
 run_check() {
   load_config
   load_state
 
-  local iface tx thr_bytes quota ratio_x100 now_ts month_key
+  local iface tx thr_bytes quota ratio_x100 now_ts month_key remove_on
   now_ts=$(date +%s)
   month_key=$(date +%Y-%m)
 
@@ -417,6 +445,13 @@ run_check() {
     write_state
     warn "网卡未解析，不修改 tc"
     return 0
+  fi
+
+  # 优先清理记录中的旧网卡，避免遗留 / 双限速
+  if ! reconcile_limit_iface "$iface"; then
+    LAST_REASON=stale_iface_cleanup_failed LAST_CHECK_TS=$now_ts
+    write_state
+    return 1
   fi
 
   if ! quota=$(quota_bytes); then
@@ -443,9 +478,13 @@ run_check() {
   log "iface=$iface tx=$tx thr=$thr_bytes ratio=${ratio_x100}% rate=$LIMIT_RATE"
 
   if (( tx < thr_bytes )); then
-    if [[ $LIMIT_ACTIVE == true || $OWNED_BY_TOOL == true ]] || has_our_qdisc "$iface"; then
-      log "低于阈值，解除限速"
-      if remove_limit "$iface"; then
+    remove_on=${LIMIT_IFACE:-$iface}
+    if [[ $LIMIT_ACTIVE == true || $OWNED_BY_TOOL == true ]] || has_our_qdisc "$remove_on" || has_our_qdisc "$iface"; then
+      log "低于阈值，解除限速 (iface=${remove_on})"
+      if remove_limit "$remove_on"; then
+        if [[ $remove_on != "$iface" ]] && has_our_qdisc "$iface"; then
+          remove_limit "$iface" || true
+        fi
         LAST_REASON=removed_below_threshold
         ok "已解除限速"
       else
