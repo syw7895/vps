@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
-VERSION="1.3.4"
+VERSION="1.3.5"
 CONFIG_DIR="/root/proxy-info"
 BACKUP_DIR="${CONFIG_DIR}/backups"
 BACKUP_KEEP="${BACKUP_KEEP:-15}"
@@ -46,9 +46,9 @@ SNI_PRESETS=(
 
 if [[ -t 1 ]]; then
   R=$'\033[0m' B=$'\033[1m' D=$'\033[2m'
-  RED=$'\033[31m' GRN=$'\033[32m' YEL=$'\033[33m' CYN=$'\033[36m' MAG=$'\033[35m' BLU=$'\033[34m'
+  RED=$'\033[31m' GRN=$'\033[32m' YEL=$'\033[33m' CYN=$'\033[36m'
 else
-  R='' B='' D='' RED='' GRN='' YEL='' CYN='' MAG='' BLU=''
+  R='' B='' D='' RED='' GRN='' YEL='' CYN=''
 fi
 
 log()  { printf '%s[%s]%s %s\n' "$CYN" "$APP_NAME" "$R" "$*"; }
@@ -193,7 +193,9 @@ detect_os() {
 }
 
 install_deps() {
-  ((DEPS_INSTALLED)) && return 0
+  if ((DEPS_INSTALLED)); then
+    return 0
+  fi
   log "安装依赖..."
   apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
@@ -757,7 +759,9 @@ issue_cert() {
   log "申请 Let's Encrypt 证书..."
   "$acme" --set-default-ca --server letsencrypt >/dev/null
   if ! "$acme" --issue -d "$domain" --standalone --keylength ec-256 --force; then
-    ((restarted_xray)) && systemctl start xray || true
+    if ((restarted_xray)); then
+      systemctl start xray || true
+    fi
     fail "证书申请失败（域名解析/80 端口/防火墙）"
   fi
   "$acme" --install-cert -d "$domain" --ecc \
@@ -766,7 +770,9 @@ issue_cert() {
     --reloadcmd "systemctl restart xray 2>/dev/null || true"
   CDN_CERT="$certdir/fullchain.pem"; CDN_KEY="$certdir/privkey.pem"
   fix_cert_permissions "$certdir" "$CDN_CERT" "$CDN_KEY"
-  ((restarted_xray)) && systemctl start xray 2>/dev/null || true
+  if ((restarted_xray)); then
+    systemctl start xray 2>/dev/null || true
+  fi
   ok "证书已就绪: $certdir"
 }
 

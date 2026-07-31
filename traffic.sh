@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-traffic"
-VERSION="1.3.1"
+VERSION="1.3.2"
 LIB_DIR="/usr/local/lib/syw-vps"
 SELF_LOCAL="${LIB_DIR}/traffic.sh"
 SYW_VPS_REF="${SYW_VPS_REF:-main}"
@@ -107,16 +107,26 @@ ensure_dirs() {
     write_config
   fi
   if [[ ! -f $STATE_FILE ]]; then
-    LIMIT_ACTIVE=false LIMIT_IFACE= LIMIT_HANDLE= LAST_REASON=
-    LAST_CHECK_TS= LAST_TX_BYTES= LAST_MONTH= LAST_RATIO= OWNED_BY_TOOL=false
+    LIMIT_ACTIVE=false
+    LIMIT_IFACE=
+    LIMIT_HANDLE=
+    LAST_REASON=
+    LAST_CHECK_TS=
+    LAST_TX_BYTES=
+    LAST_MONTH=
+    LAST_RATIO=
+    OWNED_BY_TOOL=false
     write_state
   fi
 }
 
 load_config() {
   ensure_dirs
-  MONTHLY_QUOTA_GB= THRESHOLD_PERCENT=90 LIMIT_RATE=1mbit
-  IFACE=auto PAUSED=false
+  MONTHLY_QUOTA_GB=
+  THRESHOLD_PERCENT=90
+  LIMIT_RATE=1mbit
+  IFACE=auto
+  PAUSED=false
   load_kv_file "$CONFIG_FILE"
   THRESHOLD_PERCENT="${THRESHOLD_PERCENT:-90}"
   LIMIT_RATE="${LIMIT_RATE:-1mbit}"
@@ -139,8 +149,15 @@ EOF
 
 load_state() {
   ensure_dirs
-  LIMIT_ACTIVE=false LIMIT_IFACE= LIMIT_HANDLE= LAST_REASON=
-  LAST_CHECK_TS= LAST_TX_BYTES= LAST_MONTH= LAST_RATIO= OWNED_BY_TOOL=false
+  LIMIT_ACTIVE=false
+  LIMIT_IFACE=
+  LIMIT_HANDLE=
+  LAST_REASON=
+  LAST_CHECK_TS=
+  LAST_TX_BYTES=
+  LAST_MONTH=
+  LAST_RATIO=
+  OWNED_BY_TOOL=false
   load_kv_file "$STATE_FILE"
   LIMIT_ACTIVE="${LIMIT_ACTIVE:-false}"
   OWNED_BY_TOOL="${OWNED_BY_TOOL:-false}"
@@ -164,7 +181,7 @@ EOF
 
 # ---------- 网卡 ----------
 detect_default_iface() {
-  local out dev
+  local out
   if [[ $VPS_TRAFFIC_MOCK == 1 ]]; then
     echo "${MOCK_IFACE:-eth0}"
     return 0
@@ -369,14 +386,20 @@ remove_limit() {
   load_state
 
   if ! has_our_qdisc "$iface"; then
-    LIMIT_ACTIVE=false OWNED_BY_TOOL=false LIMIT_HANDLE= LIMIT_IFACE=
+    LIMIT_ACTIVE=false
+    OWNED_BY_TOOL=false
+    LIMIT_HANDLE=
+    LIMIT_IFACE=
     write_state
     return 0
   fi
 
   if [[ $VPS_TRAFFIC_MOCK == 1 ]]; then
     : >"$(mock_tc_path "$iface")"
-    LIMIT_ACTIVE=false OWNED_BY_TOOL=false LIMIT_HANDLE= LIMIT_IFACE=
+    LIMIT_ACTIVE=false
+    OWNED_BY_TOOL=false
+    LIMIT_HANDLE=
+    LIMIT_IFACE=
     write_state
     return 0
   fi
@@ -390,7 +413,10 @@ remove_limit() {
     err "删除后仍检测到本工具规则"
     return 1
   fi
-  LIMIT_ACTIVE=false OWNED_BY_TOOL=false LIMIT_HANDLE= LIMIT_IFACE=
+  LIMIT_ACTIVE=false
+  OWNED_BY_TOOL=false
+  LIMIT_HANDLE=
+  LIMIT_IFACE=
   write_state
   return 0
 }
@@ -417,7 +443,10 @@ reconcile_limit_iface() {
       return 1
     fi
   else
-    LIMIT_ACTIVE=false OWNED_BY_TOOL=false LIMIT_HANDLE= LIMIT_IFACE=
+    LIMIT_ACTIVE=false
+    OWNED_BY_TOOL=false
+    LIMIT_HANDLE=
+    LIMIT_IFACE=
     write_state
   fi
   load_state
@@ -433,14 +462,16 @@ run_check() {
   month_key=$(date +%Y-%m)
 
   if [[ $PAUSED == true || $PAUSED == 1 ]]; then
-    LAST_REASON=paused LAST_CHECK_TS=$now_ts
+    LAST_REASON=paused
+    LAST_CHECK_TS=$now_ts
     write_state
     log "已暂停，跳过"
     return 0
   fi
 
   if ! iface=$(resolve_iface 2>/dev/null); then
-    LAST_REASON=iface_unresolved LAST_CHECK_TS=$now_ts
+    LAST_REASON=iface_unresolved
+    LAST_CHECK_TS=$now_ts
     write_state
     warn "网卡未解析，不修改 tc"
     return 0
@@ -448,13 +479,15 @@ run_check() {
 
   # 优先清理记录中的旧网卡，避免遗留 / 双限速
   if ! reconcile_limit_iface "$iface"; then
-    LAST_REASON=stale_iface_cleanup_failed LAST_CHECK_TS=$now_ts
+    LAST_REASON=stale_iface_cleanup_failed
+    LAST_CHECK_TS=$now_ts
     write_state
     return 1
   fi
 
   if ! quota=$(quota_bytes); then
-    LAST_REASON=quota_unset LAST_CHECK_TS=$now_ts
+    LAST_REASON=quota_unset
+    LAST_CHECK_TS=$now_ts
     write_state
     warn "未设置月额度，不修改 tc"
     return 0
@@ -465,7 +498,8 @@ run_check() {
   local trc=$?
   set -e
   if [[ $trc -ne 0 || -z $tx || ! $tx =~ ^[0-9]+$ ]]; then
-    LAST_REASON=vnstat_unavailable_or_bad_month LAST_CHECK_TS=$now_ts
+    LAST_REASON=vnstat_unavailable_or_bad_month
+    LAST_CHECK_TS=$now_ts
     write_state
     warn "vnStat 无数据/解析失败 (rc=$trc)，不修改 tc"
     return 0
@@ -473,7 +507,10 @@ run_check() {
 
   thr_bytes=$(awk -v q="$quota" -v p="$THRESHOLD_PERCENT" 'BEGIN{printf "%.0f", q * p / 100}')
   ratio_x100=$(awk -v t="$tx" -v q="$quota" 'BEGIN{ if(q<=0){print 0; exit} printf "%.2f", t*100/q }')
-  LAST_TX_BYTES=$tx LAST_MONTH=$month_key LAST_RATIO=$ratio_x100 LAST_CHECK_TS=$now_ts
+  LAST_TX_BYTES=$tx
+  LAST_MONTH=$month_key
+  LAST_RATIO=$ratio_x100
+  LAST_CHECK_TS=$now_ts
   log "iface=$iface tx=$tx thr=$thr_bytes ratio=${ratio_x100}% rate=$LIMIT_RATE"
 
   if (( tx < thr_bytes )); then
@@ -499,7 +536,10 @@ run_check() {
   fi
 
   if has_our_qdisc "$iface"; then
-    LIMIT_ACTIVE=true OWNED_BY_TOOL=true LIMIT_HANDLE=$TC_ROOT_HANDLE LIMIT_IFACE=$iface
+    LIMIT_ACTIVE=true
+    OWNED_BY_TOOL=true
+    LIMIT_HANDLE=$TC_ROOT_HANDLE
+    LIMIT_IFACE=$iface
     LAST_REASON=already_limited
     write_state
     log "已在限速中"
@@ -511,14 +551,18 @@ run_check() {
   local arc=$?
   set -e
   if [[ $arc -eq 0 ]]; then
-    LIMIT_ACTIVE=true OWNED_BY_TOOL=true LIMIT_HANDLE=$TC_ROOT_HANDLE LIMIT_IFACE=$iface
+    LIMIT_ACTIVE=true
+    OWNED_BY_TOOL=true
+    LIMIT_HANDLE=$TC_ROOT_HANDLE
+    LIMIT_IFACE=$iface
     LAST_REASON=applied_limit
     write_state
     ok "已限速 $LIMIT_RATE on $iface"
     return 0
   fi
   if [[ $arc -eq 3 ]]; then
-    LIMIT_ACTIVE=false OWNED_BY_TOOL=false
+    LIMIT_ACTIVE=false
+    OWNED_BY_TOOL=false
     write_state
     return 0
   fi
@@ -641,16 +685,24 @@ cmd_set_rate() {
   ok "限速 ${r}"
 }
 
-# 进度条：pct 0-100，宽 width
+# 进度条：pct 0-100；可选 thr（阈值%）决定前景色：<80 绿 / 逼近黄 / ≥阈值 红
 progress_bar() {
-  local pct=$1 width=${2:-28} fill empty i n
-  (( pct < 0 )) && pct=0
-  (( pct > 100 )) && pct=100
+  local pct=$1 width=${2:-24} thr=${3:-90} fill empty i n col
+  if (( pct < 0 )); then pct=0; fi
+  if (( pct > 100 )); then pct=100; fi
   n=$((pct * width / 100))
-  fill="" empty=""
+  fill=""
+  empty=""
   for ((i = 0; i < n; i++)); do fill+="█"; done
   for ((i = n; i < width; i++)); do empty+="░"; done
-  printf '%s' "${fill}${empty}"
+  if (( pct >= thr )); then
+    col=$RED
+  elif (( pct >= 80 )); then
+    col=$YEL
+  else
+    col=$GRN
+  fi
+  printf '%s%s%s' "$col" "${fill}${empty}" "$R"
 }
 
 fmt_reason() {
@@ -698,6 +750,11 @@ ui_item() {
 ui_kv() { printf '  %s%-8s%s  %s\n' "$D" "$1" "$R" "$2"; }
 ui_note() { printf '  %s%s%s\n' "$D" "$1" "$R"; }
 ui_foot() { printf '\n'; }
+# 状态图例（一行弱化）
+ui_legend() {
+  printf '  %s%s●%s 正常  %s●%s 接近阈值  %s●%s 限速/超限%s\n' \
+    "$D" "$GRN" "$D" "$YEL" "$D" "$RED" "$D" "$R"
+}
 
 menu_status_line() {
   load_config
@@ -717,8 +774,8 @@ cmd_status() {
   load_config
   load_state
   ui_init
-  local iface tx= gb="—" pct=0 bar thr_gb="—" status_icon status_txt status_col
-  local qdisc_brief paused_txt limit_txt
+  local iface tx= gb="—" pct=0 bar thr_gb="—" status_txt status_col
+  local qdisc_brief paused_txt limit_txt thr=${THRESHOLD_PERCENT:-90}
 
   set +e
   iface=$(resolve_iface 2>/dev/null)
@@ -744,27 +801,22 @@ cmd_status() {
     pct=0
   fi
 
-  bar=$(progress_bar "$pct" 24)
+  bar=$(progress_bar "$pct" 24 "$thr")
 
   if [[ $LIMIT_ACTIVE == true || $OWNED_BY_TOOL == true ]]; then
     status_col=$RED
-    status_icon="●"
-    status_txt="限速中 ${LIMIT_RATE}"
+    status_txt="限速中 · ${LIMIT_RATE}"
   elif [[ $PAUSED == true ]]; then
     status_col=$YEL
-    status_icon="◐"
     status_txt="检查已暂停"
   elif [[ -z ${MONTHLY_QUOTA_GB:-} ]]; then
     status_col=$YEL
-    status_icon="○"
     status_txt="待设置额度"
-  elif [[ -n ${tx:-} && -n ${MONTHLY_QUOTA_GB:-} ]] && (( pct >= THRESHOLD_PERCENT )); then
+  elif [[ -n ${tx:-} && -n ${MONTHLY_QUOTA_GB:-} ]] && (( pct >= thr )); then
     status_col=$RED
-    status_icon="●"
-    status_txt="已达阈值 ${THRESHOLD_PERCENT}%"
+    status_txt="已达阈值 ${thr}%"
   else
     status_col=$GRN
-    status_icon="●"
     status_txt="正常放行"
   fi
 
@@ -778,12 +830,13 @@ cmd_status() {
   fi
 
   ui_head "流量" "v${VERSION}"
-  ui_status "${status_col}${status_icon}  ${status_txt}${R}"
+  ui_status "${status_col}●${R}  ${B}${status_txt}${R}"
+  ui_legend
   ui_gap
   if [[ -n ${MONTHLY_QUOTA_GB:-} ]]; then
-    printf '  %s%s%s  %s%s%%%s\n' "$CYN" "$bar" "$R" "$B" "$pct" "$R"
+    printf '  %s  %s%s%%%s\n' "$bar" "$B" "$pct" "$R"
     ui_kv "用量" "${B}${gb}${R} / ${MONTHLY_QUOTA_GB} GB"
-    ui_kv "阈值" "${thr_gb} GB @ ${THRESHOLD_PERCENT}%"
+    ui_kv "阈值" "${thr_gb} GB @ ${thr}%"
   else
     ui_kv "用量" "${B}${gb}${R} GB"
     ui_note "月额度未设置 → 菜单选 2"

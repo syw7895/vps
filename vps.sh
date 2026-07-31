@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="syw-vps"
-VERSION="1.1.1"
+VERSION="1.1.2"
 LIB_DIR="/usr/local/lib/syw-vps"
 BIN_VPS="/usr/local/bin/vps"
 MARKER="syw-vps-entrypoint"
@@ -35,7 +35,6 @@ ui_head() {
 }
 ui_status() { printf '  %s\n' "$1"; }
 ui_gap() { printf '\n'; }
-ui_group() { printf '  %s%s%s\n' "$D" "$1" "$R"; }
 ui_item() {
   # $1 序号  $2 主文案  $3 可选副文案
   printf '  %s%2s%s  %s\n' "$CYN" "$1" "$R" "$2"
