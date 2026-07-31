@@ -26,16 +26,14 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 ## 菜单
 
 ```text
-  VPS  v1.1.1
+  VPS  v1.1.6
   ●  模块就绪
 
-  1  代理管理
-      REALITY · HY2 · CDN
-  2  流量管理
-      额度 · 限速 · 检查
+   1  代理管理
+   2  流量管理
 
-  0  退出
-  ›
+   0  退出
+  请选择 [0-2]:
 ```
 
 1. 代理管理 — REALITY / Hysteria2 / VLESS+WS+TLS（或历史 `v2`）  

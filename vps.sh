@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="syw-vps"
-VERSION="1.1.5"
+VERSION="1.1.6"
 LIB_DIR="/usr/local/lib/syw-vps"
 BIN_VPS="/usr/local/bin/vps"
 MARKER="syw-vps-entrypoint"
@@ -27,18 +27,16 @@ fi
 warn() { printf '%s[%s]%s %s\n' "$YEL" "!" "$R" "$*"; }
 fail() { printf '%s[%s]%s %s\n' "$RED" "ERR" "$R" "$*" >&2; exit 1; }
 
-# ---------- UI（无重框线：标题 / 状态 / 列表） ----------
+# ---------- UI ----------
 ui_init() { :; }
 ui_head() {
-  # $1 标题  $2 版本标签
   printf '\n  %s%s%s  %s%s%s\n' "$B$CYN" "$1" "$R" "$D" "$2" "$R"
 }
 ui_status() { printf '  %s\n' "$1"; }
 ui_gap() { printf '\n'; }
 ui_item() {
-  # $1 序号  $2 主文案  $3 可选副文案
+  # $1 序号  $2 文案
   printf '  %s%2s%s  %s\n' "$CYN" "$1" "$R" "$2"
-  [[ -n ${3:-} ]] && printf '      %s%s%s\n' "$D" "$3" "$R"
 }
 ui_foot() { printf '\n'; }
 
@@ -61,7 +59,18 @@ read_tty() {
     esac
   done
   __var=${1:-REPLY}
-  read -r -p "$prompt" "${__var?}" || return 1
+
+  if [[ -t 0 ]]; then
+    read -r -p "$prompt" "$__var" || return 1
+    return 0
+  fi
+
+  if { : </dev/tty; } 2>/dev/null; then
+    read -r -p "$prompt" "$__var" </dev/tty || return 1
+    return 0
+  fi
+
+  read -r -p "$prompt" "$__var" || return 1
 }
 
 require_root() {
@@ -83,7 +92,7 @@ http_get() {
   fi
 }
 
-# 下载：仅 bash -n 语法检查（本仓库模块不做哈希互校）
+# 下载：仅 bash -n
 download_to() {
   local url=$1 dest=$2 tmp
   tmp=$(mktemp)
@@ -158,7 +167,6 @@ run_module() {
     warn "模块语法错误: $path"
     return 1
   }
-  # curl|bash 后 stdin 为 EOF，交互模块须绑到 /dev/tty
   set +e
   local rc=0
   if [[ -e /dev/tty ]]; then
@@ -189,8 +197,8 @@ main_menu() {
     ui_head "VPS" "v${VERSION}"
     ui_status "$st"
     ui_gap
-    ui_item 1 "代理管理" "REALITY · HY2 · CDN"
-    ui_item 2 "流量管理" "额度 · 限速 · 检查"
+    ui_item 1 "代理管理"
+    ui_item 2 "流量管理"
     ui_gap
     ui_item 0 "退出"
     ui_foot
@@ -210,10 +218,12 @@ main_menu() {
   done
 }
 
-# curl|bash 时 stdin 是管道，装完后绑到真实终端再进菜单
+# 非 TTY stdin：能打开 /dev/tty 则 re-exec 绑定后进菜单（避免无限递归：绑定后 -t 0 为真）
 enter_menu() {
-  if [[ ! -t 0 ]] && [[ -r /dev/tty && -w /dev/tty && -f $VPS_SH_LOCAL ]]; then
-    exec bash "$VPS_SH_LOCAL" --menu-only </dev/tty >/dev/tty 2>/dev/tty
+  if [[ ! -t 0 && -f $VPS_SH_LOCAL ]] &&
+     { : </dev/tty >/dev/tty; } 2>/dev/null; then
+    exec bash "$VPS_SH_LOCAL" --menu-only \
+      </dev/tty >/dev/tty 2>/dev/tty
   fi
   main_menu
 }
@@ -229,7 +239,7 @@ EOF
 main() {
   case ${1:-} in
     -h|--help|help) usage; exit 0 ;;
-    --menu-only|menu) require_root; main_menu ;;
+    --menu-only|menu) require_root; enter_menu ;;
     --install|install) do_install; enter_menu ;;
     *) do_install; enter_menu ;;
   esac
