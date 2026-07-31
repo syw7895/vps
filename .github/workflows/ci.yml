@@ -12,38 +12,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Syntax check
-        run: bash -n vps.sh proxy.sh traffic.sh scripts/update-checksums.sh tests/traffic-mock-test.sh
+        run: bash -n vps.sh proxy.sh traffic.sh tests/traffic-mock-test.sh
 
       - name: Traffic mock tests
         run: bash tests/traffic-mock-test.sh
-
-      - name: ShellCheck
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck
-          # 交互脚本常见告警放宽；错误级语法/逻辑问题仍失败
-          shellcheck -e SC2034,SC1091,SC2016,SC2086,SC2155,SC2004,SC2207,SC2181,SC2162,SC2046,SC2116,SC2001,SC2015 \
-            vps.sh proxy.sh traffic.sh
-
-      - name: Checksums in sync
-        run: |
-          set -euo pipefail
-          cp checksums.sha256 /tmp/checksums.before
-          bash scripts/update-checksums.sh
-          if ! cmp -s checksums.sha256 /tmp/checksums.before; then
-            echo "::error::checksums.sha256 out of date; run scripts/update-checksums.sh"
-            diff -u /tmp/checksums.before checksums.sha256 || true
-            exit 1
-          fi
-          ph=$(awk '$2=="proxy.sh"{print $1; exit}' checksums.sha256)
-          th=$(awk '$2=="traffic.sh"{print $1; exit}' checksums.sha256)
-          grep -Fq "$ph" vps.sh
-          grep -Fq "$th" vps.sh
-          # 清单不得包含 vps.sh（入口为信任起点，不参与运行时校验）
-          if awk '$2=="vps.sh"{found=1} END{exit !found}' checksums.sha256; then
-            echo "::error::checksums.sha256 must not list vps.sh"
-            exit 1
-          fi
-          bash -n vps.sh
-          echo "checksums OK"

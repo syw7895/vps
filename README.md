@@ -1,149 +1,62 @@
 # VPS 管理（代理 + 流量）
 
-Debian / Ubuntu（需 **root**）。代理与流量为**两个独立模块**，互不安装、互不更新、互不卸载。
+Debian / Ubuntu（需 **root**）。代理与流量两个独立模块，互不覆盖卸载。
 
-## 首次安装
+## 安装
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
-```
-
-**生产推荐（完整 commit SHA + 模块哈希校验）：**
-
-```bash
-# 使用 40 位 commit SHA。Git tag 可被 force-move，不要当作不可变引用。
-export SYW_VPS_REF=<40-char-commit-sha>
-curl -fsSL "https://raw.githubusercontent.com/syw7895/vps/${SYW_VPS_REF}/vps.sh" | sudo bash
-```
-
-### 信任边界与完整性
-
-| 环节 | 说明 |
-|------|------|
-| `curl \| bash` 入口 | **信任起点**：管道中的 `vps.sh` 本身无法自证；请从可信网络/固定 SHA URL 获取 |
-| `proxy.sh` / `traffic.sh` | 入口内置 SHA-256；下载后校验，不符则拒绝安装 |
-| `checksums.sha256` | 仅含 **proxy.sh、traffic.sh**（运行时校验目标）；由 `scripts/update-checksums.sh` 生成 |
-| 签名 Release | 当前未实现；未来可改为 GitHub Release + 签名清单 |
-
-安装时会把清单写入 `/usr/local/lib/syw-vps/checksums.sha256`。开发可临时 `SYW_VPS_ALLOW_UNVERIFIED=1`（**勿用于生产**）。
-
-会安装到：
-
-| 路径 | 说明 |
-|------|------|
-| `/usr/local/lib/syw-vps/vps.sh` | 统一入口 |
-| `/usr/local/lib/syw-vps/proxy.sh` | 代理模块 |
-| `/usr/local/lib/syw-vps/traffic.sh` | 流量模块 |
-| `/usr/local/lib/syw-vps/checksums.sha256` | 模块完整性清单（proxy/traffic） |
-| `/usr/local/bin/vps` | 日常快捷命令 |
-
-本地模块与入口期望哈希不一致时会**重新下载**。**跨版本升级**请重新执行入口安装（见下）。
-
-若系统里已有同名 `vps` 且不属于本工具，安装会中止，避免误覆盖。
-
-## 日常使用
-
-```bash
 sudo vps
 ```
 
-安装与使用请**分开两条命令**：`curl|bash` 装完后新开 `sudo vps`，避免管道会话里交互异常。
+可选固定版本：`export SYW_VPS_REF=<commit-sha>` 后再 curl。
 
-菜单（宽约 48 列框线；窄终端自动降级为无边框文本）：
+| 路径 | 说明 |
+|------|------|
+| `/usr/local/lib/syw-vps/vps.sh` | 入口 |
+| `/usr/local/lib/syw-vps/proxy.sh` | 代理 |
+| `/usr/local/lib/syw-vps/traffic.sh` | 流量 |
+| `/usr/local/bin/vps` | 日常命令 |
 
-```text
-╭──────────────── VPS 管理 · v… ────────────────╮
-│ 状态  ● 模块就绪                                │
-├────────────────── 管理 ─────────────────────────┤
-│  1  ▸ 代理管理        REALITY / HY2 / CDN       │
-│  2  ▸ 流量管理        额度 / 限速 / 检查        │
-├────────────────── 操作 ─────────────────────────┤
-│  0  退出                                         │
-╰─────────────────────────────────────────────────╯
-```
+- 已有的 proxy/traffic **不会被入口覆盖**（缺了才下载）。
+- 下载只做 `bash -n` 语法检查。
+- 系统里已有同名且非本工具的 `vps` 时拒绝覆盖。
 
-- **代理管理**：REALITY / Hysteria2 / VLESS+WS+TLS 等，均在代理模块内完成。
-- **流量管理**：额度、限速、检查与卸载，均在流量模块内完成。
+安装与菜单请分开：`curl|bash` 后新开终端执行 `sudo vps`。
 
-原有 **`v2`** 快捷命令（由代理模块安装）仍然可用，与 `vps` 入口互不影响。
+## 菜单
 
-## 流量模块说明
+1. 代理管理 — REALITY / Hysteria2 / VLESS+WS+TLS（或历史 `v2`）  
+2. 流量管理 — 额度、限速、检查、卸载  
 
-### 设置额度与默认策略
+## 流量
 
-1. `sudo vps` → `2` 流量管理  
-2. `1` 安装流量监控（vnStat 2.6+、systemd timer）  
-3. `2` 设置每月流量额度（**十进制 GB**，`1 GB = 1_000_000_000` 字节）  
+1. `sudo vps` → `2` → `1` 安装监控（vnStat 2.6+、timer）  
+2. `2` 设置月额度（**十进制 GB**，`1 GB = 1_000_000_000` 字节）  
 
-默认：
-
-- 用量达到月额度的 **90%** 时，将公网出口限速为 **1 Mbit/s**（`tc`）
-- **只限速**，不关机、不停止或修改代理
-- 每 **5 分钟**自动检查；开机后也会检查
-- **每月 1 日**起进入新统计周期；新月流量低于阈值会**自动解除**本工具限速
-
-### 手动解除与再次限速
-
-- 菜单 **7** 可解除当前由本工具创建的限速。  
-- 若**未暂停**自动检查，且当月流量仍 ≥ 阈值，**下次 timer 会再次限速**。  
-- 若需持续不限速：先 **8 暂停自动检查**，再 **7 解除限速**。
-
-### 暂停 / 恢复 / 重装 / 卸载
+默认：达到额度 **90%** 时出口限速 **1 Mbit/s**（只限速，不动代理）；每 5 分钟检查；新月低于阈值自动解除。
 
 | 菜单 | 作用 |
 |------|------|
-| 8 暂停自动检查 | 停止 timer，**不**停 vnStat 统计 |
-| 9 恢复自动检查 | 启用 timer 并立即检查一次 |
-| 10 重装当前受信版本 | 按安装时 integrity 哈希重装**同一**受信 `traffic.sh`；**不能**跨版本升级 |
-| 11 卸载流量模块 | 删除流量配置/状态/unit/本工具 tc；**不**删代理、节点、证书、`v2`、`vps` |
+| 7 解除限速 | 去掉本工具 tc；未暂停时超阈值会再限 |
+| 8 / 9 | 暂停 / 恢复自动检查 |
+| 10 | 更新 `traffic.sh`（curl + 语法检查） |
+| 11 | 卸载流量模块（不动代理 / v2 / vps） |
 
-跨版本升级流量/入口：重新 `curl|bash` 安装入口（带新 commit SHA 与新内置哈希）。签名发布清单到位前，菜单 10 故意拒绝与安装清单不一致的远程版本。
+- tc handle：`1abc:`；外站 qdisc（HTB 等）只报冲突不覆盖  
+- 默认统计 IPv4 出口 **TX**；`IFACE=` 可写在 `/etc/vps-traffic/config`  
+- 出口网卡变更时会先清状态里的 `LIMIT_IFACE` 再决策  
+- 依赖：vnStat 2.6+、python3、iproute2  
 
-### tc 标识与冲突
+配置 `/etc/vps-traffic/config` · 状态 `/var/lib/vps-traffic/state` · timer `vps-traffic-check.timer`
 
-- 本工具使用固定 root handle：**`1abc:`**（十六进制 major）。  
-- 若网卡上已有 **其它** qdisc / 限速（HTB、WARP、VPN 等），本工具**只报告冲突，不修改网络**。  
-- 重复检查不会叠加本工具规则。  
-- 卸载或解除时，**只删除 handle/状态均匹配的本工具规则**。
+## 代理
 
-### 重要提示
+REALITY / Hysteria2（特权端口靠 `CAP_NET_BIND_SERVICE`）/ VLESS+WS+TLS（CF）。  
+第三方安装脚本仍固定 URL + SHA-256。默认端口：REALITY `443`，CDN `8443`，HY2 随机 UDP。
 
-- **1 Mbit/s 持续约一天仍可能产生约 10.8 GB 流量**，不能绝对保证额度不会用完。  
-- vnStat 与云厂商后台统计可能存在误差。  
-- 默认统计默认 IPv4 出口网卡的 **TX**（`ip -4 route get 1.1.1.1`）；可在 `/etc/vps-traffic/config` 用 `IFACE=` 覆盖。  
-- 默认出口网卡变更时，会先按状态中的 `LIMIT_IFACE` 清理旧网卡上的本工具限速，再按当前网卡决策，避免遗留或双限速。  
-- 依赖：**vnStat 2.6+、python3、iproute2**（安装流量监控时会 apt 安装）。  
-- 默认 `fq` / `fq_codel` / `noqueue` 等系统 qdisc 不视为冲突；HTB/其它限速会跳过以免覆盖。
-
-配置：`/etc/vps-traffic/config`（安全 KV，不执行任意 shell）  
-状态：`/var/lib/vps-traffic/state`  
-Timer：`vps-traffic-check.timer`
-
-## 代理模块说明
-
-支持：
-
-- **REALITY** — 直连  
-- **Hysteria2** — UDP（降权 `hysteria` 用户；特权端口如 443 通过 `CAP_NET_BIND_SERVICE`）  
-
-- **VLESS + WS + TLS** — 可走 Cloudflare  
-
-安装、状态、更新、卸载均在 **代理管理** 菜单（或历史 `v2` / `proxy.sh` 流程）中完成。默认端口：REALITY `443`，CDN `8443`，HY2 随机 UDP。CDN 申请证书需域名解析到本机且 **80** 可访问。
-
-## 高级排障
-
-模块脚本位置（一般无需直接运行）：
-
-```text
-/usr/local/lib/syw-vps/vps.sh
-/usr/local/lib/syw-vps/proxy.sh
-/usr/local/lib/syw-vps/traffic.sh
-```
-
-模拟测试（开发用，不改真实网络）：
+## 测试
 
 ```bash
 bash tests/traffic-mock-test.sh
 ```
-
-环境变量（可选）：`SYW_VPS_RAW_BASE`、`VPS_TRAFFIC_MOCK=1`、`VNSTAT_BIN`、`TC_BIN`。
