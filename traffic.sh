@@ -4,13 +4,11 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-traffic"
-VERSION="1.2.3"
+VERSION="1.3.0"
 LIB_DIR="/usr/local/lib/syw-vps"
 SELF_LOCAL="${LIB_DIR}/traffic.sh"
-# 默认 main；生产建议 SYW_VPS_REF=<commit|tag>
 SYW_VPS_REF="${SYW_VPS_REF:-main}"
 RAW_BASE="${SYW_VPS_RAW_BASE:-https://raw.githubusercontent.com/syw7895/vps/${SYW_VPS_REF}}"
-INTEGRITY_FILE="${LIB_DIR}/checksums.sha256"
 
 VNSTAT_BIN="${VNSTAT_BIN:-vnstat}"
 TC_BIN="${TC_BIN:-tc}"
@@ -55,26 +53,6 @@ ok()   { printf '%s[%s]%s %s\n' "$GRN" "OK" "$R" "$*"; }
 warn() { printf '%s[%s]%s %s\n' "$YEL" "!" "$R" "$*"; }
 err()  { printf '%s[%s]%s %s\n' "$RED" "ERR" "$R" "$*" >&2; }
 fail() { err "$*"; exit 1; }
-
-is_valid_sha256() { [[ $1 =~ ^[A-Fa-f0-9]{64}$ ]]; }
-
-sha256_file() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
-  elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" | awk '{print $1}'
-  else
-    fail "需要 sha256sum 或 shasum"
-  fi
-}
-
-lookup_checksum() {
-  local file=$1 name=$2 line
-  [[ -f $file ]] || return 1
-  line=$(awk -v n="$name" '$2==n{print $1; exit}' "$file" || true)
-  is_valid_sha256 "$line" || return 1
-  printf '%s' "$line"
-}
 
 read_tty() {
   local prompt="" __var
@@ -715,7 +693,7 @@ ui_init() {
   if [[ -z $cols && -t 1 ]]; then cols=$(tput cols 2>/dev/null || echo 80); fi
   cols=${cols:-80}
   UI_BOX=1
-  (( cols < UI_W + 6 )) && UI_BOX=0
+  if (( cols < UI_W + 6 )); then UI_BOX=0; fi
 }
 ui_rule() { printf '  %s%s%s\n' "$D" "$1" "$R"; }
 ui_box_top() { (( UI_BOX )) && ui_rule "╭${UI_RULE}╮" || true; }
@@ -885,63 +863,21 @@ cmd_resume() {
 
 cmd_update_module() {
   require_root
-  local url="${RAW_BASE}/traffic.sh" sums_url="${RAW_BASE}/checksums.sha256"
-  local tmp sums bak expected actual
+  local url="${RAW_BASE}/traffic.sh" tmp bak
   tmp=$(mktemp)
-  sums=$(mktemp)
   bak="${SELF_LOCAL}.bak.$(date +%s)"
-
   curl -fsSL --connect-timeout 20 --max-time 120 "$url" -o "$tmp" || {
-    rm -f "$tmp" "$sums"
+    rm -f "$tmp"
     fail "下载失败: $url"
   }
-  [[ -s $tmp ]] || { rm -f "$tmp" "$sums"; fail "下载为空"; }
-  bash -n "$tmp" || { rm -f "$tmp" "$sums"; fail "bash -n 失败，保留旧版"; }
-
-  expected="${SYW_VPS_TRAFFIC_SHA256:-}"
-  if [[ -z $expected ]]; then
-    expected=$(lookup_checksum "$INTEGRITY_FILE" traffic.sh || true)
-  fi
-  if [[ -z $expected ]]; then
-    if curl -fsSL --connect-timeout 20 --max-time 60 "$sums_url" -o "$sums" 2>/dev/null; then
-      if [[ -f $INTEGRITY_FILE ]] && ! cmp -s "$sums" "$INTEGRITY_FILE"; then
-        if [[ ${SYW_VPS_ALLOW_UNVERIFIED:-0} == 1 ]]; then
-          warn "远程 checksums 与本地 integrity 不一致，ALLOW_UNVERIFIED=1 继续"
-          expected=$(lookup_checksum "$sums" traffic.sh || true)
-        else
-          rm -f "$tmp" "$sums"
-          fail "远程版本 checksums 与安装时不一致。请重装入口升级，或设置 SYW_VPS_TRAFFIC_SHA256 / SYW_VPS_ALLOW_UNVERIFIED=1"
-        fi
-      else
-        expected=$(lookup_checksum "$sums" traffic.sh || true)
-        mkdir -p "$LIB_DIR"
-        install -m 0644 "$sums" "$INTEGRITY_FILE"
-      fi
-    fi
-  fi
-
-  if [[ -z ${expected:-} ]]; then
-    if [[ ${SYW_VPS_ALLOW_UNVERIFIED:-0} == 1 ]]; then
-      warn "SYW_VPS_ALLOW_UNVERIFIED=1：跳过流量模块哈希校验（不安全）"
-    else
-      rm -f "$tmp" "$sums"
-      fail "无法确定 traffic.sh 期望哈希。请重装 vps 入口，或设置 SYW_VPS_TRAFFIC_SHA256"
-    fi
-  else
-    is_valid_sha256 "$expected" || { rm -f "$tmp" "$sums"; fail "无效的期望 SHA256"; }
-    actual=$(sha256_file "$tmp")
-    if [[ ${actual,,} != "${expected,,}" ]]; then
-      rm -f "$tmp" "$sums"
-      fail "traffic.sh 哈希不匹配: expect=${expected:0:12}… got=${actual:0:12}…（跨版本请重装入口）"
-    fi
-  fi
-
+  [[ -s $tmp ]] || { rm -f "$tmp"; fail "下载为空"; }
+  bash -n "$tmp" || { rm -f "$tmp"; fail "bash -n 失败，保留旧版"; }
   mkdir -p "$LIB_DIR"
   [[ -f $SELF_LOCAL ]] && cp -a "$SELF_LOCAL" "$bak"
   install -m 0755 "$tmp" "$SELF_LOCAL"
-  rm -f "$tmp" "$sums"
+  rm -f "$tmp"
   write_systemd_units
-  ok "已重装当前受信版本（哈希校验通过；跨版本请重新 curl|bash 入口）"
+  ok "流量模块已更新"
 }
 
 cmd_uninstall() {
@@ -996,11 +932,10 @@ main_menu() {
     ui_box_row " 8  ▸ 暂停自动检查"
     ui_box_row " 9  ▸ 恢复自动检查"
     ui_box_section "系统"
-    ui_box_row "10  ▸ 重装当前受信版本"
+    ui_box_row "10  ▸ 更新流量模块"
     ui_box_row "11  ▸ 卸载流量模块"
     ui_box_row " 0  返回"
     ui_box_bot
-    ui_hint "跨版本升级请重新 curl|bash 入口；10 仅重装安装时校验过的版本"
     c=""
     read_tty -p "  请选择 › " c || c=0
     case $c in
