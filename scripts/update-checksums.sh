@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 计算 proxy/traffic/vps 的 SHA-256，写入 checksums.sha256，并回写 vps.sh 内置期望哈希。
+# 计算 proxy/traffic 的 SHA-256，写入 checksums.sha256，并回写 vps.sh 内置期望哈希。
+# 仅包含运行时会校验的模块（不含 vps.sh：curl|bash 入口为信任起点）。
 set -Eeuo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
@@ -37,24 +38,14 @@ patch_default_hash() {
 
 ph=$(sha256_file proxy.sh)
 th=$(sha256_file traffic.sh)
-vh=$(sha256_file vps.sh)
 
 {
   printf '%s  %s\n' "$ph" proxy.sh
   printf '%s  %s\n' "$th" traffic.sh
-  printf '%s  %s\n' "$vh" vps.sh
 } >checksums.sha256
 
 patch_default_hash vps.sh PROXY_SHA256 "$ph"
 patch_default_hash vps.sh TRAFFIC_SHA256 "$th"
 
-# vps.sh 因写入哈希而变化；checksums 中的 vps 行仅供参考
-vh=$(sha256_file vps.sh)
-{
-  printf '%s  %s\n' "$ph" proxy.sh
-  printf '%s  %s\n' "$th" traffic.sh
-  printf '%s  %s\n' "$vh" vps.sh
-} >checksums.sha256
-
-echo "checksums.sha256:"
+echo "checksums.sha256 (runtime-verified modules only):"
 cat checksums.sha256

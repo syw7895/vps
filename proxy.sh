@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
-VERSION="1.3.1"
+VERSION="1.3.2"
 CONFIG_DIR="/root/proxy-info"
 BACKUP_DIR="${CONFIG_DIR}/backups"
 BACKUP_KEEP="${BACKUP_KEEP:-15}"
@@ -55,8 +55,39 @@ log()  { printf '%s[%s]%s %s\n' "$CYN" "$APP_NAME" "$R" "$*"; }
 ok()   { printf '%s[%s]%s %s\n' "$GRN" "OK" "$R" "$*"; }
 warn() { printf '%s[%s]%s %s\n' "$YEL" "!" "$R" "$*"; }
 fail() { printf '%s[%s]%s %s\n' "$RED" "ERR" "$R" "$*" >&2; exit 1; }
-hr()   { printf '%s────────────────────────────────────────%s\n' "$D" "$R"; }
-pause() { read -r -p $'\n按回车返回...' _; }
+# UI 宽 48；窄终端降级无边框
+UI_W=48
+UI_RULE="────────────────────────────────────────────────"
+UI_BOX=1
+ui_init() {
+  local cols=${COLUMNS:-}
+  if [[ -z $cols && -t 1 ]]; then cols=$(tput cols 2>/dev/null || echo 80); fi
+  cols=${cols:-80}
+  UI_BOX=1
+  (( cols < UI_W + 6 )) && UI_BOX=0
+}
+hr() {
+  if (( UI_BOX )); then
+    printf '  %s├%s┤%s\n' "$D" "$UI_RULE" "$R"
+  else
+    printf '  %s%s%s\n' "$D" "$UI_RULE" "$R"
+  fi
+}
+ui_box_top() { (( UI_BOX )) && printf '  %s╭%s╮%s\n' "$D" "$UI_RULE" "$R" || true; }
+ui_box_bot() { (( UI_BOX )) && printf '  %s╰%s╯%s\n' "$D" "$UI_RULE" "$R" || true; }
+ui_box_row() {
+  if (( UI_BOX )); then printf '  %s│%s %s\n' "$D" "$R" "$1"
+  else printf '  %s\n' "$1"; fi
+}
+ui_box_section() {
+  if (( UI_BOX )); then
+    printf '  %s├%s %s %s┤%s\n' "$D" "──" "$1" "──────────────────────────────" "$R"
+  else
+    printf '  %s── %s ──%s\n' "$D" "$1" "$R"
+  fi
+}
+ui_hint() { printf '  %s提示%s：%s\n' "$D" "$R" "$1"; }
+pause() { read -r -p $'\n  按回车返回…' _; }
 
 usage() {
   cat <<EOF
@@ -1153,11 +1184,12 @@ pick_sni() {
 
 print_banner() {
   clear 2>/dev/null || true
+  ui_init
   printf '\n'
-  printf '%s╔══════════════════════════════════════╗%s\n' "$CYN" "$R"
-  printf '%s║%s  %sVPS 代理控制面板%s  %sv%s            %s║%s\n' "$CYN" "$R" "$B" "$R" "$D" "$VERSION" "$CYN" "$R"
-  printf '%s║%s  %sREALITY · HY2 · CF/WS%s               %s║%s\n' "$CYN" "$R" "$D" "$R" "$CYN" "$R"
-  printf '%s╚══════════════════════════════════════╝%s\n' "$CYN" "$R"
+  ui_box_top
+  ui_box_row "${B}${CYN}代理管理${R}  ${D}v${VERSION}${R}"
+  ui_box_row "${D}REALITY · HY2 · CF/WS${R}"
+  ui_box_bot
   print_component_statuses
   printf '\n'
 }
@@ -1165,12 +1197,17 @@ print_banner() {
 menu_install() {
   while true; do
     print_banner
-    printf '  %s【安装代理】%s\n' "$B$MAG" "$R"; hr
-    printf '  %s1%s  Xray VLESS + REALITY\n' "$GRN" "$R"
-    printf '  %s2%s  Hysteria2\n' "$GRN" "$R"
-    printf '  %s3%s  VLESS + WS + TLS（CF）\n' "$GRN" "$R"
-    printf '  %s0%s  返回\n' "$D" "$R"; hr
-    local c; read -r -p "  请选择: " c
+    ui_box_top
+    ui_box_row "${B}安装代理${R}"
+    ui_box_section "协议"
+    ui_box_row " 1  ▸ Xray VLESS + REALITY"
+    ui_box_row " 2  ▸ Hysteria2"
+    ui_box_row " 3  ▸ VLESS + WS + TLS（CF）"
+    ui_box_section "操作"
+    ui_box_row " 0  返回"
+    ui_box_bot
+    ui_hint "选择后按回车确认"
+    local c; read -r -p "  请选择 › " c
     case $c in
       1)
         local port sni cur_port cur_sni
@@ -1214,13 +1251,18 @@ menu_install() {
 menu_uninstall() {
   while true; do
     print_banner
-    printf '  %s【卸载】%s\n' "$B$YEL" "$R"; hr
-    printf '  %s1%s  卸载 REALITY\n' "$YEL" "$R"
-    printf '  %s2%s  卸载 CDN\n' "$YEL" "$R"
-    printf '  %s3%s  卸载 Hysteria2\n' "$YEL" "$R"
-    printf '  %s4%s  卸载 v2\n' "$YEL" "$R"
-    printf '  %s0%s  返回\n' "$D" "$R"; hr
-    local c; read -r -p "  请选择: " c
+    ui_box_top
+    ui_box_row "${B}${YEL}卸载${R}"
+    ui_box_section "组件"
+    ui_box_row " 1  ▸ 卸载 REALITY"
+    ui_box_row " 2  ▸ 卸载 CDN"
+    ui_box_row " 3  ▸ 卸载 Hysteria2"
+    ui_box_row " 4  ▸ 卸载 v2"
+    ui_box_section "操作"
+    ui_box_row " 0  返回"
+    ui_box_bot
+    ui_hint "卸载不可自动恢复，请确认后再选"
+    local c; read -r -p "  请选择 › " c
     case $c in
       1) uninstall_reality; pause ;;
       2) uninstall_cdn; pause ;;
@@ -1235,18 +1277,25 @@ menu_uninstall() {
 main_menu() {
   while true; do
     print_banner
-    printf '  %s1%s  安装代理\n' "$GRN" "$R"
-    printf '  %s2%s  查看节点 / 服务状态\n' "$CYN" "$R"
-    printf '  %s3%s  卸载\n' "$YEL" "$R"
-    printf '  %s4%s  安装 / 更新 v2\n' "$BLU" "$R"
-    printf '  %s0%s  退出\n' "$D" "$R"; hr
-    local c; read -r -p "  请选择: " c
+    ui_box_top
+    ui_box_row "${B}${CYN}代理管理${R}  ${D}v${VERSION}${R}"
+    ui_box_section "管理"
+    ui_box_row " 1  ▸ 安装代理          REALITY / HY2 / CDN"
+    ui_box_row " 2  ▸ 查看节点 / 状态"
+    ui_box_section "系统"
+    ui_box_row " 3  ▸ 卸载"
+    ui_box_row " 4  ▸ 安装 / 更新 v2"
+    ui_box_section "操作"
+    ui_box_row " 0  退出"
+    ui_box_bot
+    ui_hint "选择后按回车确认"
+    local c; read -r -p "  请选择 › " c
     case $c in
       1) menu_install ;;
       2) show_info; pause ;;
       3) menu_uninstall ;;
       4) install_v2; pause ;;
-      0) printf '\n%s再见%s\n\n' "$D" "$R"; exit 0 ;;
+      0) printf '\n  %s再见%s\n\n' "$D" "$R"; exit 0 ;;
       *) warn "无效选项"; sleep 1 ;;
     esac
   done

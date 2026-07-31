@@ -8,14 +8,24 @@ Debian / Ubuntu（需 **root**）。代理与流量为**两个独立模块**，�
 curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 ```
 
-**推荐（不可变提交 + 完整性校验）：**
+**生产推荐（完整 commit SHA + 模块哈希校验）：**
 
 ```bash
-export SYW_VPS_REF=<git-commit-or-tag>
+# 使用 40 位 commit SHA。Git tag 可被 force-move，不要当作不可变引用。
+export SYW_VPS_REF=<40-char-commit-sha>
 curl -fsSL "https://raw.githubusercontent.com/syw7895/vps/${SYW_VPS_REF}/vps.sh" | sudo bash
 ```
 
-入口内置 `proxy.sh` / `traffic.sh` 的 SHA-256；下载后校验，不符则拒绝安装。仓库根目录 `checksums.sha256` 由 `scripts/update-checksums.sh` 生成，安装时写入 `/usr/local/lib/syw-vps/checksums.sha256`。开发可临时 `SYW_VPS_ALLOW_UNVERIFIED=1`（**勿用于生产**）。
+### 信任边界与完整性
+
+| 环节 | 说明 |
+|------|------|
+| `curl \| bash` 入口 | **信任起点**：管道中的 `vps.sh` 本身无法自证；请从可信网络/固定 SHA URL 获取 |
+| `proxy.sh` / `traffic.sh` | 入口内置 SHA-256；下载后校验，不符则拒绝安装 |
+| `checksums.sha256` | 仅含 **proxy.sh、traffic.sh**（运行时校验目标）；由 `scripts/update-checksums.sh` 生成 |
+| 签名 Release | 当前未实现；未来可改为 GitHub Release + 签名清单 |
+
+安装时会把清单写入 `/usr/local/lib/syw-vps/checksums.sha256`。开发可临时 `SYW_VPS_ALLOW_UNVERIFIED=1`（**勿用于生产**）。
 
 会安装到：
 
@@ -24,10 +34,10 @@ curl -fsSL "https://raw.githubusercontent.com/syw7895/vps/${SYW_VPS_REF}/vps.sh"
 | `/usr/local/lib/syw-vps/vps.sh` | 统一入口 |
 | `/usr/local/lib/syw-vps/proxy.sh` | 代理模块 |
 | `/usr/local/lib/syw-vps/traffic.sh` | 流量模块 |
-| `/usr/local/lib/syw-vps/checksums.sha256` | 模块完整性清单 |
+| `/usr/local/lib/syw-vps/checksums.sha256` | 模块完整性清单（proxy/traffic） |
 | `/usr/local/bin/vps` | 日常快捷命令 |
 
-本地模块与入口期望哈希不一致时会**重新下载**。跨版本升级请重新执行入口安装。
+本地模块与入口期望哈希不一致时会**重新下载**。**跨版本升级**请重新执行入口安装（见下）。
 
 若系统里已有同名 `vps` 且不属于本工具，安装会中止，避免误覆盖。
 
@@ -39,13 +49,17 @@ sudo vps
 
 安装与使用请**分开两条命令**：`curl|bash` 装完后新开 `sudo vps`，避免管道会话里交互异常。
 
-菜单：
+菜单（宽约 48 列框线；窄终端自动降级为无边框文本）：
 
 ```text
-VPS 管理
-1. 代理管理
-2. 流量管理
-0. 退出
+╭──────────────── VPS 管理 · v… ────────────────╮
+│ 状态  ● 模块就绪                                │
+├────────────────── 管理 ─────────────────────────┤
+│  1  ▸ 代理管理        REALITY / HY2 / CDN       │
+│  2  ▸ 流量管理        额度 / 限速 / 检查        │
+├────────────────── 操作 ─────────────────────────┤
+│  0  退出                                         │
+╰─────────────────────────────────────────────────╯
 ```
 
 - **代理管理**：REALITY / Hysteria2 / VLESS+WS+TLS 等，均在代理模块内完成。
@@ -74,14 +88,16 @@ VPS 管理
 - 若**未暂停**自动检查，且当月流量仍 ≥ 阈值，**下次 timer 会再次限速**。  
 - 若需持续不限速：先 **8 暂停自动检查**，再 **7 解除限速**。
 
-### 暂停 / 恢复 / 更新 / 卸载
+### 暂停 / 恢复 / 重装 / 卸载
 
 | 菜单 | 作用 |
 |------|------|
 | 8 暂停自动检查 | 停止 timer，**不**停 vnStat 统计 |
 | 9 恢复自动检查 | 启用 timer 并立即检查一次 |
-| 10 更新流量模块 | 只更新 `traffic.sh` 与流量 unit，不碰 proxy/vps 入口 |
+| 10 重装当前受信版本 | 按安装时 integrity 哈希重装**同一**受信 `traffic.sh`；**不能**跨版本升级 |
 | 11 卸载流量模块 | 删除流量配置/状态/unit/本工具 tc；**不**删代理、节点、证书、`v2`、`vps` |
+
+跨版本升级流量/入口：重新 `curl|bash` 安装入口（带新 commit SHA 与新内置哈希）。签名发布清单到位前，菜单 10 故意拒绝与安装清单不一致的远程版本。
 
 ### tc 标识与冲突
 
