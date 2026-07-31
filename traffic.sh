@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-traffic"
-VERSION="1.3.4"
+VERSION="1.3.5"
 LIB_DIR="/usr/local/lib/syw-vps"
 SELF_LOCAL="${LIB_DIR}/traffic.sh"
 SYW_VPS_REF="${SYW_VPS_REF:-main}"
@@ -42,10 +42,10 @@ TC_ROOT_HANDLE="${TC_HANDLE_MAJOR}:"
 HARMLESS_QDISC_RE='qdisc (fq_codel|fq|noqueue|pfifo_fast|cake|mq)[[:space:]]'
 
 if [[ -t 1 ]]; then
-  R=$'\033[0m' B=$'\033[1m'
+  R=$'\033[0m' B=$'\033[1m' D=$'\033[2m'
   RED=$'\033[31m' GRN=$'\033[32m' YEL=$'\033[33m' CYN=$'\033[36m'
 else
-  R='' B='' RED='' GRN='' YEL='' CYN=''
+  R='' B='' D='' RED='' GRN='' YEL='' CYN=''
 fi
 
 log()  { printf '%s[%s]%s %s\n' "$CYN" "$APP_NAME" "$R" "$*"; }
@@ -744,10 +744,14 @@ ui_init() {
 ui_head() { printf '\n  %s%s%s  %s%s%s\n' "$B$CYN" "$1" "$R" "$D" "$2" "$R"; }
 ui_status() { printf '  %s\n' "$1"; }
 ui_gap() { printf '\n'; }
-ui_group() { printf '  %s%s%s\n' "$D" "$1" "$R"; }
-# $1 序号  $2 文案（始终成功返回，避免 set -e 下菜单中途退出）
+# $1 序号 $2 文案 $3 可选语义: danger|muted（最后必须为 printf，set -e 安全）
 ui_item() {
-  printf '  %s%2s%s  %s\n' "$CYN" "$1" "$R" "$2"
+  local num=$1 text=$2 style=${3:-} nc=$CYN tc=
+  case $style in
+    danger) nc=$RED; tc=$RED ;;
+    muted)  nc=$D; tc=$D ;;
+  esac
+  printf '  %s%2s%s  %s%s%s\n' "$nc" "$num" "$R" "$tc" "$text" "$R"
 }
 ui_kv() { printf '  %s%-8s%s  %s\n' "$D" "$1" "$R" "$2"; }
 ui_note() { printf '  %s%s%s\n' "$D" "$1" "$R"; }
@@ -952,28 +956,24 @@ main_menu() {
     ui_head "流量" "v${VERSION}"
     ui_status "$st"
     ui_gap
-    ui_group "监控"
     ui_item 1 "安装流量监控"
     ui_item 2 "设置每月流量额度"
     ui_item 3 "查看状态"
-    ui_gap
-    ui_group "策略"
     ui_item 4 "修改触发比例"
     ui_item 5 "修改限速速度"
-    ui_gap
-    ui_group "运维"
     ui_item 6 "立即检查"
     ui_item 7 "解除当前限速"
     ui_item 8 "暂停自动检查"
     ui_item 9 "恢复自动检查"
-    ui_gap
-    ui_group "系统"
     ui_item 10 "更新流量模块"
-    ui_item 11 "卸载流量模块"
-    ui_item 0 "返回"
-    ui_foot
+    ui_item 11 "卸载流量模块" danger
+    ui_gap
+    ui_item 0 "返回" muted
+    ui_gap
+    # 提示默认色，› 青色（不经 read -p 以免整行染色）
+    printf '  请选择 [0-11] %s›%s ' "$CYN" "$R"
     c=""
-    if ! read_tty -p "  请选择: " c; then
+    if ! read_tty c; then
       warn "读取输入失败，返回上级"
       return 1
     fi

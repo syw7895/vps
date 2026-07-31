@@ -36,7 +36,11 @@ assert "item3 is v2" '[[ "$out" == *"安装 / 更新 v2"* ]]'
 assert "item4 is 卸载" '[[ "$out" == *"卸载"* ]]'
 assert "no group 管理" '! grep -qE "^[[:space:]]*管理[[:space:]]*$" <<<"$out"'
 assert "no group 系统" '! grep -qE "^[[:space:]]*系统[[:space:]]*$" <<<"$out"'
-assert "no box chars" '! printf %s "$out" | grep -qE "[╭╮╰╯│├┤─▸]"'
+has_box=0
+for ch in ╭ ╮ ╰ ╯ │ ├ ┤ ─ ▸; do
+  [[ "$out" == *"$ch"* ]] && has_box=1 && break
+done
+assert "no box chars" '[[ $has_box -eq 0 ]]'
 assert "prompt present" '[[ "$out" == *"请选择 [0-4]"* ]]'
 
 out3=$(printf '3\n0\n' | main_menu 2>&1) || true

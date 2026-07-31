@@ -27,3 +27,6 @@ jobs:
 
       - name: Traffic menu tests
         run: bash tests/traffic-menu-test.sh
+
+      - name: Menu UI tests
+        run: bash tests/menu-ui-test.sh
