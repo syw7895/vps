@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
-VERSION="1.3.5"
+VERSION="1.3.6"
 CONFIG_DIR="/root/proxy-info"
 BACKUP_DIR="${CONFIG_DIR}/backups"
 BACKUP_KEEP="${BACKUP_KEEP:-15}"
@@ -1187,7 +1187,9 @@ menu_install() {
     ui_gap
     ui_item 0 "返回"
     ui_foot
-    local c; read -r -p "  › " c
+    local c
+    read -r -p "  请选择: " c || { warn "读取输入失败"; return 1; }
+    c=${c//[[:space:]]/}
     case $c in
       1)
         local port sni cur_port cur_sni
@@ -1239,13 +1241,15 @@ menu_uninstall() {
     ui_gap
     ui_item 0 "返回"
     ui_foot
-    local c; read -r -p "  › " c
+    local c
+    read -r -p "  请选择: " c || { warn "读取输入失败"; return 1; }
+    c=${c//[[:space:]]/}
     case $c in
       1) uninstall_reality; pause ;;
       2) uninstall_cdn; pause ;;
       3) uninstall_hy2; pause ;;
       4) uninstall_v2; pause ;;
-      0) return ;;
+      0|"") return ;;
       *) warn "无效选项"; sleep 1 ;;
     esac
   done
@@ -1261,13 +1265,18 @@ main_menu() {
     ui_gap
     ui_item 0 "退出"
     ui_foot
-    local c; read -r -p "  › " c
+    local c
+    read -r -p "  请选择: " c || {
+      warn "读取输入失败。请交互终端执行: sudo vps 或 sudo v2"
+      exit 1
+    }
+    c=${c//[[:space:]]/}
     case $c in
       1) menu_install ;;
       2) show_info; pause ;;
       3) menu_uninstall ;;
       4) install_v2; pause ;;
-      0) printf '\n  %s再见%s\n\n' "$D" "$R"; exit 0 ;;
+      0|"") printf '\n  %s再见%s\n\n' "$D" "$R"; exit 0 ;;
       *) warn "无效选项"; sleep 1 ;;
     esac
   done
