@@ -9,6 +9,8 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 sudo vps
 ```
 
+**务必分两条命令**：`curl|bash` 只安装；菜单请用 **`sudo vps`**。在管道会话里进菜单会导致读不到输入，退回 shell 后再按 `1` 会变成 bash 报错。
+
 可选固定版本：`export SYW_VPS_REF=<commit-sha>` 后再 curl。
 
 | 路径 | 说明 |

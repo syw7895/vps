@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-traffic"
-VERSION="1.3.2"
+VERSION="1.3.3"
 LIB_DIR="/usr/local/lib/syw-vps"
 SELF_LOCAL="${LIB_DIR}/traffic.sh"
 SYW_VPS_REF="${SYW_VPS_REF:-main}"
@@ -971,7 +971,11 @@ main_menu() {
     ui_item 0 "返回"
     ui_foot
     c=""
-    read_tty -p "  › " c || c=0
+    if ! read_tty -p "  请选择: " c; then
+      warn "读取输入失败，返回上级"
+      return 1
+    fi
+    c=${c//[[:space:]]/}
     case $c in
       1) cmd_install ;;
       2) cmd_set_quota ;;
@@ -984,10 +988,10 @@ main_menu() {
       9) cmd_resume ;;
       10) cmd_update_module ;;
       11) cmd_uninstall; return 0 ;;
-      0) return 0 ;;
+      0|"") return 0 ;;
       *) warn "无效选项"; continue ;;
     esac
-    [[ $c == 0 || $c == 11 ]] || read_tty -p "  按回车继续…" _ || true
+    [[ $c == 0 || $c == 11 || -z $c ]] || read_tty -p "  按回车继续…" _ || true
   done
 }
 
