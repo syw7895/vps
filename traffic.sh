@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-traffic"
-VERSION="1.3.3"
+VERSION="1.3.4"
 LIB_DIR="/usr/local/lib/syw-vps"
 SELF_LOCAL="${LIB_DIR}/traffic.sh"
 SYW_VPS_REF="${SYW_VPS_REF:-main}"
@@ -745,9 +745,9 @@ ui_head() { printf '\n  %s%s%s  %s%s%s\n' "$B$CYN" "$1" "$R" "$D" "$2" "$R"; }
 ui_status() { printf '  %s\n' "$1"; }
 ui_gap() { printf '\n'; }
 ui_group() { printf '  %s%s%s\n' "$D" "$1" "$R"; }
+# $1 序号  $2 文案（始终成功返回，避免 set -e 下菜单中途退出）
 ui_item() {
   printf '  %s%2s%s  %s\n' "$CYN" "$1" "$R" "$2"
-  [[ -n ${3:-} ]] && printf '      %s%s%s\n' "$D" "$3" "$R"
 }
 ui_kv() { printf '  %s%-8s%s  %s\n' "$D" "$1" "$R" "$2"; }
 ui_note() { printf '  %s%s%s\n' "$D" "$1" "$R"; }

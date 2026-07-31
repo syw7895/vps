@@ -24,3 +24,6 @@ jobs:
 
       - name: Traffic mock tests
         run: bash tests/traffic-mock-test.sh
+
+      - name: Traffic menu tests
+        run: bash tests/traffic-menu-test.sh
