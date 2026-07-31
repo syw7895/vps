@@ -6,10 +6,9 @@ Debian / Ubuntu（需 **root**）。代理与流量两个独立模块，互不�
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
-sudo vps
 ```
 
-**务必分两条命令**：`curl|bash` 只安装；菜单请用 **`sudo vps`**。在管道会话里进菜单会导致读不到输入，退回 shell 后再按 `1` 会变成 bash 报错。
+一条命令安装并进入菜单（交互从 `/dev/tty` 读取）。也可随时 `sudo vps`。
 
 可选固定版本：`export SYW_VPS_REF=<commit-sha>` 后再 curl。
 

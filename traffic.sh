@@ -63,8 +63,10 @@ read_tty() {
     esac
   done
   __var=${1:-REPLY}
+  # 管道启动时 stdin 非终端，交互走 /dev/tty
   if [[ -r /dev/tty ]]; then
-    read -r -p "$prompt" "${__var?}" </dev/tty || return 1
+    printf '%s' "$prompt" >/dev/tty 2>/dev/null || printf '%s' "$prompt"
+    read -r "${__var?}" </dev/tty || return 1
   else
     read -r -p "$prompt" "${__var?}" || return 1
   fi

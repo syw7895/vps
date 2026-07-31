@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="syw-vps"
-VERSION="1.1.3"
+VERSION="1.1.4"
 LIB_DIR="/usr/local/lib/syw-vps"
 BIN_VPS="/usr/local/bin/vps"
 MARKER="syw-vps-entrypoint"
@@ -61,8 +61,10 @@ read_tty() {
     esac
   done
   __var=${1:-REPLY}
+  # curl|bash 时 stdin 是脚本管道，交互一律走控制终端
   if [[ -r /dev/tty ]]; then
-    read -r -p "$prompt" "${__var?}" </dev/tty || return 1
+    printf '%s' "$prompt" >/dev/tty 2>/dev/null || printf '%s' "$prompt"
+    read -r "${__var?}" </dev/tty || return 1
   else
     read -r -p "$prompt" "${__var?}" || return 1
   fi
@@ -185,18 +187,9 @@ run_module() {
   return 0
 }
 
-# curl|bash 时 stdin 是管道，不应进交互菜单
-can_interact() {
-  [[ -t 0 ]]
-}
-
 main_menu() {
   local c st
   ui_init
-  if ! can_interact; then
-    warn "当前无法交互输入。请在终端执行: sudo vps"
-    return 1
-  fi
   while true; do
     st=$(entry_status_line)
     ui_head "VPS" "v${VERSION}"
@@ -208,16 +201,17 @@ main_menu() {
     ui_item 0 "退出"
     ui_foot
     c=""
-    # 读失败不要当成「选 0 退出」，否则会静默回到 shell，用户再按 1 变成 bash 命令
+    # 读失败不要当成选 0（否则静默回 shell，用户再按 1 变成 bash 命令）
     if ! read_tty -p "  请选择 [0-2]: " c; then
-      warn "读取输入失败。请执行: sudo vps"
+      warn "读取输入失败"
       return 1
     fi
     c=${c//[[:space:]]/}
     case $c in
       1) run_module "$PROXY_SH_LOCAL" || true ;;
       2) run_module "$TRAFFIC_SH_LOCAL" || true ;;
-      0|"") return 0 ;;
+      0) return 0 ;;
+      "") continue ;;
       *) warn "无效选项" ;;
     esac
   done
@@ -229,7 +223,7 @@ ${APP_NAME} v${VERSION}
   curl -fsSL ${RAW_BASE}/vps.sh | sudo bash
   sudo vps
 
-安装与菜单请分开两条命令；curl|bash 只负责安装。
+一条命令即可安装并进入菜单（从 /dev/tty 读输入）。
 可选固定版本: export SYW_VPS_REF=<commit-sha>
 已存在的 proxy/traffic 不会被覆盖；更新流量用菜单 10。
 EOF
@@ -239,22 +233,8 @@ main() {
   case ${1:-} in
     -h|--help|help) usage; exit 0 ;;
     --menu-only|menu) require_root; main_menu ;;
-    --install|install)
-      do_install
-      if can_interact; then
-        main_menu
-      else
-        printf '\n%s[OK]%s 安装完成。请执行: %ssudo vps%s\n\n' "$GRN" "$R" "$B" "$R"
-      fi
-      ;;
-    *)
-      do_install
-      if can_interact; then
-        main_menu
-      else
-        printf '\n%s[OK]%s 安装完成。请执行: %ssudo vps%s\n\n' "$GRN" "$R" "$B" "$R"
-      fi
-      ;;
+    --install|install) do_install; main_menu ;;
+    *) do_install; main_menu ;;
   esac
 }
 
