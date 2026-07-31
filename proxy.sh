@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
-VERSION="1.3.0"
+VERSION="1.3.1"
 CONFIG_DIR="/root/proxy-info"
 BACKUP_DIR="${CONFIG_DIR}/backups"
 BACKUP_KEEP="${BACKUP_KEEP:-15}"
@@ -851,11 +851,14 @@ install_hy2_core() {
 
 configure_hy2_service() {
   install -d -m 755 "$(dirname "$HY2_DROPIN")"
+  # 降权为 hysteria 用户；UDP/443 等特权端口需 CAP_NET_BIND_SERVICE
   cat >"$HY2_DROPIN" <<EOF
 [Service]
 User=${HY2_USER}
 Group=${HY2_USER}
 WorkingDirectory=/etc/hysteria
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
 EOF
   chmod 644 "$HY2_DROPIN"
   systemctl daemon-reload
@@ -902,6 +905,9 @@ install_hy2() {
 
   if [[ -n $HY2_PORT ]]; then
     validate_port "$HY2_PORT"
+    if ((10#$HY2_PORT < 1024)); then
+      log "Hysteria2 使用特权端口 ${HY2_PORT}/udp（systemd drop-in 授予 CAP_NET_BIND_SERVICE）"
+    fi
     ensure_port_available "$HY2_PORT" udp hysteria-server "Hysteria2" "$HY2_STATE" HY2_PORT
   else
     HY2_PORT=$(random_free_port udp)
