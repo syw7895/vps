@@ -4,16 +4,16 @@
 set -Eeuo pipefail
 
 APP_NAME="syw-vps"
-VERSION="1.0.3"
+VERSION="1.0.4"
 LIB_DIR="/usr/local/lib/syw-vps"
 BIN_VPS="/usr/local/bin/vps"
 MARKER="syw-vps-entrypoint"
-# 默认 main；生产建议 SYW_VPS_REF=<commit|tag> 使用不可变 URL
+# 默认 main（浮动）。生产请设完整 40 位 commit SHA（tag 可被移动，不可当不可变）
 SYW_VPS_REF="${SYW_VPS_REF:-main}"
 RAW_BASE="${SYW_VPS_RAW_BASE:-https://raw.githubusercontent.com/syw7895/vps/${SYW_VPS_REF}}"
 # 模块期望 SHA-256（scripts/update-checksums.sh 维护；环境变量可覆盖）
-PROXY_SHA256="${SYW_VPS_PROXY_SHA256:-bedf0dcd4fcd9cfaf0f4ab19f5cda40fa22ce4a1d497f887bc5b556316dd4cc9}"
-TRAFFIC_SHA256="${SYW_VPS_TRAFFIC_SHA256:-acd959d2f63646f3951a1399e7089116b3d71955ffddef7d3d981009462ef454}"
+PROXY_SHA256="${SYW_VPS_PROXY_SHA256:-defe9da1a43b745a634b2c829d6e6da87f58fb139f12fb3eb5592c094d4bd0e9}"
+TRAFFIC_SHA256="${SYW_VPS_TRAFFIC_SHA256:-4f2a40f2a1dc4964bb0a1362784c0c23ae41006cb6f26e6986d750a5da40df0e}"
 INTEGRITY_FILE="${LIB_DIR}/checksums.sha256"
 
 VPS_SH_LOCAL="${LIB_DIR}/vps.sh"
@@ -22,13 +22,54 @@ TRAFFIC_SH_LOCAL="${LIB_DIR}/traffic.sh"
 
 if [[ -t 1 ]]; then
   R=$'\033[0m' B=$'\033[1m'
-  RED=$'\033[31m' YEL=$'\033[33m' CYN=$'\033[36m'
+  RED=$'\033[31m' GRN=$'\033[32m' YEL=$'\033[33m' CYN=$'\033[36m'
+  D=$'\033[2m'
 else
-  R='' B='' RED='' YEL='' CYN=''
+  R='' B='' RED='' GRN='' YEL='' CYN='' D=''
 fi
 
 warn() { printf '%s[%s]%s %s\n' "$YEL" "!" "$R" "$*"; }
 fail() { printf '%s[%s]%s %s\n' "$RED" "ERR" "$R" "$*" >&2; exit 1; }
+
+# ---------- UI（宽 48；窄终端降级） ----------
+UI_W=48
+UI_RULE="────────────────────────────────────────────────"
+UI_BOX=1
+ui_init() {
+  local cols=${COLUMNS:-}
+  if [[ -z $cols && -t 1 ]]; then cols=$(tput cols 2>/dev/null || echo 80); fi
+  cols=${cols:-80}
+  UI_BOX=1
+  (( cols < UI_W + 6 )) && UI_BOX=0
+}
+ui_box_top() { (( UI_BOX )) && printf '  %s╭%s╮%s\n' "$D" "$UI_RULE" "$R" || true; }
+ui_box_mid() { (( UI_BOX )) && printf '  %s├%s┤%s\n' "$D" "$UI_RULE" "$R" || printf '  %s%s%s\n' "$D" "$UI_RULE" "$R"; }
+ui_box_bot() { (( UI_BOX )) && printf '  %s╰%s╯%s\n' "$D" "$UI_RULE" "$R" || true; }
+ui_box_row() {
+  if (( UI_BOX )); then printf '  %s│%s %s\n' "$D" "$R" "$1"
+  else printf '  %s\n' "$1"; fi
+}
+ui_box_section() {
+  if (( UI_BOX )); then
+    printf '  %s├%s %s %s┤%s\n' "$D" "──" "$1" "──────────────────────────────" "$R"
+  else
+    printf '  %s── %s ──%s\n' "$D" "$1" "$R"
+  fi
+}
+ui_hint() { printf '  %s提示%s：%s\n' "$D" "$R" "$1"; }
+
+entry_status_line() {
+  local okp=0 okt=0
+  [[ -f $PROXY_SH_LOCAL && -s $PROXY_SH_LOCAL ]] && okp=1
+  [[ -f $TRAFFIC_SH_LOCAL && -s $TRAFFIC_SH_LOCAL ]] && okt=1
+  if (( okp && okt )); then
+    printf '%s●%s 模块就绪' "$GRN" "$R"
+  elif (( okp || okt )); then
+    printf '%s◐%s 模块不完整' "$YEL" "$R"
+  else
+    printf '%s○%s 待安装模块' "$YEL" "$R"
+  fi
+}
 
 is_valid_sha256() { [[ $1 =~ ^[A-Fa-f0-9]{64}$ ]]; }
 
@@ -233,17 +274,22 @@ run_module() {
 }
 
 main_menu() {
-  local c D
-  if [[ -t 1 ]]; then D=$'\033[2m'; else D=''; fi
+  local c st
+  ui_init
   while true; do
+    st=$(entry_status_line)
     printf '\n'
-    printf '  %s╭──────────────────────────────╮%s\n' "$D" "$R"
-    printf '  %s│%s  %sVPS 管理%s  %sv%s%s\n' "$D" "$R" "$B$CYN" "$R" "$D" "$VERSION" "$R"
-    printf '  %s├──────────────────────────────┤%s\n' "$D" "$R"
-    printf '  %s│%s   1  代理管理\n' "$D" "$R"
-    printf '  %s│%s   2  流量管理\n' "$D" "$R"
-    printf '  %s│%s   0  退出\n' "$D" "$R"
-    printf '  %s╰──────────────────────────────╯%s\n' "$D" "$R"
+    ui_box_top
+    ui_box_row "${B}${CYN}VPS 管理${R}  ${D}v${VERSION}${R}"
+    ui_box_mid
+    ui_box_row "状态  ${st}"
+    ui_box_section "管理"
+    ui_box_row " 1  ▸ 代理管理        REALITY / HY2 / CDN"
+    ui_box_row " 2  ▸ 流量管理        额度 / 限速 / 检查"
+    ui_box_section "操作"
+    ui_box_row " 0  退出"
+    ui_box_bot
+    ui_hint "选择后按回车确认"
     c=""
     read_tty -p "  请选择 › " c || c=0
     case $c in
@@ -261,12 +307,16 @@ ${APP_NAME} v${VERSION}
   curl -fsSL ${RAW_BASE}/vps.sh | sudo bash
   sudo vps
 
-固定版本:
-  export SYW_VPS_REF=<git-commit-or-tag>
+生产固定版本（请用完整 commit SHA；Git tag 可被移动，不算不可变）:
+  export SYW_VPS_REF=<40-char-commit-sha>
   curl -fsSL https://raw.githubusercontent.com/syw7895/vps/\${SYW_VPS_REF}/vps.sh | sudo bash
 
-完整性: 下载 proxy/traffic 时校验内置或 checksums.sha256 中的 SHA-256。
+信任边界:
+  · curl|bash 拿到的 vps.sh 本身是信任起点（管道内容无法自证）
+  · 随后下载的 proxy/traffic 用内置 SHA-256 / checksums.sha256 校验
+  · checksums 仅含 proxy.sh、traffic.sh（运行时校验目标）
 开发跳过: SYW_VPS_ALLOW_UNVERIFIED=1（勿用于生产）
+跨版本升级: 重新执行入口安装；流量菜单「重装当前受信版本」不能跨版本升级
 EOF
 }
 
