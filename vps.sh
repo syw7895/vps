@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="syw-vps"
-VERSION="1.1.4"
+VERSION="1.1.5"
 LIB_DIR="/usr/local/lib/syw-vps"
 BIN_VPS="/usr/local/bin/vps"
 MARKER="syw-vps-entrypoint"
@@ -61,13 +61,7 @@ read_tty() {
     esac
   done
   __var=${1:-REPLY}
-  # curl|bash 时 stdin 是脚本管道，交互一律走控制终端
-  if [[ -r /dev/tty ]]; then
-    printf '%s' "$prompt" >/dev/tty 2>/dev/null || printf '%s' "$prompt"
-    read -r "${__var?}" </dev/tty || return 1
-  else
-    read -r -p "$prompt" "${__var?}" || return 1
-  fi
+  read -r -p "$prompt" "${__var?}" || return 1
 }
 
 require_root() {
@@ -201,7 +195,6 @@ main_menu() {
     ui_item 0 "退出"
     ui_foot
     c=""
-    # 读失败不要当成选 0（否则静默回 shell，用户再按 1 变成 bash 命令）
     if ! read_tty -p "  请选择 [0-2]: " c; then
       warn "读取输入失败"
       return 1
@@ -217,15 +210,19 @@ main_menu() {
   done
 }
 
+# curl|bash 时 stdin 是管道，装完后绑到真实终端再进菜单
+enter_menu() {
+  if [[ ! -t 0 ]] && [[ -r /dev/tty && -w /dev/tty && -f $VPS_SH_LOCAL ]]; then
+    exec bash "$VPS_SH_LOCAL" --menu-only </dev/tty >/dev/tty 2>/dev/tty
+  fi
+  main_menu
+}
+
 usage() {
   cat <<EOF
 ${APP_NAME} v${VERSION}
   curl -fsSL ${RAW_BASE}/vps.sh | sudo bash
   sudo vps
-
-一条命令即可安装并进入菜单（从 /dev/tty 读输入）。
-可选固定版本: export SYW_VPS_REF=<commit-sha>
-已存在的 proxy/traffic 不会被覆盖；更新流量用菜单 10。
 EOF
 }
 
@@ -233,8 +230,8 @@ main() {
   case ${1:-} in
     -h|--help|help) usage; exit 0 ;;
     --menu-only|menu) require_root; main_menu ;;
-    --install|install) do_install; main_menu ;;
-    *) do_install; main_menu ;;
+    --install|install) do_install; enter_menu ;;
+    *) do_install; enter_menu ;;
   esac
 }
 
