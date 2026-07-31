@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="syw-vps"
-VERSION="1.1.0"
+VERSION="1.1.1"
 LIB_DIR="/usr/local/lib/syw-vps"
 BIN_VPS="/usr/local/bin/vps"
 MARKER="syw-vps-entrypoint"
@@ -27,39 +27,29 @@ fi
 warn() { printf '%s[%s]%s %s\n' "$YEL" "!" "$R" "$*"; }
 fail() { printf '%s[%s]%s %s\n' "$RED" "ERR" "$R" "$*" >&2; exit 1; }
 
-# ---------- UI ----------
-UI_W=48
-UI_RULE="────────────────────────────────────────────────"
-UI_BOX=1
-ui_init() {
-  local cols=${COLUMNS:-}
-  if [[ -z $cols && -t 1 ]]; then cols=$(tput cols 2>/dev/null || echo 80); fi
-  cols=${cols:-80}
-  UI_BOX=1
-  if (( cols < UI_W + 6 )); then UI_BOX=0; fi
+# ---------- UI（无重框线：标题 / 状态 / 列表） ----------
+ui_init() { :; }
+ui_head() {
+  # $1 标题  $2 版本标签
+  printf '\n  %s%s%s  %s%s%s\n' "$B$CYN" "$1" "$R" "$D" "$2" "$R"
 }
-ui_box_top() { (( UI_BOX )) && printf '  %s╭%s╮%s\n' "$D" "$UI_RULE" "$R" || true; }
-ui_box_mid() { (( UI_BOX )) && printf '  %s├%s┤%s\n' "$D" "$UI_RULE" "$R" || printf '  %s%s%s\n' "$D" "$UI_RULE" "$R"; }
-ui_box_bot() { (( UI_BOX )) && printf '  %s╰%s╯%s\n' "$D" "$UI_RULE" "$R" || true; }
-ui_box_row() {
-  if (( UI_BOX )); then printf '  %s│%s %s\n' "$D" "$R" "$1"
-  else printf '  %s\n' "$1"; fi
+ui_status() { printf '  %s\n' "$1"; }
+ui_gap() { printf '\n'; }
+ui_group() { printf '  %s%s%s\n' "$D" "$1" "$R"; }
+ui_item() {
+  # $1 序号  $2 主文案  $3 可选副文案
+  printf '  %s%2s%s  %s\n' "$CYN" "$1" "$R" "$2"
+  [[ -n ${3:-} ]] && printf '      %s%s%s\n' "$D" "$3" "$R"
 }
-ui_box_section() {
-  if (( UI_BOX )); then
-    printf '  %s├%s %s %s┤%s\n' "$D" "──" "$1" "──────────────────────────────" "$R"
-  else
-    printf '  %s── %s ──%s\n' "$D" "$1" "$R"
-  fi
-}
+ui_foot() { printf '\n'; }
 
 entry_status_line() {
   local okp=0 okt=0
   [[ -f $PROXY_SH_LOCAL && -s $PROXY_SH_LOCAL ]] && okp=1
   [[ -f $TRAFFIC_SH_LOCAL && -s $TRAFFIC_SH_LOCAL ]] && okt=1
-  if (( okp && okt )); then printf '%s●%s 模块就绪' "$GRN" "$R"
-  elif (( okp || okt )); then printf '%s◐%s 模块不完整' "$YEL" "$R"
-  else printf '%s○%s 待安装模块' "$YEL" "$R"; fi
+  if (( okp && okt )); then printf '%s●%s  模块就绪' "$GRN" "$R"
+  elif (( okp || okt )); then printf '%s○%s  模块不完整' "$YEL" "$R"
+  else printf '%s○%s  待安装模块' "$YEL" "$R"; fi
 }
 
 read_tty() {
@@ -201,19 +191,16 @@ main_menu() {
   ui_init
   while true; do
     st=$(entry_status_line)
-    printf '\n'
-    ui_box_top
-    ui_box_row "${B}${CYN}VPS 管理${R}  ${D}v${VERSION}${R}"
-    ui_box_mid
-    ui_box_row "状态  ${st}"
-    ui_box_section "管理"
-    ui_box_row " 1  ▸ 代理管理        REALITY / HY2 / CDN"
-    ui_box_row " 2  ▸ 流量管理        额度 / 限速 / 检查"
-    ui_box_section "操作"
-    ui_box_row " 0  退出"
-    ui_box_bot
+    ui_head "VPS" "v${VERSION}"
+    ui_status "$st"
+    ui_gap
+    ui_item 1 "代理管理" "REALITY · HY2 · CDN"
+    ui_item 2 "流量管理" "额度 · 限速 · 检查"
+    ui_gap
+    ui_item 0 "退出"
+    ui_foot
     c=""
-    read_tty -p "  请选择 › " c || c=0
+    read_tty -p "  › " c || c=0
     case $c in
       1) run_module "$PROXY_SH_LOCAL" || true ;;
       2) run_module "$TRAFFIC_SH_LOCAL" || true ;;

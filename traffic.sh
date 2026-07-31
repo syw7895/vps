@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-traffic"
-VERSION="1.3.0"
+VERSION="1.3.1"
 LIB_DIR="/usr/local/lib/syw-vps"
 SELF_LOCAL="${LIB_DIR}/traffic.sh"
 SYW_VPS_REF="${SYW_VPS_REF:-main}"
@@ -681,51 +681,35 @@ fmt_time() {
   fi
 }
 
-# ---------- UI（宽 48；窄终端降级无边框） ----------
-UI_W=48
-UI_RULE="────────────────────────────────────────────────"
-UI_BOX=1
+# ---------- UI（无重框线） ----------
 ui_init() {
   if [[ -z ${D:-} ]]; then
     if [[ -t 1 ]]; then D=$'\033[2m'; else D=''; fi
   fi
-  local cols=${COLUMNS:-}
-  if [[ -z $cols && -t 1 ]]; then cols=$(tput cols 2>/dev/null || echo 80); fi
-  cols=${cols:-80}
-  UI_BOX=1
-  if (( cols < UI_W + 6 )); then UI_BOX=0; fi
 }
-ui_rule() { printf '  %s%s%s\n' "$D" "$1" "$R"; }
-ui_box_top() { (( UI_BOX )) && ui_rule "╭${UI_RULE}╮" || true; }
-ui_box_mid() { (( UI_BOX )) && ui_rule "├${UI_RULE}┤" || printf '  %s%s%s\n' "$D" "$UI_RULE" "$R"; }
-ui_box_bot() { (( UI_BOX )) && ui_rule "╰${UI_RULE}╯" || true; }
-ui_box_row() {
-  if (( UI_BOX )); then
-    printf '  %s│%s %s\n' "$D" "$R" "$1"
-  else
-    printf '  %s\n' "$1"
-  fi
+ui_head() { printf '\n  %s%s%s  %s%s%s\n' "$B$CYN" "$1" "$R" "$D" "$2" "$R"; }
+ui_status() { printf '  %s\n' "$1"; }
+ui_gap() { printf '\n'; }
+ui_group() { printf '  %s%s%s\n' "$D" "$1" "$R"; }
+ui_item() {
+  printf '  %s%2s%s  %s\n' "$CYN" "$1" "$R" "$2"
+  [[ -n ${3:-} ]] && printf '      %s%s%s\n' "$D" "$3" "$R"
 }
-ui_box_section() {
-  if (( UI_BOX )); then
-    printf '  %s├%s %s %s┤%s\n' "$D" "──" "$1" "──────────────────────────────" "$R"
-  else
-    printf '  %s── %s ──%s\n' "$D" "$1" "$R"
-  fi
-}
-ui_hint() { printf '  %s提示%s：%s\n' "$D" "$R" "$1"; }
+ui_kv() { printf '  %s%-8s%s  %s\n' "$D" "$1" "$R" "$2"; }
+ui_note() { printf '  %s%s%s\n' "$D" "$1" "$R"; }
+ui_foot() { printf '\n'; }
 
 menu_status_line() {
   load_config
   load_state
   if [[ $LIMIT_ACTIVE == true || $OWNED_BY_TOOL == true ]]; then
-    printf '%s●%s 限速中 %s' "$RED" "$R" "$LIMIT_RATE"
+    printf '%s●%s  限速中 · %s' "$RED" "$R" "$LIMIT_RATE"
   elif [[ $PAUSED == true ]]; then
-    printf '%s◐%s 检查已暂停' "$YEL" "$R"
+    printf '%s○%s  检查已暂停' "$YEL" "$R"
   elif [[ -z ${MONTHLY_QUOTA_GB:-} ]]; then
-    printf '%s○%s 待设置额度' "$YEL" "$R"
+    printf '%s○%s  待设置额度' "$YEL" "$R"
   else
-    printf '%s●%s 正常放行' "$GRN" "$R"
+    printf '%s●%s  正常放行' "$GRN" "$R"
   fi
 }
 
@@ -793,30 +777,26 @@ cmd_status() {
     qdisc_brief="${qdisc_brief:0:39}..."
   fi
 
-  printf '\n'
-  ui_box_top
-  ui_box_row "${B}${CYN}流量监控${R}  ${D}v${VERSION}${R}"
-  ui_box_mid
-  ui_box_row "状态  ${status_col}${status_icon} ${status_txt}${R}"
-  ui_box_section "用量"
+  ui_head "流量" "v${VERSION}"
+  ui_status "${status_col}${status_icon}  ${status_txt}${R}"
+  ui_gap
   if [[ -n ${MONTHLY_QUOTA_GB:-} ]]; then
-    ui_box_row "本月上行  ${CYN}${bar}${R}  ${B}${pct}%${R}"
-    ui_box_row "用量      ${B}${gb}${R} / ${MONTHLY_QUOTA_GB} GB   阈值 ${thr_gb} GB @${THRESHOLD_PERCENT}%"
+    printf '  %s%s%s  %s%s%%%s\n' "$CYN" "$bar" "$R" "$B" "$pct" "$R"
+    ui_kv "用量" "${B}${gb}${R} / ${MONTHLY_QUOTA_GB} GB"
+    ui_kv "阈值" "${thr_gb} GB @ ${THRESHOLD_PERCENT}%"
   else
-    ui_box_row "本月上行  ${B}${gb}${R} GB"
-    ui_box_row "${YEL}月额度未设置${R}  → 菜单选 2 设置"
+    ui_kv "用量" "${B}${gb}${R} GB"
+    ui_note "月额度未设置 → 菜单选 2"
   fi
-  ui_box_section "策略"
-  ui_box_row "网卡      ${iface}    限速策略  ${LIMIT_RATE}"
-  ui_box_row "自动检查  ${paused_txt}         当前限速  ${limit_txt}"
-  ui_box_row "规则      $([[ $OWNED_BY_TOOL == true ]] && echo 本工具 || echo 无)         handle    ${LIMIT_HANDLE:-—}"
-  ui_box_section "检查"
-  ui_box_row "上次检查  $(fmt_time "${LAST_CHECK_TS:-}")"
-  ui_box_row "原因      $(fmt_reason "${LAST_REASON:-}")"
-  ui_box_row "队列      ${qdisc_brief}"
-  ui_box_bot
-  ui_hint "${LIMIT_RATE} 约 10.8 GB/天量级，不能保证绝对不超额度；vnStat 与云厂商可能有误差"
-  printf '\n'
+  ui_gap
+  ui_kv "网卡" "$iface"
+  ui_kv "限速" "${LIMIT_RATE} · 自动检查 ${paused_txt} · 当前 ${limit_txt}"
+  ui_kv "规则" "$([[ $OWNED_BY_TOOL == true ]] && echo 本工具 || echo 无) · ${LIMIT_HANDLE:-—}"
+  ui_kv "检查" "$(fmt_time "${LAST_CHECK_TS:-}") · $(fmt_reason "${LAST_REASON:-}")"
+  ui_kv "队列" "$qdisc_brief"
+  ui_gap
+  ui_note "说明: ${LIMIT_RATE} 约 10.8 GB/天量级；vnStat 与云厂商可能有误差"
+  ui_foot
 }
 
 cmd_check_now() { require_root; with_lock run_check; }
@@ -914,30 +894,31 @@ main_menu() {
   ui_init
   while true; do
     st=$(menu_status_line)
-    printf '\n'
-    ui_box_top
-    ui_box_row "${B}${CYN}流量管理${R}  ${D}v${VERSION}${R}"
-    ui_box_mid
-    ui_box_row "状态  ${st}"
-    ui_box_section "监控"
-    ui_box_row " 1  ▸ 安装流量监控"
-    ui_box_row " 2  ▸ 设置每月流量额度"
-    ui_box_row " 3  ▸ 查看状态 / 仪表盘"
-    ui_box_section "策略"
-    ui_box_row " 4  ▸ 修改触发比例"
-    ui_box_row " 5  ▸ 修改限速速度"
-    ui_box_section "运维"
-    ui_box_row " 6  ▸ 立即检查"
-    ui_box_row " 7  ▸ 解除当前限速"
-    ui_box_row " 8  ▸ 暂停自动检查"
-    ui_box_row " 9  ▸ 恢复自动检查"
-    ui_box_section "系统"
-    ui_box_row "10  ▸ 更新流量模块"
-    ui_box_row "11  ▸ 卸载流量模块"
-    ui_box_row " 0  返回"
-    ui_box_bot
+    ui_head "流量" "v${VERSION}"
+    ui_status "$st"
+    ui_gap
+    ui_group "监控"
+    ui_item 1 "安装流量监控"
+    ui_item 2 "设置每月流量额度"
+    ui_item 3 "查看状态"
+    ui_gap
+    ui_group "策略"
+    ui_item 4 "修改触发比例"
+    ui_item 5 "修改限速速度"
+    ui_gap
+    ui_group "运维"
+    ui_item 6 "立即检查"
+    ui_item 7 "解除当前限速"
+    ui_item 8 "暂停自动检查"
+    ui_item 9 "恢复自动检查"
+    ui_gap
+    ui_group "系统"
+    ui_item 10 "更新流量模块"
+    ui_item 11 "卸载流量模块"
+    ui_item 0 "返回"
+    ui_foot
     c=""
-    read_tty -p "  请选择 › " c || c=0
+    read_tty -p "  › " c || c=0
     case $c in
       1) cmd_install ;;
       2) cmd_set_quota ;;
