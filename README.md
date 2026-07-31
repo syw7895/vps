@@ -8,16 +8,26 @@ Debian / Ubuntu（需 **root**）。代理与流量为**两个独立模块**，�
 curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 ```
 
+**推荐（不可变提交 + 完整性校验）：**
+
+```bash
+export SYW_VPS_REF=<git-commit-or-tag>
+curl -fsSL "https://raw.githubusercontent.com/syw7895/vps/${SYW_VPS_REF}/vps.sh" | sudo bash
+```
+
+入口内置 `proxy.sh` / `traffic.sh` 的 SHA-256；下载后校验，不符则拒绝安装。仓库根目录 `checksums.sha256` 由 `scripts/update-checksums.sh` 生成，安装时写入 `/usr/local/lib/syw-vps/checksums.sha256`。开发可临时 `SYW_VPS_ALLOW_UNVERIFIED=1`（**勿用于生产**）。
+
 会安装到：
 
 | 路径 | 说明 |
 |------|------|
 | `/usr/local/lib/syw-vps/vps.sh` | 统一入口 |
-| `/usr/local/lib/syw-vps/proxy.sh` | 代理模块（若本地尚无则下载） |
-| `/usr/local/lib/syw-vps/traffic.sh` | 流量模块（若本地尚无则下载） |
+| `/usr/local/lib/syw-vps/proxy.sh` | 代理模块 |
+| `/usr/local/lib/syw-vps/traffic.sh` | 流量模块 |
+| `/usr/local/lib/syw-vps/checksums.sha256` | 模块完整性清单 |
 | `/usr/local/bin/vps` | 日常快捷命令 |
 
-**已存在的 proxy/traffic 模块不会被自动覆盖。** 重新执行上述命令只刷新统一入口 `vps.sh`。
+本地模块与入口期望哈希不一致时会**重新下载**。跨版本升级请重新执行入口安装。
 
 若系统里已有同名 `vps` 且不属于本工具，安装会中止，避免误覆盖。
 
@@ -85,6 +95,7 @@ VPS 管理
 - **1 Mbit/s 持续约一天仍可能产生约 10.8 GB 流量**，不能绝对保证额度不会用完。  
 - vnStat 与云厂商后台统计可能存在误差。  
 - 默认统计默认 IPv4 出口网卡的 **TX**（`ip -4 route get 1.1.1.1`）；可在 `/etc/vps-traffic/config` 用 `IFACE=` 覆盖。  
+- 默认出口网卡变更时，会先按状态中的 `LIMIT_IFACE` 清理旧网卡上的本工具限速，再按当前网卡决策，避免遗留或双限速。  
 - 依赖：**vnStat 2.6+、python3、iproute2**（安装流量监控时会 apt 安装）。  
 - 默认 `fq` / `fq_codel` / `noqueue` 等系统 qdisc 不视为冲突；HTB/其它限速会跳过以免覆盖。
 
@@ -97,7 +108,8 @@ Timer：`vps-traffic-check.timer`
 支持：
 
 - **REALITY** — 直连  
-- **Hysteria2** — UDP  
+- **Hysteria2** — UDP（降权 `hysteria` 用户；特权端口如 443 通过 `CAP_NET_BIND_SERVICE`）  
+
 - **VLESS + WS + TLS** — 可走 Cloudflare  
 
 安装、状态、更新、卸载均在 **代理管理** 菜单（或历史 `v2` / `proxy.sh` 流程）中完成。默认端口：REALITY `443`，CDN `8443`，HY2 随机 UDP。CDN 申请证书需域名解析到本机且 **80** 可访问。
