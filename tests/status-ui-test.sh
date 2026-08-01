@@ -36,10 +36,18 @@ write_xray_cfg() {
   for t in "${tags[@]}"; do
     case $t in
       reality)
-        parts+=('{ "tag": "vless-reality", "listen": "0.0.0.0", "port": 443, "protocol": "vless" }')
+        # 含协议语义 + 可选 tag（兼容新旧）
+        parts+=('{ "tag": "vless-reality", "listen": "0.0.0.0", "port": 443, "protocol": "vless", "streamSettings": { "network": "tcp", "security": "reality" } }')
+        ;;
+      reality_notag)
+        # 旧节点：无固定 tag，仅协议语义
+        parts+=('{ "listen": "0.0.0.0", "port": 443, "protocol": "vless", "streamSettings": { "network": "tcp", "security": "reality" } }')
         ;;
       cdn)
-        parts+=('{ "tag": "vless-ws-tls", "listen": "0.0.0.0", "port": 8443, "protocol": "vless" }')
+        parts+=('{ "tag": "vless-ws-tls", "listen": "0.0.0.0", "port": 8443, "protocol": "vless", "streamSettings": { "network": "ws", "security": "tls" } }')
+        ;;
+      cdn_notag)
+        parts+=('{ "listen": "0.0.0.0", "port": 8443, "protocol": "vless", "streamSettings": { "network": "ws", "security": "tls" } }')
         ;;
     esac
   done
@@ -265,6 +273,32 @@ MOCK_SVC[xray]=running
 out=$(show_info 2>&1)
 assert "cfg only not 暂无" '[[ "$out" != *"暂无代理"* && "$out" == *"REALITY"* ]]'
 
+# 无固定 tag、仅协议语义的旧 REALITY
+clear_proxy
+write_xray_cfg "$XRAY_CONFIG" reality_notag
+printf '地址:      8.8.8.8\n端口:      443\n' >"$XRAY_INFO"
+MOCK_SVC[xray]=running
+out=$(show_info 2>&1)
+assert "semantic reality no tag" '[[ "$out" == *"REALITY"* && "$out" == *"运行中"* && "$out" != *"残留"* && "$out" != *"暂无代理"* ]]'
+assert "semantic reality port" '[[ "$out" == *":443"* ]]'
+
+# 无固定 tag 的 CDN 语义
+clear_proxy
+write_xray_cfg "$XRAY_CONFIG" cdn_notag
+printf '域名: d.com\n端口: 8443\n' >"$CDN_INFO"
+MOCK_SVC[xray]=running
+out=$(show_info 2>&1)
+assert "semantic cdn no tag" '[[ "$out" == *"CDN"* && "$out" == *"运行中"* && "$out" != *"REALITY"* ]]'
+assert "semantic cdn not 暂无" '[[ "$out" != *"暂无代理"* ]]'
+
+# 仅 Xray 运行但无匹配 inbound → 不因 systemd 判为有节点
+clear_proxy
+printf '{ "inbounds": [ { "protocol": "socks", "port": 1080 } ], "outbounds": [] }\n' >"$XRAY_CONFIG"
+MOCK_SVC[xray]=running
+out=$(show_info 2>&1)
+assert "running xray no inbound 暂无" '[[ "$out" == *"暂无代理"* ]]'
+assert "running xray no reality block" '[[ "$out" != *"REALITY"* || "$out" == *"残留"* ]]'
+
 # ===================== traffic =====================
 export VPS_TRAFFIC_MOCK=1
 export VPS_TRAFFIC_TEST_DIR="$TMP/traffic"
@@ -310,6 +344,7 @@ assert "traffic unset quota menu" '[[ "$line" == *"待设置额度"* ]]'
 out=$(cmd_status 2>&1)
 assert "traffic no legend phrase" '[[ "$out" != *"限速/超限"* ]]'
 assert "traffic no handle default" '[[ "$out" != *"1abc"* && "$out" != *"规则"* ]]'
+assert "traffic TX scope" '[[ "$out" == *"出站 TX"* ]]'
 assert "traffic tip quota" '[[ "$out" == *"请先设置每月流量额度"* ]]'
 assert "traffic no box" 'no_box "$out"'
 
