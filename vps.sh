@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="syw-vps"
-VERSION="1.2.0"
+VERSION="1.2.1"
 LIB_DIR="/usr/local/lib/syw-vps"
 BIN_VPS="/usr/local/bin/vps"
 MARKER="syw-vps-entrypoint"
@@ -29,7 +29,6 @@ fail() { printf '  %s×%s  %s\n' "$RED" "$R" "$*" >&2; exit 1; }
 ok() { printf '  %s●%s  %s\n' "$GRN" "$R" "$*"; }
 
 # ---------- UI ----------
-ui_init() { :; }
 ui_head() {
   printf '\n  %s%s%s  %s%s%s\n' "$B$CYN" "$1" "$R" "$D" "$2" "$R"
 }
@@ -44,7 +43,6 @@ ui_item() {
   esac
   printf '  %s%2s.%s  %s%s%s\n' "$nc" "$num" "$R" "$tc" "$text" "$R"
 }
-ui_foot() { printf '\n'; }
 
 # 模块可用：文件存在且 bash -n 通过。正常时不输出（无状态行）。
 module_usable() {
@@ -201,12 +199,11 @@ run_module() {
     rc=$?
   fi
   set -e
-  return 0
+  return "$rc"
 }
 
 main_menu() {
   local c st
-  ui_init
   while true; do
     st=$(entry_warning_line || true)
     ui_head "VPS" "v${VERSION}"

@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
-VERSION="1.5.0"
+VERSION="1.5.1"
 CONFIG_DIR="/root/proxy-info"
 BACKUP_DIR="${CONFIG_DIR}/backups"
 BACKUP_KEEP="${BACKUP_KEEP:-15}"
@@ -14,7 +14,16 @@ HY2_STATE="${CONFIG_DIR}/hy2.conf"
 XRAY_INFO="${CONFIG_DIR}/xray-reality.txt"
 CDN_INFO="${CONFIG_DIR}/xray-cdn.txt"
 HY2_INFO="${CONFIG_DIR}/hysteria2.txt"
-XRAY_CONFIG="/usr/local/etc/xray/config.json"
+XRAY_CONFIG="${XRAY_CONFIG:-/usr/local/etc/xray/config.json}"
+# 运行时由 xray_discover 填充：file|dir|unknown
+XRAY_LAYOUT="${XRAY_LAYOUT:-unknown}"
+XRAY_CONFIG_FILE="${XRAY_CONFIG_FILE:-}"
+XRAY_CONF_DIR="${XRAY_CONF_DIR:-}"
+# 本项目管理的 inbound tag / confdir 文件名
+MANAGED_TAG_REALITY="vless-reality"
+MANAGED_TAG_CDN="vless-ws-tls"
+MANAGED_FILE_REALITY="50-vps-reality.json"
+MANAGED_FILE_CDN="51-vps-cdn.json"
 HY2_CONFIG="/etc/hysteria/config.yaml"
 HY2_CERT_DIR="/etc/hysteria/certs"
 HY2_DROPIN="/etc/systemd/system/hysteria-server.service.d/10-vps-proxy-user.conf"
@@ -412,310 +421,277 @@ svc_state() {
   fi
 }
 
-# ---------- 只读节点检测（不修改配置） ----------
+# ---------- 只读节点检测 / Xray 布局发现（不修改配置） ----------
 # 证据：真实服务配置 > systemd 运行态(仅展示) > state 元数据 > info 缓存
 
 port_is_valid() {
   [[ ${1:-} =~ ^[0-9]+$ ]] && ((1 <= 10#$1 && 10#$1 <= 65535))
 }
 
-# 从 systemd ExecStart 行解析 -config / -c / --config / -confdir
-# 输出：file:/path 或 dir:/path（可能多行）
+# 解析 ExecStart：输出 file:/path 或 dir:/path（禁止 unquoted 分词 / eval）
 parse_execstart_config_specs() {
   local exec_line=$1
-  local -a tokens=()
-  local t i next
-  # 去掉前导 path= 与多余引号
   exec_line=${exec_line#path=}
-  exec_line=${exec_line//$'\n'/ }
-  # shell 分词（忽略无法展开的转义）
-  # shellcheck disable=SC2206
-  tokens=($exec_line)
-  for ((i = 0; i < ${#tokens[@]}; i++)); do
-    t=${tokens[i]}
-    t=${t//\"/}
-    t=${t//\'/}
-    case $t in
-      -config=*|--config=*|-c=*)
-        next=${t#*=}
-        [[ -n $next ]] && printf 'file:%s\n' "$next"
-        ;;
-      -confdir=*)
-        next=${t#*=}
-        [[ -n $next ]] && printf 'dir:%s\n' "$next"
-        ;;
-      -config|--config|-c)
-        next=${tokens[i + 1]:-}
-        next=${next//\"/}
-        next=${next//\'/}
-        [[ -n $next && $next != -* ]] && printf 'file:%s\n' "$next"
-        ((i++)) || true
-        ;;
-      -confdir)
-        next=${tokens[i + 1]:-}
-        next=${next//\"/}
-        next=${next//\'/}
-        [[ -n $next && $next != -* ]] && printf 'dir:%s\n' "$next"
-        ((i++)) || true
-        ;;
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$exec_line" | python3 - <<'PY'
+import shlex, sys
+line = sys.stdin.read()
+try:
+    tokens = shlex.split(line, posix=True)
+except Exception:
+    tokens = line.split()
+i = 0
+while i < len(tokens):
+    t = tokens[i].strip('"').strip("'")
+    if t.startswith("-config=") or t.startswith("--config=") or t.startswith("-c="):
+        print("file:" + t.split("=", 1)[1].strip('"').strip("'"))
+    elif t.startswith("-confdir="):
+        print("dir:" + t.split("=", 1)[1].strip('"').strip("'"))
+    elif t in ("-config", "--config", "-c") and i + 1 < len(tokens):
+        i += 1
+        print("file:" + tokens[i].strip('"').strip("'"))
+    elif t == "-confdir" and i + 1 < len(tokens):
+        i += 1
+        print("dir:" + tokens[i].strip('"').strip("'"))
+    i += 1
+PY
+    return 0
+  fi
+  # 无 python 时用正则逐个剥离（保守）
+  local rest=$exec_line key val
+  while [[ $rest =~ (-confdir|-config|--config|-c)(=|[[:space:]]+)([^[:space:]]+)(.*) ]]; do
+    key=${BASH_REMATCH[1]}
+    val=${BASH_REMATCH[3]}
+    val=${val//\"/}
+    val=${val//\'/}
+    rest=${BASH_REMATCH[4]}
+    case $key in
+      -confdir) printf 'dir:%s\n' "$val" ;;
+      *) printf 'file:%s\n' "$val" ;;
     esac
   done
 }
 
-# JSON 查询：优先 jq，否则 python3。$1=文件 $2=jq 表达式（输出文本行）
-json_query() {
-  local file=$1 expr=$2
-  [[ -r $file ]] || return 1
-  if command -v jq >/dev/null 2>&1; then
-    jq -r "$expr" "$file" 2>/dev/null
-    return $?
+# 发现 Xray 实际配置布局（写入 XRAY_LAYOUT / XRAY_CONFIG_FILE / XRAY_CONF_DIR）
+# VPS_PROXY_LOCK_LAYOUT=1 时保留调用方已设置的路径（测试用）
+xray_discover() {
+  local exec_line spec path
+  if [[ ${VPS_PROXY_LOCK_LAYOUT:-0} == 1 ]]; then
+    return 0
   fi
-  command -v python3 >/dev/null 2>&1 || return 1
-  EXPR=$expr FILE=$file python3 - <<'PY' 2>/dev/null
-import json, os, sys
-path = os.environ["FILE"]
-expr = os.environ["EXPR"]
-try:
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-except Exception:
-    sys.exit(1)
-
-def walk_inbounds(d):
-    if isinstance(d, dict):
-        ib = d.get("inbounds")
-        if isinstance(ib, list):
-            return ib
-        # 部分 confdir 单文件可能是数组
-    if isinstance(d, list):
-        return d
-    return []
-
-inbounds = walk_inbounds(data)
-# 支持有限表达式子集（本脚本固定用法）
-# reality_port / cdn_port / has_reality / has_cdn / has_tag:TAG
-if expr == "has_reality":
-    for ib in inbounds:
-        if not isinstance(ib, dict):
-            continue
-        if ib.get("protocol") != "vless":
-            continue
-        ss = ib.get("streamSettings") or {}
-        if ss.get("security") == "reality":
-            print("true"); sys.exit(0)
-    print("false"); sys.exit(0)
-if expr == "has_cdn":
-    for ib in inbounds:
-        if not isinstance(ib, dict):
-            continue
-        if ib.get("protocol") != "vless":
-            continue
-        ss = ib.get("streamSettings") or {}
-        if ss.get("network") == "ws" and ss.get("security") == "tls":
-            print("true"); sys.exit(0)
-    print("false"); sys.exit(0)
-if expr.startswith("has_tag:"):
-    tag = expr.split(":", 1)[1]
-    for ib in inbounds:
-        if isinstance(ib, dict) and ib.get("tag") == tag:
-            print("true"); sys.exit(0)
-    print("false"); sys.exit(0)
-if expr == "reality_port":
-    for ib in inbounds:
-        if not isinstance(ib, dict):
-            continue
-        if ib.get("protocol") != "vless":
-            continue
-        ss = ib.get("streamSettings") or {}
-        if ss.get("security") == "reality":
-            p = ib.get("port")
-            if p is not None:
-                print(p); sys.exit(0)
-    # tag 快路径
-    for ib in inbounds:
-        if isinstance(ib, dict) and ib.get("tag") == "vless-reality" and ib.get("port") is not None:
-            print(ib.get("port")); sys.exit(0)
-    sys.exit(1)
-if expr == "cdn_port":
-    for ib in inbounds:
-        if not isinstance(ib, dict):
-            continue
-        if ib.get("protocol") != "vless":
-            continue
-        ss = ib.get("streamSettings") or {}
-        if ss.get("network") == "ws" and ss.get("security") == "tls":
-            p = ib.get("port")
-            if p is not None:
-                print(p); sys.exit(0)
-    for ib in inbounds:
-        if isinstance(ib, dict) and ib.get("tag") == "vless-ws-tls" and ib.get("port") is not None:
-            print(ib.get("port")); sys.exit(0)
-    sys.exit(1)
-sys.exit(1)
-PY
-}
-
-# 列出 Xray 生效配置 JSON 文件（ExecStart 优先，再回退固定路径）
-xray_list_config_files() {
-  local exec_line spec path f
-  local -a files=()
+  XRAY_LAYOUT=unknown
+  XRAY_CONFIG_FILE=
+  XRAY_CONF_DIR=
   exec_line=$(systemctl show -p ExecStart --value xray 2>/dev/null || true)
+  # 合并 drop-in 后的有效 ExecStart 已由 systemctl show 给出
   if [[ -n $exec_line ]]; then
     while IFS= read -r spec; do
       [[ -n $spec ]] || continue
       path=${spec#*:}
       case $spec in
         file:*)
-          [[ -r $path ]] && files+=("$path")
+          if [[ -r $path || -e $path || ! -e $path ]]; then
+            XRAY_LAYOUT=file
+            XRAY_CONFIG_FILE=$path
+            XRAY_CONFIG=$path
+          fi
           ;;
         dir:*)
-          if [[ -d $path ]]; then
-            while IFS= read -r f; do
-              [[ -r $f ]] && files+=("$f")
-            done < <(find "$path" -type f -name '*.json' 2>/dev/null || true)
-          fi
+          XRAY_LAYOUT=dir
+          XRAY_CONF_DIR=$path
           ;;
       esac
     done < <(parse_execstart_config_specs "$exec_line")
   fi
-  # 去重
-  if ((${#files[@]})); then
-    printf '%s\n' "${files[@]}" | awk 'NF && !seen[$0]++'
+  if [[ $XRAY_LAYOUT == unknown ]]; then
+    if [[ -d ${XRAY_CONFIG%/*}/conf.d ]]; then
+      : # 可选 conf.d 不自动采用
+    fi
+    if [[ -n ${XRAY_CONFIG:-} ]]; then
+      XRAY_LAYOUT=file
+      XRAY_CONFIG_FILE=$XRAY_CONFIG
+    fi
+  fi
+  if [[ $XRAY_LAYOUT == file && -z $XRAY_CONFIG_FILE ]]; then
+    XRAY_CONFIG_FILE=${XRAY_CONFIG:-/usr/local/etc/xray/config.json}
+  fi
+}
+
+# 统一扫描：输出 key=value 行
+# has_reality=0|1  has_cdn=0|1  port_reality=  port_cdn=  source=
+# 端口无法可靠解析时留空（禁止用文件中第一个 port 冒充）
+xray_scan() {
+  xray_discover
+  local has_r=0 has_c=0 port_r="" port_c="" source="none"
+  local f files=()
+
+  if [[ $XRAY_LAYOUT == dir && -n $XRAY_CONF_DIR && -d $XRAY_CONF_DIR ]]; then
+    source="confdir:$XRAY_CONF_DIR"
+    while IFS= read -r f; do
+      [[ -r $f ]] && files+=("$f")
+    done < <(find "$XRAY_CONF_DIR" -type f -name '*.json' 2>/dev/null || true)
+  elif [[ $XRAY_LAYOUT == file && -n $XRAY_CONFIG_FILE && -r $XRAY_CONFIG_FILE ]]; then
+    source="file:$XRAY_CONFIG_FILE"
+    files+=("$XRAY_CONFIG_FILE")
+  elif [[ -r ${XRAY_CONFIG:-} ]]; then
+    source="file:$XRAY_CONFIG"
+    files+=("$XRAY_CONFIG")
+  fi
+
+  if ((${#files[@]} == 0)); then
+    printf 'has_reality=0\nhas_cdn=0\nport_reality=\nport_cdn=\nsource=none\n'
     return 0
   fi
-  # 回退固定路径
-  if [[ -r ${XRAY_CONFIG:-} ]]; then
-    printf '%s\n' "$XRAY_CONFIG"
+
+  if command -v python3 >/dev/null 2>&1; then
+    local out
+    out=$(SRC="$source" FILES="$(printf '%s\n' "${files[@]}")" TAG_R="$MANAGED_TAG_REALITY" TAG_C="$MANAGED_TAG_CDN" python3 - <<'PY'
+import json, os
+files = [x for x in os.environ.get("FILES", "").splitlines() if x]
+tag_r = os.environ.get("TAG_R", "vless-reality")
+tag_c = os.environ.get("TAG_C", "vless-ws-tls")
+src = os.environ.get("SRC", "none")
+has_r = has_c = False
+port_r = port_c = ""
+
+def inbounds_of(data):
+    if isinstance(data, dict):
+        ib = data.get("inbounds")
+        if isinstance(ib, list):
+            return ib
+    if isinstance(data, list):
+        return data
+    return []
+
+def is_reality(ib):
+    if not isinstance(ib, dict):
+        return False
+    if ib.get("tag") == tag_r:
+        return True
+    ss = ib.get("streamSettings") or {}
+    return ib.get("protocol") == "vless" and ss.get("security") == "reality"
+
+def is_cdn(ib):
+    if not isinstance(ib, dict):
+        return False
+    if ib.get("tag") == tag_c:
+        return True
+    ss = ib.get("streamSettings") or {}
+    return ib.get("protocol") == "vless" and ss.get("network") == "ws" and ss.get("security") == "tls"
+
+for path in files:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        continue
+    for ib in inbounds_of(data):
+        if is_reality(ib):
+            has_r = True
+            p = ib.get("port")
+            if p is not None and str(p).isdigit() and 1 <= int(p) <= 65535:
+                port_r = str(int(p))
+        if is_cdn(ib):
+            has_c = True
+            p = ib.get("port")
+            if p is not None and str(p).isdigit() and 1 <= int(p) <= 65535:
+                port_c = str(int(p))
+print(f"has_reality={1 if has_r else 0}")
+print(f"has_cdn={1 if has_c else 0}")
+print(f"port_reality={port_r}")
+print(f"port_cdn={port_c}")
+print(f"source={src}")
+PY
+)
+    printf '%s\n' "$out"
     return 0
   fi
-  return 1
+
+  # bash 回退：tag/语义确认后，仅从匹配 inbound 块取 port（不取文件首个无关 port）
+  _port_for_tag() {
+    local file=$1 tag=$2
+    awk -v tag="$tag" '
+      $0 ~ "\"tag\"" && $0 ~ "\"" tag "\"" { grab=1 }
+      grab && /"port"/ {
+        if (match($0, /[0-9]+/)) { print substr($0, RSTART, RLENGTH); exit }
+      }
+      grab && /"tag"/ && $0 !~ tag { grab=0 }
+    ' "$file" 2>/dev/null
+  }
+  for f in "${files[@]}"; do
+    if grep -qE "\"tag\"[[:space:]]*:[[:space:]]*\"${MANAGED_TAG_REALITY}\"" "$f" 2>/dev/null \
+      || { grep -qE "\"security\"[[:space:]]*:[[:space:]]*\"reality\"" "$f" 2>/dev/null \
+        && grep -qE "\"protocol\"[[:space:]]*:[[:space:]]*\"vless\"" "$f" 2>/dev/null; }; then
+      has_r=1
+      port_r=$(_port_for_tag "$f" "$MANAGED_TAG_REALITY")
+      if [[ -z $port_r ]]; then
+        # 语义块：在 security reality 前若干行找 port
+        port_r=$(awk '
+          /"port"/ { lastport=$0 }
+          /"security"/ && /reality/ {
+            if (match(lastport, /[0-9]+/)) { print substr(lastport, RSTART, RLENGTH); exit }
+          }
+        ' "$f" 2>/dev/null || true)
+      fi
+    fi
+    if grep -qE "\"tag\"[[:space:]]*:[[:space:]]*\"${MANAGED_TAG_CDN}\"" "$f" 2>/dev/null \
+      || { grep -qE "\"network\"[[:space:]]*:[[:space:]]*\"ws\"" "$f" 2>/dev/null \
+        && grep -qE "\"security\"[[:space:]]*:[[:space:]]*\"tls\"" "$f" 2>/dev/null \
+        && grep -qE "\"protocol\"[[:space:]]*:[[:space:]]*\"vless\"" "$f" 2>/dev/null; }; then
+      has_c=1
+      port_c=$(_port_for_tag "$f" "$MANAGED_TAG_CDN")
+    fi
+  done
+  printf 'has_reality=%s\nhas_cdn=%s\nport_reality=%s\nport_cdn=%s\nsource=%s\n' \
+    "$has_r" "$has_c" "$port_r" "$port_c" "$source"
 }
 
-# 纯 bash 回退（无 jq/python3）：近似语义匹配，tag 快路径
-xray_file_has_reality() {
-  local f=$1
-  grep -qE '"tag"[[:space:]]*:[[:space:]]*"vless-reality"' "$f" 2>/dev/null && return 0
-  grep -qE '"protocol"[[:space:]]*:[[:space:]]*"vless"' "$f" 2>/dev/null || return 1
-  grep -qE '"security"[[:space:]]*:[[:space:]]*"reality"' "$f" 2>/dev/null
-}
-
-xray_file_has_cdn() {
-  local f=$1
-  grep -qE '"tag"[[:space:]]*:[[:space:]]*"vless-ws-tls"' "$f" 2>/dev/null && return 0
-  grep -qE '"protocol"[[:space:]]*:[[:space:]]*"vless"' "$f" 2>/dev/null || return 1
-  grep -qE '"network"[[:space:]]*:[[:space:]]*"ws"' "$f" 2>/dev/null || return 1
-  grep -qE '"security"[[:space:]]*:[[:space:]]*"tls"' "$f" 2>/dev/null
-}
-
-xray_file_port_near() {
-  # 粗取：优先同文件第一个 "port": N
-  local f=$1
-  local p
-  p=$(grep -oE '"port"[[:space:]]*:[[:space:]]*[0-9]+' "$f" 2>/dev/null | head -n1 | grep -oE '[0-9]+' || true)
-  [[ -n $p ]] && printf '%s\n' "$p"
-}
-
-# kind: reality | cdn — 语义识别；tag 仅快路径
-xray_has_component() {
-  local kind=$1 f r
-  while IFS= read -r f; do
-    [[ -n $f ]] || continue
-    case $kind in
-      reality)
-        if command -v jq >/dev/null 2>&1; then
-          jq -e '
-            [.inbounds[]? // empty | select(type=="object")]
-            | map(select(
-                (.protocol=="vless" and (.streamSettings.security=="reality"))
-                or (.tag=="vless-reality")
-              )) | length > 0
-          ' "$f" >/dev/null 2>&1 && return 0
-        fi
-        r=$(json_query "$f" "has_reality" 2>/dev/null || true)
-        [[ $r == true ]] && return 0
-        xray_file_has_reality "$f" && return 0
-        ;;
-      cdn)
-        if command -v jq >/dev/null 2>&1; then
-          jq -e '
-            [.inbounds[]? // empty | select(type=="object")]
-            | map(select(
-                (.protocol=="vless"
-                  and (.streamSettings.network=="ws")
-                  and (.streamSettings.security=="tls"))
-                or (.tag=="vless-ws-tls")
-              )) | length > 0
-          ' "$f" >/dev/null 2>&1 && return 0
-        fi
-        r=$(json_query "$f" "has_cdn" 2>/dev/null || true)
-        [[ $r == true ]] && return 0
-        xray_file_has_cdn "$f" && return 0
-        ;;
+# 解析 xray_scan 输出到变量
+xray_scan_load() {
+  local k v
+  HAS_REALITY=0 HAS_CDN=0 PORT_REALITY= PORT_CDN= SCAN_SOURCE=none
+  while IFS= read -r line; do
+    [[ $line == *=* ]] || continue
+    k=${line%%=*}; v=${line#*=}
+    case $k in
+      has_reality) HAS_REALITY=$v ;;
+      has_cdn) HAS_CDN=$v ;;
+      port_reality) PORT_REALITY=$v ;;
+      port_cdn) PORT_CDN=$v ;;
+      source) SCAN_SOURCE=$v ;;
     esac
-  done < <(xray_list_config_files 2>/dev/null || true)
-  return 1
+  done < <(xray_scan)
+}
+
+xray_has_component() {
+  local kind=$1
+  xray_scan_load
+  case $kind in
+    reality) [[ ${HAS_REALITY:-0} == 1 ]] ;;
+    cdn) [[ ${HAS_CDN:-0} == 1 ]] ;;
+    *) return 1 ;;
+  esac
 }
 
 xray_inbound_port() {
-  local kind=$1 f p
-  while IFS= read -r f; do
-    [[ -n $f ]] || continue
-    p=""
-    if command -v jq >/dev/null 2>&1; then
-      case $kind in
-        reality)
-          p=$(jq -r '
-            ([.inbounds[]? // empty | select(type=="object")
-              | select((.protocol=="vless" and .streamSettings.security=="reality")
-                       or .tag=="vless-reality")
-              | .port] | map(select(.!=null)) | .[0] // empty)
-          ' "$f" 2>/dev/null || true)
-          ;;
-        cdn)
-          p=$(jq -r '
-            ([.inbounds[]? // empty | select(type=="object")
-              | select((.protocol=="vless" and .streamSettings.network=="ws"
-                        and .streamSettings.security=="tls")
-                       or .tag=="vless-ws-tls")
-              | .port] | map(select(.!=null)) | .[0] // empty)
-          ' "$f" 2>/dev/null || true)
-          ;;
-      esac
-    else
-      case $kind in
-        reality) p=$(json_query "$f" "reality_port" 2>/dev/null || true) ;;
-        cdn) p=$(json_query "$f" "cdn_port" 2>/dev/null || true) ;;
-      esac
-    fi
-    if ! port_is_valid "$p"; then
-      # bash 回退：文件确认有该组件后再取 port
-      case $kind in
-        reality) xray_file_has_reality "$f" && p=$(xray_file_port_near "$f") ;;
-        cdn) xray_file_has_cdn "$f" && p=$(xray_file_port_near "$f") ;;
-      esac
-    fi
-    if port_is_valid "$p"; then
-      printf '%s\n' "$p"
-      return 0
-    fi
-  done < <(xray_list_config_files 2>/dev/null || true)
+  local kind=$1
+  xray_scan_load
+  case $kind in
+    reality) [[ -n ${PORT_REALITY:-} ]] && printf '%s\n' "$PORT_REALITY" ;;
+    cdn) [[ -n ${PORT_CDN:-} ]] && printf '%s\n' "$PORT_CDN" ;;
+  esac
   return 0
 }
 
-# 兼容旧名：tag 快路径
-xray_has_inbound_tag() {
-  local tag=$1 f
-  while IFS= read -r f; do
-    [[ -n $f ]] || continue
-    if command -v jq >/dev/null 2>&1; then
-      jq -e --arg t "$tag" '
-        ([.inbounds[]? // .[]? | select(type=="object") | select(.tag==$t)] | length) > 0
-      ' "$f" >/dev/null 2>&1 && return 0
-    else
-      grep -qE "\"tag\"[[:space:]]*:[[:space:]]*\"${tag}\"" "$f" 2>/dev/null && return 0
-    fi
-  done < <(xray_list_config_files 2>/dev/null || true)
-  return 1
+xray_list_config_files() {
+  xray_discover
+  if [[ $XRAY_LAYOUT == dir && -n $XRAY_CONF_DIR ]]; then
+    find "$XRAY_CONF_DIR" -type f -name '*.json' 2>/dev/null || true
+  elif [[ -n ${XRAY_CONFIG_FILE:-} && -r $XRAY_CONFIG_FILE ]]; then
+    printf '%s\n' "$XRAY_CONFIG_FILE"
+  elif [[ -r ${XRAY_CONFIG:-} ]]; then
+    printf '%s\n' "$XRAY_CONFIG"
+  fi
 }
 
 hy2_resolve_config_path() {
@@ -731,7 +707,6 @@ hy2_resolve_config_path() {
       fi
     done < <(parse_execstart_config_specs "$exec_line")
   fi
-  # 回退固定路径
   if [[ -r ${HY2_CONFIG:-} ]]; then
     printf '%s\n' "$HY2_CONFIG"
     return 0
@@ -756,7 +731,6 @@ hy2_config_port() {
   sed -nE 's/^[[:space:]]*listen:[[:space:]]*:([0-9]+).*/\1/p' "$cfg" 2>/dev/null | head -n1
 }
 
-# 从 info 文本提取「端口」字段
 info_get_port() {
   local file=$1 line
   [[ -f $file ]] || return 0
@@ -768,7 +742,6 @@ info_get_port() {
   done <"$file"
 }
 
-# 端口：state → info → 真实配置；comp=reality|cdn|hy2
 resolve_component_port() {
   local state_file=$1 port_key=$2 info_file=$3 comp=$4
   local p
@@ -783,7 +756,6 @@ resolve_component_port() {
   if port_is_valid "$p"; then printf '%s\n' "$p"; return 0; fi
 }
 
-# 真实服务配置是否存在：comp=reality|cdn|hy2
 component_has_config() {
   local comp=$1
   case $comp in
@@ -794,8 +766,6 @@ component_has_config() {
   esac
 }
 
-# 统计各节点运行态（按真实配置计节点；xray 上 REALITY/CDN 各算一个）
-# 输出顶栏：● N 个节点运行中 / ○ 代理已停止 / ! N 个节点已停止 / × 配置异常 / ○ 暂无代理
 proxy_status_line() {
   local n_total=0 n_run=0 n_stop=0 n_bad=0
   local st
@@ -816,7 +786,6 @@ proxy_status_line() {
     case $st in running) ((n_run++)) || true ;; stopped) ((n_stop++)) || true ;; *) ((n_bad++)) || true ;; esac
   fi
 
-  # 仅 state 无配置 → 配置异常
   if (( n_total == 0 )); then
     if [[ -f $REALITY_STATE || -f $CDN_STATE || -f $HY2_STATE ]]; then
       printf '%s×%s  配置异常' "$RED" "$R"
@@ -1022,7 +991,11 @@ xray_run_user() {
   printf %s "$xu"
 }
 xray_run_group() { id -gn "$(xray_run_user)" 2>/dev/null || echo nogroup; }
-xray_cert_dir() { printf '%s/certs/%s' "$(dirname "$XRAY_CONFIG")" "$1"; }
+xray_cert_dir() {
+  local base=${XRAY_CONFIG_FILE:-$XRAY_CONFIG}
+  [[ $XRAY_LAYOUT == dir && -n $XRAY_CONF_DIR ]] && base="$XRAY_CONF_DIR/x.json"
+  printf '%s/certs/%s' "$(dirname "$base")" "$1"
+}
 
 fix_cert_permissions() {
   local certdir=$1 cert=$2 key=$3 xg
@@ -1033,14 +1006,28 @@ fix_cert_permissions() {
   [[ -f $key ]] && chown "root:$xg" "$key" && chmod 640 "$key"
 }
 
-harden_xray_config() {
-  local config=${1:-$XRAY_CONFIG} xg
+# 校验配置；VPS_PROXY_SKIP_XRAY_TEST=1 或无 xray 时仅做 JSON 语法检查
+xray_validate_path() {
+  local path=$1 mode=${2:-file}
+  if [[ ${VPS_PROXY_SKIP_XRAY_TEST:-0} == 1 ]] || ! command -v xray >/dev/null 2>&1; then
+    if command -v python3 >/dev/null 2>&1; then
+      python3 -c "import json; json.load(open(r'''$path''',encoding='utf-8'))" 2>/dev/null || return 1
+    fi
+    return 0
+  fi
+  if [[ $mode == dir ]]; then
+    xray run -test -confdir "$path" >/dev/null 2>&1
+  else
+    xray run -test -config "$path" >/dev/null 2>&1
+  fi
+}
+
+xray_apply_perms() {
+  local path=$1 xg
   xg=$(xray_run_group)
-  install -d -o root -g "$xg" -m 750 "$(dirname "$XRAY_CONFIG")"
-  chown "root:$xg" "$config"; chmod 640 "$config"
-  [[ -z ${CDN_CERT:-} || ! -f ${CDN_CERT:-} ]] ||
-    fix_cert_permissions "$(dirname "$CDN_CERT")" "$CDN_CERT" "${CDN_KEY:-}"
-  xray run -test -config "$config" >/dev/null
+  install -d -o root -g "$xg" -m 750 "$(dirname "$path")"
+  chown "root:$xg" "$path" 2>/dev/null || true
+  chmod 640 "$path" 2>/dev/null || true
 }
 
 migrate_cdn_certs_if_needed() {
@@ -1067,62 +1054,166 @@ migrate_cdn_certs_if_needed() {
   log "CDN 证书已迁移: $newdir"
 }
 
+# 生成本管理 inbound JSON 对象（单行/多行均可）
+_xray_reality_inbound_json() {
+  cat <<EOF
+{
+  "tag": "${MANAGED_TAG_REALITY}", "listen": "0.0.0.0", "port": ${REALITY_PORT},
+  "protocol": "vless",
+  "settings": { "clients": [{ "id": "${REALITY_UUID}", "flow": "xtls-rprx-vision", "email": "reality" }], "decryption": "none" },
+  "streamSettings": {
+    "network": "tcp", "security": "reality",
+    "realitySettings": { "show": false, "dest": "${REALITY_TARGET}", "xver": 0, "serverNames": ["${REALITY_SNI}"], "privateKey": "${REALITY_PRIV}", "shortIds": ["${REALITY_SHORT}"] }
+  },
+  "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"] }
+}
+EOF
+}
+
+_xray_cdn_inbound_json() {
+  cat <<EOF
+{
+  "tag": "${MANAGED_TAG_CDN}", "listen": "0.0.0.0", "port": ${CDN_PORT},
+  "protocol": "vless",
+  "settings": { "clients": [{ "id": "${CDN_UUID}", "email": "cdn" }], "decryption": "none" },
+  "streamSettings": {
+    "network": "ws", "security": "tls",
+    "tlsSettings": { "certificates": [{ "certificateFile": "${CDN_CERT}", "keyFile": "${CDN_KEY}" }] },
+    "wsSettings": { "path": "${CDN_PATH}" }
+  },
+  "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"] }
+}
+EOF
+}
+
+# 单文件：结构化增删本管理 tag，保留其余 inbound
+_xray_merge_file() {
+  local dest=$1 want_reality=$2 want_cdn=$3
+  local tmp bak rf cf
+  command -v python3 >/dev/null 2>&1 || fail "写入 Xray 配置需要 python3"
+  [[ -f $dest ]] || printf '%s\n' '{"log":{"loglevel":"warning"},"inbounds":[],"outbounds":[{"protocol":"freedom","tag":"direct"},{"protocol":"blackhole","tag":"block"}]}' >"$dest"
+  bak=$(mktemp "${dest}.bak.XXXXXX")
+  cp -a "$dest" "$bak"
+  tmp=$(mktemp "${dest}.XXXXXX")
+  rf=$(mktemp); cf=$(mktemp)
+  [[ $want_reality == 1 ]] && _xray_reality_inbound_json >"$rf" || : >"$rf"
+  [[ $want_cdn == 1 ]] && _xray_cdn_inbound_json >"$cf" || : >"$cf"
+  if ! WANT_R=$want_reality WANT_C=$want_cdn TAG_R=$MANAGED_TAG_REALITY TAG_C=$MANAGED_TAG_CDN \
+    DEST="$dest" OUT="$tmp" RF="$rf" CF="$cf" python3 - <<'PY'
+import json, os
+path = os.environ["DEST"]
+out = os.environ["OUT"]
+tag_r = os.environ["TAG_R"]
+tag_c = os.environ["TAG_C"]
+want_r = os.environ.get("WANT_R") == "1"
+want_c = os.environ.get("WANT_C") == "1"
+with open(path, encoding="utf-8") as f:
+    cfg = json.load(f)
+if not isinstance(cfg, dict):
+    cfg = {"inbounds": [], "outbounds": []}
+ibs = [ib for ib in (cfg.get("inbounds") or []) if not (isinstance(ib, dict) and ib.get("tag") in (tag_r, tag_c))]
+if want_r:
+    with open(os.environ["RF"], encoding="utf-8") as f:
+        ibs.append(json.load(f))
+if want_c:
+    with open(os.environ["CF"], encoding="utf-8") as f:
+        ibs.append(json.load(f))
+cfg["inbounds"] = ibs
+if "outbounds" not in cfg or not cfg["outbounds"]:
+    cfg["outbounds"] = [
+        {"protocol": "freedom", "tag": "direct"},
+        {"protocol": "blackhole", "tag": "block"},
+    ]
+if "log" not in cfg:
+    cfg["log"] = {"loglevel": "warning"}
+with open(out, "w", encoding="utf-8") as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+PY
+  then
+    rm -f "$tmp" "$rf" "$cf"
+    mv -f "$bak" "$dest"
+    fail "Xray 配置合并失败，已回滚"
+  fi
+  rm -f "$rf" "$cf"
+  if ! xray_validate_path "$tmp" file; then
+    rm -f "$tmp"
+    mv -f "$bak" "$dest"
+    fail "Xray 配置验证失败，已回滚"
+  fi
+  xray_apply_perms "$tmp"
+  mv -f "$tmp" "$dest"
+  rm -f "$bak"
+}
+
+_xray_write_confdir() {
+  local dir=$1 want_reality=$2 want_cdn=$3
+  local fr fc bak_r bak_c
+  install -d -m 755 "$dir"
+  fr="$dir/$MANAGED_FILE_REALITY"
+  fc="$dir/$MANAGED_FILE_CDN"
+  bak_r=""; bak_c=""
+  [[ -f $fr ]] && { bak_r=$(mktemp); cp -a "$fr" "$bak_r"; }
+  [[ -f $fc ]] && { bak_c=$(mktemp); cp -a "$fc" "$bak_c"; }
+
+  rollback_confdir() {
+    [[ -n $bak_r ]] && mv -f "$bak_r" "$fr" || rm -f "$fr"
+    [[ -n $bak_c ]] && mv -f "$bak_c" "$fc" || rm -f "$fc"
+  }
+
+  if [[ $want_reality == 1 ]]; then
+    _xray_reality_inbound_json >"$fr.tmp"
+    # confdir 文件通常是完整 config 片段或仅 inbound 数组——使用含 inbounds 的小文件
+    python3 - <<PY || { rollback_confdir; fail "写入 REALITY confdir 失败"; }
+import json
+ib=json.load(open("$fr.tmp",encoding="utf-8"))
+json.dump({"inbounds":[ib]}, open("$fr","w",encoding="utf-8"), indent=2)
+open("$fr","a",encoding="utf-8").write("\n")
+PY
+    rm -f "$fr.tmp"
+    xray_apply_perms "$fr"
+  else
+    rm -f "$fr"
+  fi
+  if [[ $want_cdn == 1 ]]; then
+    _xray_cdn_inbound_json >"$fc.tmp"
+    python3 - <<PY || { rollback_confdir; fail "写入 CDN confdir 失败"; }
+import json
+ib=json.load(open("$fc.tmp",encoding="utf-8"))
+json.dump({"inbounds":[ib]}, open("$fc","w",encoding="utf-8"), indent=2)
+open("$fc","a",encoding="utf-8").write("\n")
+PY
+    rm -f "$fc.tmp"
+    xray_apply_perms "$fc"
+  else
+    rm -f "$fc"
+  fi
+  if ! xray_validate_path "$dir" dir; then
+    rollback_confdir
+    fail "Xray confdir 验证失败，已回滚"
+  fi
+  rm -f "$bak_r" "$bak_c"
+}
+
+# 写入/更新本管理 inbound；意图以 state 文件为准；保留非本项目配置
 build_xray_config() {
-  local reality="" cdn="" inbounds tmp
+  local want_reality=0 want_cdn=0
+  xray_discover
   load_state_safe "$REALITY_STATE"
   load_state_safe "$CDN_STATE"
   migrate_cdn_certs_if_needed
 
-  if [[ -f $REALITY_STATE ]]; then
-    reality=$(cat <<EOF
-    {
-      "tag": "vless-reality", "listen": "0.0.0.0", "port": ${REALITY_PORT},
-      "protocol": "vless",
-      "settings": { "clients": [{ "id": "${REALITY_UUID}", "flow": "xtls-rprx-vision", "email": "reality" }], "decryption": "none" },
-      "streamSettings": {
-        "network": "tcp", "security": "reality",
-        "realitySettings": { "show": false, "dest": "${REALITY_TARGET}", "xver": 0, "serverNames": ["${REALITY_SNI}"], "privateKey": "${REALITY_PRIV}", "shortIds": ["${REALITY_SHORT}"] }
-      },
-      "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"] }
-    }
-EOF
-)
-  fi
-  if [[ -f $CDN_STATE ]]; then
-    cdn=$(cat <<EOF
-    {
-      "tag": "vless-ws-tls", "listen": "0.0.0.0", "port": ${CDN_PORT},
-      "protocol": "vless",
-      "settings": { "clients": [{ "id": "${CDN_UUID}", "email": "cdn" }], "decryption": "none" },
-      "streamSettings": {
-        "network": "ws", "security": "tls",
-        "tlsSettings": { "certificates": [{ "certificateFile": "${CDN_CERT}", "keyFile": "${CDN_KEY}" }] },
-        "wsSettings": { "path": "${CDN_PATH}" }
-      },
-      "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"] }
-    }
-EOF
-)
-  fi
-  [[ -n $reality || -n $cdn ]] || return 0
-  [[ -z $reality || -z $cdn ]] && inbounds="${reality}${cdn}" || inbounds="${reality},${cdn}"
+  [[ -f $REALITY_STATE ]] && want_reality=1
+  [[ -f $CDN_STATE ]] && want_cdn=1
 
-  install -d -m 755 "$(dirname "$XRAY_CONFIG")"
-  tmp=$(mktemp "$(dirname "$XRAY_CONFIG")/.config.XXXXXX.json")
-  cat >"$tmp" <<EOF
-{
-  "log": { "loglevel": "warning" },
-  "inbounds": [
-${inbounds}
-  ],
-  "outbounds": [
-    { "protocol": "freedom", "tag": "direct" },
-    { "protocol": "blackhole", "tag": "block" }
-  ]
-}
-EOF
-  harden_xray_config "$tmp" || { rm -f "$tmp"; fail "Xray 配置预检失败"; }
-  mv -f "$tmp" "$XRAY_CONFIG"
+  if [[ $XRAY_LAYOUT == dir && -n $XRAY_CONF_DIR ]]; then
+    _xray_write_confdir "$XRAY_CONF_DIR" "$want_reality" "$want_cdn"
+  else
+    local dest=${XRAY_CONFIG_FILE:-$XRAY_CONFIG}
+    install -d -m 755 "$(dirname "$dest")"
+    _xray_merge_file "$dest" "$want_reality" "$want_cdn"
+    XRAY_CONFIG=$dest
+  fi
 }
 
 # ---------- REALITY ----------
@@ -1669,47 +1760,98 @@ show_info() {
 }
 
 uninstall_xray_core() {
+  # 仅当现网已无任何 inbound（含第三方）时才允许 purge
+  xray_discover
+  local dest=${XRAY_CONFIG_FILE:-$XRAY_CONFIG} n=0
+  if [[ -r $dest ]] && command -v python3 >/dev/null 2>&1; then
+    n=$(python3 -c "import json; d=json.load(open(r'''$dest''',encoding='utf-8')); print(len(d.get('inbounds') or []))" 2>/dev/null || echo 1)
+  fi
+  if (( n > 0 )); then
+    fail "无法确认归属或仍有其他 inbound，拒绝删除 Xray 主程序（请手动处理）"
+  fi
   if command -v xray >/dev/null; then
     run_verified_script "$XRAY_INSTALLER_URL" "$XRAY_INSTALLER_SHA256" remove --purge ||
       fail "Xray 卸载器执行失败"
   fi
-  rm -f "$XRAY_CONFIG"
+  rm -f "$dest"
+}
+
+# 安全重启；失败时提示并返回非 0（调用方可回滚配置）
+restart_svc_or_fail() {
+  local unit=$1 name=$2
+  systemctl enable "$unit" >/dev/null 2>&1 || true
+  if ! systemctl restart "$unit"; then
+    hint_restore "$unit" "$name"
+    return 1
+  fi
+  local i
+  for ((i = 1; i <= 8; i++)); do
+    sleep 1
+    systemctl is-active --quiet "$unit" && { ok "$name 运行中"; return 0; }
+  done
+  hint_restore "$unit" "$name"
+  return 1
 }
 
 uninstall_reality() {
   require_root
-  backup_paths reality-rm "$REALITY_STATE" "$XRAY_INFO" "$XRAY_CONFIG"
+  xray_discover
+  local dest=${XRAY_CONFIG_FILE:-$XRAY_CONFIG}
+  backup_paths reality-rm "$REALITY_STATE" "$XRAY_INFO" "$dest"
+  [[ -f $dest ]] && cp -a "$dest" "${dest}.pre-uninstall-reality" || true
   rm -f "$REALITY_STATE" "$XRAY_INFO"
-  if [[ -f $CDN_STATE ]]; then
-    build_xray_config
-    restart_svc xray "Xray"
-    ok "已移除 REALITY，保留 CDN"
+  # 按剩余 state 重建，精确去掉本管理 REALITY inbound，保留 CDN/第三方
+  if ! build_xray_config; then
+    [[ -f ${dest}.pre-uninstall-reality ]] && mv -f "${dest}.pre-uninstall-reality" "$dest"
+    fail "移除 REALITY 配置失败，已回滚"
+  fi
+  if systemctl is-enabled xray >/dev/null 2>&1 || systemctl is-active xray >/dev/null 2>&1; then
+    if ! restart_svc_or_fail xray "Xray"; then
+      [[ -f ${dest}.pre-uninstall-reality ]] && mv -f "${dest}.pre-uninstall-reality" "$dest"
+      systemctl restart xray 2>/dev/null || true
+      fail "Xray 重启失败，已回滚配置"
+    fi
+  fi
+  rm -f "${dest}.pre-uninstall-reality"
+  if [[ -f $CDN_STATE ]] || component_has_config cdn; then
+    ok "已移除 REALITY，保留其他配置"
   else
-    uninstall_xray_core
-    ok "已卸载 Xray / REALITY"
+    ok "已移除 REALITY"
   fi
 }
 
 uninstall_cdn() {
   require_root
+  xray_discover
+  local dest=${XRAY_CONFIG_FILE:-$XRAY_CONFIG}
   local dom certdir="" acme="/root/.acme.sh/acme.sh"
   dom=$(state_get "$CDN_STATE" CDN_DOMAIN)
   if [[ -n $dom ]]; then
     validate_domain "$dom"
     certdir=$(xray_cert_dir "$dom")
   fi
-  backup_paths cdn-rm "$CDN_STATE" "$CDN_INFO" "$XRAY_CONFIG" "$certdir"
+  backup_paths cdn-rm "$CDN_STATE" "$CDN_INFO" "$dest" "$certdir"
+  [[ -f $dest ]] && cp -a "$dest" "${dest}.pre-uninstall-cdn" || true
   [[ -n $dom && -x $acme ]] &&
     "$acme" --remove -d "$dom" --ecc >/dev/null 2>&1 || true
   rm -f "$CDN_STATE" "$CDN_INFO"
   [[ -n $certdir ]] && rm -rf "$certdir"
-  if [[ -f $REALITY_STATE ]]; then
-    build_xray_config
-    restart_svc xray "Xray"
-    ok "已移除 CDN，保留 REALITY"
+  if ! build_xray_config; then
+    [[ -f ${dest}.pre-uninstall-cdn ]] && mv -f "${dest}.pre-uninstall-cdn" "$dest"
+    fail "移除 CDN 配置失败，已回滚"
+  fi
+  if systemctl is-enabled xray >/dev/null 2>&1 || systemctl is-active xray >/dev/null 2>&1; then
+    if ! restart_svc_or_fail xray "Xray"; then
+      [[ -f ${dest}.pre-uninstall-cdn ]] && mv -f "${dest}.pre-uninstall-cdn" "$dest"
+      systemctl restart xray 2>/dev/null || true
+      fail "Xray 重启失败，已回滚配置"
+    fi
+  fi
+  rm -f "${dest}.pre-uninstall-cdn"
+  if [[ -f $REALITY_STATE ]] || component_has_config reality; then
+    ok "已移除 CDN，保留其他配置"
   else
-    uninstall_xray_core
-    ok "已卸载 CDN"
+    ok "已移除 CDN"
   fi
 }
 
@@ -1729,6 +1871,7 @@ uninstall_hy2() {
 }
 
 # 安全清理旧版 v2 快捷命令（仅本项目文件；全程只提示一次）
+# 计划：v1.6+ 移除本函数与 _LEGACY_V2_* 变量
 cleanup_legacy_v2() {
   (( _LEGACY_V2_CLEANED )) && return 0
   _LEGACY_V2_CLEANED=1
