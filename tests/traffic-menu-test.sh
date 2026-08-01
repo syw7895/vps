@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# traffic 扁平主菜单显示与 case 映射 / ui_item set -e 回归（mock，不触碰真实 tc）
+# traffic 动态主菜单 / action 映射 / set -e 回归
 set -Eeuo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -51,22 +51,12 @@ assert() {
 # shellcheck source=../traffic.sh
 source "$TRAFFIC"
 
-# 1) set -e：连续打印全部菜单项（含 danger/muted）不得退出
 set +e
 ui_out=$(
   set -Eeuo pipefail
-  ui_item 1 "安装流量监控"
-  ui_item 2 "设置每月流量额度"
-  ui_item 3 "查看状态"
-  ui_item 4 "修改触发比例"
-  ui_item 5 "修改限速速度"
-  ui_item 6 "立即检查"
-  ui_item 7 "解除当前限速"
-  ui_item 8 "暂停自动检查"
-  ui_item 9 "恢复自动检查"
-  ui_item 10 "更新流量模块"
-  ui_item 11 "卸载流量模块" danger
-  ui_item 0 "返回" muted
+  ui_item 1 "a"
+  ui_item 2 "b" danger
+  ui_item 0 "c" muted
   printf 'SURVIVED\n'
 ) 2>&1
 ui_rc=$?
@@ -74,12 +64,9 @@ set -e
 assert "ui_item multi exit 0" '[[ $ui_rc -eq 0 ]]'
 assert "ui_item multi survived" '[[ "$ui_out" == *SURVIVED* ]]'
 
-# stub 业务，只验证菜单路由
 cmd_install() { echo "__CALL_cmd_install__"; }
-cmd_set_quota() { echo "__CALL_cmd_set_quota__"; }
 cmd_status() { echo "__CALL_cmd_status__"; }
-cmd_set_threshold() { echo "__CALL_cmd_set_threshold__"; }
-cmd_set_rate() { echo "__CALL_cmd_set_rate__"; }
+cmd_settings() { echo "__CALL_cmd_settings__"; }
 cmd_check_now() { echo "__CALL_cmd_check_now__"; }
 cmd_remove_limit() { echo "__CALL_cmd_remove_limit__"; }
 cmd_pause() { echo "__CALL_cmd_pause__"; }
@@ -87,78 +74,129 @@ cmd_resume() { echo "__CALL_cmd_resume__"; }
 cmd_update_module() { echo "__CALL_cmd_update_module__"; }
 cmd_uninstall() { echo "__CALL_cmd_uninstall__"; }
 read_tty() {
-  local prompt="" __var
+  local __var
   while [[ $# -gt 0 ]]; do
-    case $1 in
-      -p) prompt=$2; shift 2 ;;
-      -r) shift ;;
-      *) break ;;
-    esac
+    case $1 in -p) shift 2 ;; -r) shift ;; *) break ;; esac
   done
   __var=${1:-REPLY}
   # shellcheck disable=SC2034
   read -r "$__var" || return 1
 }
 
-# 2) 完整扁平菜单 1–11 与 0
+# 未安装
+rm -f "$TMP/var/.installed"
 out=$(printf '0\n' | main_menu 2>&1) || true
-assert "menu has item1" '[[ "$out" == *"安装流量监控"* ]]'
-assert "menu has item2" '[[ "$out" == *"设置每月流量额度"* ]]'
-assert "menu has item3" '[[ "$out" == *"查看状态"* ]]'
-assert "menu has item4" '[[ "$out" == *"修改触发比例"* ]]'
-assert "menu has item5" '[[ "$out" == *"修改限速速度"* ]]'
-assert "menu has item6" '[[ "$out" == *"立即检查"* ]]'
-assert "menu has item7" '[[ "$out" == *"解除当前限速"* ]]'
-assert "menu has item8" '[[ "$out" == *"暂停自动检查"* ]]'
-assert "menu has item9" '[[ "$out" == *"恢复自动检查"* ]]'
-assert "menu has item10" '[[ "$out" == *"更新流量模块"* ]]'
-assert "menu has item11" '[[ "$out" == *"卸载流量模块"* ]]'
-assert "menu has item0" '[[ "$out" == *"返回"* ]]'
-assert "menu shows all numbers" '[[ "$out" == *" 1 "* && "$out" == *" 11 "* && "$out" == *" 0 "* ]]'
-assert "prompt 0-11" '[[ "$out" == *"请选择 [0-11]"* ]]'
-assert "no group 监控" '! grep -qE "^[[:space:]]*监控[[:space:]]*$" <<<"$out"'
-assert "no group 策略" '! grep -qE "^[[:space:]]*策略[[:space:]]*$" <<<"$out"'
-assert "no group 运维" '! grep -qE "^[[:space:]]*运维[[:space:]]*$" <<<"$out"'
-assert "no group 系统" '! grep -qE "^[[:space:]]*系统[[:space:]]*$" <<<"$out"'
-has_box=0
-for ch in ╭ ╮ ╰ ╯ │ ├ ┤ ─ ▸; do
-  [[ "$out" == *"$ch"* ]] && has_box=1 && break
-done
-assert "no box chars" '[[ $has_box -eq 0 ]]'
+assert "uninst has install" '[[ "$out" == *"安装流量监控"* ]]'
+assert "uninst status 尚未安装" '[[ "$out" == *"尚未安装"* ]]'
+assert "uninst no settings" '[[ "$out" != *"修改流量设置"* ]]'
+assert "uninst prompt 0-1" '[[ "$out" == *"请选择 [0-1]"* ]]'
+out1=$(printf '1\n\n0\n' | main_menu 2>&1) || true
+assert "uninst case install" '[[ "$out1" == *"__CALL_cmd_install__"* ]]'
 
-# 3) 输入 1–11 进入对应操作；0 干净返回
-for n in 1 2 3 4 5 6 7 8 9 10 11; do
-  case $n in
-    1) expect=__CALL_cmd_install__ ;;
-    2) expect=__CALL_cmd_set_quota__ ;;
-    3) expect=__CALL_cmd_status__ ;;
-    4) expect=__CALL_cmd_set_threshold__ ;;
-    5) expect=__CALL_cmd_set_rate__ ;;
-    6) expect=__CALL_cmd_check_now__ ;;
-    7) expect=__CALL_cmd_remove_limit__ ;;
-    8) expect=__CALL_cmd_pause__ ;;
-    9) expect=__CALL_cmd_resume__ ;;
-    10) expect=__CALL_cmd_update_module__ ;;
-    11) expect=__CALL_cmd_uninstall__ ;;
-  esac
-  if [[ $n == 11 ]]; then
-    mout=$(printf '%s\n' "$n" | main_menu 2>&1) || true
-  else
-    mout=$(printf '%s\n\n0\n' "$n" | main_menu 2>&1) || true
-  fi
-  assert "case $n routes" '[[ "$mout" == *"$expect"* ]]'
-done
+# 已安装
+: >"$TMP/var/.installed"
+out=$(printf '0\n' | main_menu 2>&1) || true
+assert "inst no install item" '[[ "$out" != *"安装流量监控"* ]]'
+assert "inst has core items" '[[ "$out" == *"查看状态"* && "$out" == *"修改流量设置"* && "$out" == *"立即检查"* && "$out" == *"更多操作"* ]]'
+assert "inst has pause only" '[[ "$out" == *"暂停自动检查"* && "$out" != *"恢复自动检查"* ]]'
+assert "inst no remove on main" '[[ "$out" != *"解除当前限速"* ]]'
+assert "inst no groups" '[[ "$out" != *"运维"* && "$out" != *"策略"* && "$out" != *"系统"* ]]'
+assert "inst prompt" '[[ "$out" == *"请选择 [0-5]"* ]]'
+
+out1=$(printf '1\n\n0\n' | main_menu 2>&1) || true
+assert "case1 status" '[[ "$out1" == *"__CALL_cmd_status__"* ]]'
+out2=$(printf '2\n\n0\n' | main_menu 2>&1) || true
+assert "case2 settings" '[[ "$out2" == *"__CALL_cmd_settings__"* ]]'
+out3=$(printf '3\n\n0\n' | main_menu 2>&1) || true
+assert "case3 check" '[[ "$out3" == *"__CALL_cmd_check_now__"* ]]'
+out4=$(printf '4\n\n0\n' | main_menu 2>&1) || true
+assert "case4 pause" '[[ "$out4" == *"__CALL_cmd_pause__"* ]]'
+
+# 限速：解除在更多第 1 项；主菜单仍是暂停
+cat >"$TMP/var/state" <<EOF
+LIMIT_ACTIVE=true
+LIMIT_IFACE=eth0
+LIMIT_HANDLE=1abc:
+LAST_REASON=
+LAST_CHECK_TS=
+LAST_TX_BYTES=
+LAST_MONTH=
+LAST_RATIO=
+OWNED_BY_TOOL=true
+EOF
+printf 'qdisc tbf 1abc: root\n' >"$TMP/mock_tc/eth0"
+out=$(printf '0\n' | main_menu 2>&1) || true
+assert "limit no remove on main" '[[ "$out" != *"解除当前限速"* ]]'
+assert "limit still pause on main" '[[ "$out" == *"暂停自动检查"* ]]'
+outrm=$(printf '5\n1\n\n0\n0\n' | main_menu 2>&1) || true
+assert "more remove when limited" '[[ "$outrm" == *"__CALL_cmd_remove_limit__"* ]]'
+
+# 更多 → 卸载（非限速时：1 更新 2 卸载）
+cat >"$TMP/var/state" <<EOF
+LIMIT_ACTIVE=false
+LIMIT_IFACE=
+LIMIT_HANDLE=
+LAST_REASON=
+LAST_CHECK_TS=
+LAST_TX_BYTES=
+LAST_MONTH=
+LAST_RATIO=
+OWNED_BY_TOOL=false
+EOF
+: >"$TMP/mock_tc/eth0"
+outu=$(printf '5\n2\n' | main_menu 2>&1) || true
+assert "more uninstall" '[[ "$outu" == *"__CALL_cmd_uninstall__"* ]]'
+outup=$(printf '5\n1\n\n0\n0\n' | main_menu 2>&1) || true
+assert "more update" '[[ "$outup" == *"__CALL_cmd_update_module__"* ]]'
+
+# 暂停状态：第 4 项恢复
+cat >"$TMP/etc/config" <<EOF
+MONTHLY_QUOTA_GB=100
+THRESHOLD_PERCENT=90
+LIMIT_RATE=1mbit
+IFACE=eth0
+PAUSED=true
+EOF
+out=$(printf '0\n' | main_menu 2>&1) || true
+assert "paused shows resume" '[[ "$out" == *"恢复自动检查"* && "$out" != *"暂停自动检查"* ]]'
+out4=$(printf '4\n\n0\n' | main_menu 2>&1) || true
+assert "case4 resume" '[[ "$out4" == *"__CALL_cmd_resume__"* ]]'
 
 out0=$(printf '0\n' | main_menu 2>&1) || true
-assert "case 0 no cmd call" '[[ "$out0" != *__CALL_* ]]'
-
-# 4) 空输入：与 0 一致返回，不异常退出
+assert "case0 clean" '[[ "$out0" != *__CALL_* ]]'
 set +e
 out_empty=$(printf '\n' | main_menu 2>&1)
 rc_empty=$?
 set -e
-assert "empty input exit 0" '[[ $rc_empty -eq 0 ]]'
-assert "empty input no cmd call" '[[ "$out_empty" != *__CALL_* ]]'
+assert "empty exit 0" '[[ $rc_empty -eq 0 ]]'
+
+# 设置合并保存（重新 source 拿真实 cmd_settings）
+# shellcheck source=../traffic.sh
+source "$TRAFFIC"
+require_root() { return 0; }
+read_tty() {
+  local __var
+  while [[ $# -gt 0 ]]; do
+    case $1 in -p) shift 2 ;; -r) shift ;; *) break ;; esac
+  done
+  __var=${1:-REPLY}
+  # shellcheck disable=SC2034
+  read -r "$__var" || return 1
+}
+cat >"$TMP/etc/config" <<EOF
+MONTHLY_QUOTA_GB=100
+THRESHOLD_PERCENT=90
+LIMIT_RATE=1mbit
+IFACE=eth0
+PAUSED=false
+EOF
+# 空=保持 空=保持 2mbit Y
+printf '\n\n2mbit\nY\n' | cmd_settings >/dev/null
+# shellcheck disable=SC1091
+source "$TMP/etc/config"
+assert "settings keep quota" '[[ "$MONTHLY_QUOTA_GB" == "100" ]]'
+assert "settings keep thr" '[[ "$THRESHOLD_PERCENT" == "90" ]]'
+assert "settings rate 2mbit" '[[ "$LIMIT_RATE" == "2mbit" ]]'
 
 echo ""
 echo "PASS=$pass FAIL=$fail"
