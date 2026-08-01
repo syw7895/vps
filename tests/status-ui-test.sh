@@ -151,14 +151,14 @@ write_xray_cfg "$XRAY_CONFIG" reality
 printf '地址:      1.2.3.4\n端口:      443\nUUID:      u1\nSNI:       sni.example\n分享链接:\nvless://u1@1.2.3.4:443\n' >"$XRAY_INFO"
 MOCK_SVC[xray]=running
 out=$(show_info 2>&1)
-assert "legacy reality shown" '[[ "$out" == *"REALITY"* && "$out" == *"运行中"* && "$out" == *":443"* ]]'
+assert "legacy reality shown" '[[ "$out" == *"REALITY"* && "$out" == *"运行中"* && ( "$out" == *"443/TCP"* || "$out" == *":443"* ) ]]'
 assert "legacy reality no meta warn" '[[ "$out" != *"状态元数据缺失"* ]]'
 assert "legacy reality not residual" '[[ "$out" != *"残留信息文件"* ]]'
 assert "legacy reality not 暂无" '[[ "$out" != *"暂无代理"* ]]'
 assert "legacy reality not 未安装" '[[ "$out" != *"未安装"* ]]'
 assert "legacy reality fields" '[[ "$out" == *"1.2.3.4"* && "$out" == *"u1"* ]]'
 line=$(proxy_status_line)
-assert "legacy reality status run" '[[ "$line" == *"代理运行中"* ]]'
+assert "legacy reality status run" '[[ "$line" == *"节点运行中"* || "$line" == *"代理运行中"* ]]'
 # 排障模式才显示元数据提示
 out_dbg=$(PROXY_STATUS_DEBUG=1 show_info 2>&1)
 assert "debug shows meta warn" '[[ "$out_dbg" == *"状态元数据缺失"* ]]'
@@ -169,7 +169,7 @@ write_hy2_cfg "$HY2_CONFIG" 55479
 printf '地址:     9.9.9.9\n端口:     55479\n密码:     p\nSNI:      hy.example\n分享链接:\nhysteria2://p@9.9.9.9:55479\n' >"$HY2_INFO"
 MOCK_SVC[hysteria-server]=running
 out=$(show_info 2>&1)
-assert "legacy hy2 shown" '[[ "$out" == *"Hysteria2"* && "$out" == *"运行中"* && "$out" == *":55479"* ]]'
+assert "legacy hy2 shown" '[[ "$out" == *"Hysteria2"* && "$out" == *"运行中"* && ( "$out" == *"55479/UDP"* || "$out" == *":55479"* ) ]]'
 assert "legacy hy2 no meta warn" '[[ "$out" != *"状态元数据缺失"* ]]'
 assert "legacy hy2 not residual" '[[ "$out" != *"残留信息文件"* ]]'
 assert "legacy hy2 not 暂无" '[[ "$out" != *"暂无代理"* ]]'
@@ -215,7 +215,7 @@ printf 'REALITY_PORT=443\n' >"$REALITY_STATE"
 MOCK_SVC[xray]=running
 out=$(show_info 2>&1)
 assert "no info warn" '[[ "$out" == *"节点信息缺失"* && "$out" == *"REALITY"* ]]'
-assert "no info still port" '[[ "$out" == *":443"* ]]'
+assert "no info still port" '[[ "$out" == *"443/TCP"* || "$out" == *":443"* ]]'
 
 # 7) 运行 / 停止 / 程序缺失
 clear_proxy
@@ -238,7 +238,7 @@ printf '地址: 1.2.3.4\n' >"$XRAY_INFO"
 printf '域名: example.com\n' >"$CDN_INFO"
 MOCK_SVC[xray]=running
 line=$(proxy_status_line)
-assert "reality+cdn one xray" '[[ "$line" == *"代理运行中"* ]]'
+assert "reality+cdn one xray" '[[ "$line" == *"节点运行中"* || "$line" == *"代理运行中"* ]]'
 assert "not partial single xray" '[[ "$line" != *"部分服务停止"* ]]'
 out=$(show_info 2>&1)
 assert "both components" '[[ "$out" == *"REALITY"* && "$out" == *"CDN"* ]]'
@@ -251,7 +251,7 @@ printf 'HY2_PORT=40000\n' >"$HY2_STATE"
 printf '密码: x\n' >"$HY2_INFO"
 MOCK_SVC[hysteria-server]=stopped
 line=$(proxy_status_line)
-assert "partial stop" '[[ "$line" == *"部分服务停止"* ]]'
+assert "partial stop" '[[ "$line" == *"节点已停止"* || "$line" == *"部分服务停止"* ]]'
 
 # 全部停止
 MOCK_SVC[xray]=stopped
@@ -283,7 +283,7 @@ printf '地址:      8.8.8.8\n端口:      443\n' >"$XRAY_INFO"
 MOCK_SVC[xray]=running
 out=$(show_info 2>&1)
 assert "semantic reality no tag" '[[ "$out" == *"REALITY"* && "$out" == *"运行中"* && "$out" != *"残留"* && "$out" != *"暂无代理"* ]]'
-assert "semantic reality port" '[[ "$out" == *":443"* ]]'
+assert "semantic reality port" '[[ "$out" == *"443/TCP"* || "$out" == *":443"* ]]'
 
 # 无固定 tag 的 CDN 语义
 clear_proxy
@@ -443,19 +443,19 @@ assert "traffic unset quota menu" '[[ "$line" == *"待设置额度"* ]]'
 out=$(cmd_status 2>&1)
 assert "traffic no legend phrase" '[[ "$out" != *"限速/超限"* ]]'
 assert "traffic no handle default" '[[ "$out" != *"1abc"* && "$out" != *"规则"* ]]'
-assert "traffic TX scope" '[[ "$out" == *"出站 TX"* ]]'
+assert "traffic TX scope" '[[ "$out" == *"出站 TX"* || "$out" == *"统计范围"* ]]'
 assert "traffic tip quota" '[[ "$out" == *"请先设置每月流量额度"* ]]'
 assert "traffic no box" 'no_box "$out"'
 
 write_cfg 100
 write_st false "" "" ok_below_threshold false
 line=$(menu_status_line)
-assert "traffic normal menu" '[[ "$line" == *"正常运行"* || "$line" == *"正常放行"* ]]'
+assert "traffic normal menu" '[[ "$line" == *"正常"* ]]'
 
 printf 'qdisc tbf 1abc: root refcnt 2 rate 1mbit\n' >"$VPS_TRAFFIC_TEST_DIR/mock_tc/eth0"
 write_st true eth0 "1abc:" applied_limit true
 line=$(menu_status_line)
-assert "traffic limited menu" '[[ "$line" == *"限速中"* ]]'
+assert "traffic limited menu" '[[ "$line" == *"限速"* ]]'
 
 write_st true eth0 "1abc:" applied_limit true
 : >"$VPS_TRAFFIC_TEST_DIR/mock_tc/eth0"

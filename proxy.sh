@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
-VERSION="1.4.6"
+VERSION="1.5.0"
 CONFIG_DIR="/root/proxy-info"
 BACKUP_DIR="${CONFIG_DIR}/backups"
 BACKUP_KEEP="${BACKUP_KEEP:-15}"
@@ -49,27 +49,26 @@ else
   R='' B='' D='' RED='' GRN='' YEL='' CYN=''
 fi
 
-log()  { printf '%s[%s]%s %s\n' "$CYN" "$APP_NAME" "$R" "$*"; }
-ok()   { printf '%s[%s]%s %s\n' "$GRN" "OK" "$R" "$*"; }
-warn() { printf '%s[%s]%s %s\n' "$YEL" "!" "$R" "$*"; }
-fail() { printf '%s[%s]%s %s\n' "$RED" "ERR" "$R" "$*" >&2; exit 1; }
+log()  { printf '  %s!%s  %s\n' "$D" "$R" "$*"; }
+ok()   { printf '  %s●%s  %s\n' "$GRN" "$R" "$*"; }
+warn() { printf '  %s!%s  %s\n' "$YEL" "$R" "$*"; }
+fail() { printf '  %s×%s  %s\n' "$RED" "$R" "$*" >&2; exit 1; }
 # UI（扁平，无边框）
 ui_head() { printf '\n  %s%s%s  %s%s%s\n' "$B$CYN" "$1" "$R" "$D" "$2" "$R"; }
 ui_status() { printf '  %s\n' "$1"; }
 ui_gap() { printf '\n'; }
-# $1 序号 $2 文案 $3 可选语义: danger|muted
+# $1 序号 $2 文案 $3 可选语义: danger|muted — 序号后带 .
 ui_item() {
   local num=$1 text=$2 style=${3:-} nc=$CYN tc=
   case $style in
     danger) nc=$RED; tc=$RED ;;
     muted)  nc=$D; tc=$D ;;
   esac
-  printf '  %s%2s%s  %s%s%s\n' "$nc" "$num" "$R" "$tc" "$text" "$R"
+  printf '  %s%2s.%s  %s%s%s\n' "$nc" "$num" "$R" "$tc" "$text" "$R"
 }
 ui_prompt() {
-  # 提示写到 stderr，避免 $(ui_prompt) 把提示混入返回值
-  local c
-  printf '  %s请选择 [0-3] › %s' "$CYN" "$R" >&2
+  local c max=${1:-3}
+  printf '  请选择 [0-%s]: ' "$max" >&2
   read -r c || return 1
   printf '%s' "$c"
 }
@@ -795,49 +794,46 @@ component_has_config() {
   esac
 }
 
-# 菜单顶栏：真实配置证明存在；systemd 只表示运行态
+# 统计各节点运行态（按真实配置计节点；xray 上 REALITY/CDN 各算一个）
+# 输出顶栏：● N 个节点运行中 / ○ 代理已停止 / ! N 个节点已停止 / × 配置异常 / ○ 暂无代理
 proxy_status_line() {
-  local any=0 run=0 stop=0 bad=0
+  local n_total=0 n_run=0 n_stop=0 n_bad=0
   local st
 
-  if component_has_config reality || component_has_config cdn; then
-    any=1
+  if component_has_config reality; then
+    ((n_total++)) || true
     st=$(svc_state xray xray)
-    case $st in
-      running) run=1 ;;
-      stopped) stop=1 ;;
-      *) bad=1 ;;
-    esac
-  elif [[ -f $REALITY_STATE || -f $CDN_STATE ]]; then
-    any=1
-    bad=1
+    case $st in running) ((n_run++)) || true ;; stopped) ((n_stop++)) || true ;; *) ((n_bad++)) || true ;; esac
   fi
-
+  if component_has_config cdn; then
+    ((n_total++)) || true
+    st=$(svc_state xray xray)
+    case $st in running) ((n_run++)) || true ;; stopped) ((n_stop++)) || true ;; *) ((n_bad++)) || true ;; esac
+  fi
   if component_has_config hy2; then
-    any=1
+    ((n_total++)) || true
     st=$(svc_state hysteria-server hysteria)
-    case $st in
-      running) run=1 ;;
-      stopped) stop=1 ;;
-      *) bad=1 ;;
-    esac
-  elif [[ -f $HY2_STATE ]]; then
-    any=1
-    bad=1
+    case $st in running) ((n_run++)) || true ;; stopped) ((n_stop++)) || true ;; *) ((n_bad++)) || true ;; esac
   fi
 
-  if (( any == 0 )); then
-    printf '%s○%s  暂无代理' "$D" "$R"
-  elif (( bad == 1 && run == 0 )); then
+  # 仅 state 无配置 → 配置异常
+  if (( n_total == 0 )); then
+    if [[ -f $REALITY_STATE || -f $CDN_STATE || -f $HY2_STATE ]]; then
+      printf '%s×%s  配置异常' "$RED" "$R"
+    else
+      printf '%s○%s  暂无代理' "$D" "$R"
+    fi
+    return 0
+  fi
+
+  if (( n_bad > 0 && n_run == 0 )); then
     printf '%s×%s  配置异常' "$RED" "$R"
-  elif (( bad == 1 && run == 1 )); then
-    printf '%s!%s  部分服务停止' "$YEL" "$R"
-  elif (( run == 1 && stop == 0 && bad == 0 )); then
-    printf '%s●%s  代理运行中' "$GRN" "$R"
-  elif (( run == 1 )); then
-    printf '%s!%s  部分服务停止' "$YEL" "$R"
-  else
+  elif (( n_run == n_total )); then
+    printf '%s●%s  %s 个节点运行中' "$GRN" "$R" "$n_run"
+  elif (( n_run == 0 )); then
     printf '%s○%s  代理已停止' "$YEL" "$R"
+  else
+    printf '%s!%s  %s 个节点已停止' "$YEL" "$R" "$n_stop"
   fi
 }
 
@@ -864,14 +860,36 @@ save_info() {
   chmod 600 "$file"
 }
 
-# 打印 info 文件中的连接字段（跳过纯标题行，无分隔线）
+# 字段名本地化；跳过端口（标题已含）
+info_label_zh() {
+  case $1 in
+    地址|Address) echo "地址" ;;
+    端口|Port) echo "" ;; # 跳过
+    UUID|uuid) echo "UUID" ;;
+    Flow|流控) echo "流控" ;;
+    SNI|sni) echo "SNI" ;;
+    目标|Target|dest) echo "目标" ;;
+    PublicKey|公钥|pbk) echo "公钥" ;;
+    ShortId|短\ ID|短ID|sid) echo "短 ID" ;;
+    域名|Domain) echo "域名" ;;
+    密码|Password) echo "密码" ;;
+    证书指纹|指纹) echo "证书指纹" ;;
+    协议|Protocol) echo "" ;; # 标题已含协议/端口
+    传输|TLS|Path|Host) echo "$1" ;;
+    分享链接) echo "" ;; # 单独成块
+    *) echo "$1" ;;
+  esac
+}
+
+# 打印 info 连接字段；分享链接单独成块；不重复端口
 print_info_fields() {
-  local file=$1 line k v
+  local file=$1 line k v label share=0
+  local -a links=()
   [[ -f $file ]] || return 0
   while IFS= read -r line || [[ -n $line ]]; do
     [[ -z ${line//[[:space:]]/} ]] && continue
     if [[ $line == *://* ]]; then
-      printf '  %s\n' "$line"
+      links+=("$line")
       continue
     fi
     if [[ $line != *:* ]]; then
@@ -881,12 +899,24 @@ print_info_fields() {
     v=${line#*:}
     v=${v#"${v%%[![:space:]]*}"}
     k=${k%"${k##*[![:space:]]}"}
-    if [[ -z $v ]]; then
-      printf '  %s%-10s%s\n' "$D" "$k" "$R"
-    else
-      printf '  %s%-10s%s %s\n' "$D" "$k" "$R" "$v"
+    # 跳过纯「分享链接:」标题行
+    if [[ $k == 分享链接 || $k == 分享 ]]; then
+      continue
     fi
+    label=$(info_label_zh "$k")
+    [[ -n $label ]] || continue
+    if [[ -z $v ]]; then
+      continue
+    fi
+    printf '  %s%-8s%s %s\n' "$D" "$label" "$R" "$v"
   done <"$file"
+  if ((${#links[@]})); then
+    printf '\n  %s分享链接%s\n' "$D" "$R"
+    local L
+    for L in "${links[@]}"; do
+      printf '  %s\n' "$L"
+    done
+  fi
 }
 
 # 安装完成后展示节点字段
@@ -952,8 +982,13 @@ show_component() {
     *)       sc=$RED; stxt="× 异常" ;;
   esac
 
+  # 标题：名称 + 状态 + 端口/协议（不重复打印端口字段）
+  local proto_tag="TCP"
+  [[ $comp == hy2 ]] && proto_tag="UDP"
   printf '\n  %s%s%s  %s%s%s' "$B" "$name" "$R" "$sc" "$stxt" "$R"
-  [[ -n $port ]] && printf '  %s:%s%s' "$D" "$port" "$R"
+  if [[ -n $port ]]; then
+    printf '  %s%s/%s%s' "$D" "$port" "$proto_tag" "$R"
+  fi
   printf '\n'
 
   if (( debug && !has_state )); then
@@ -963,7 +998,6 @@ show_component() {
   if (( has_info )); then
     print_info_fields "$info_file"
   else
-    # 正常用户可见：连接详情不可用；非内部 state 概念
     printf '  %s!%s  节点信息缺失\n' "$YEL" "$R"
   fi
   return 0
@@ -1751,12 +1785,12 @@ pick_sni() {
   printf '\n  %s%s%s\n' "$B" "$title" "$R"
   ui_gap
   if [[ -n $default_sni ]]; then
-    printf '  %s0%s  保持当前: %s（默认）\n' "$CYN" "$R" "$default_sni"
+    ui_item 0 "保持当前: $default_sni（默认）"
   else
-    printf '  %s0%s  随机（默认）\n' "$CYN" "$R"
+    ui_item 0 "随机（默认）"
   fi
   for ((i = 0; i < n; i++)); do
-    printf '  %s%d%s  %s\n' "$CYN" "$((i + 1))" "$R" "${SNI_PRESETS[i]}"
+    ui_item "$((i + 1))" "${SNI_PRESETS[i]}"
   done
   ui_gap
   read -r -p "  请选择 [0]: " c
@@ -1779,17 +1813,26 @@ print_banner() {
   ui_gap
 }
 
+confirm_yes() {
+  # 默认拒绝：仅 y/Y 通过
+  local prompt=$1 ans
+  read -r -p "  ${prompt}[y/N]: " ans || return 1
+  [[ $ans == y || $ans == Y ]]
+}
+
 menu_install() {
   while true; do
-    print_banner
-    ui_item 1 "Xray VLESS + REALITY"
-    ui_item 2 "Hysteria2"
-    ui_item 3 "VLESS + WS + TLS（CF）"
+    clear 2>/dev/null || true
+    ui_head "安装代理" ""
+    ui_gap
+    ui_item 1 "安装 / 更新 REALITY"
+    ui_item 2 "安装 / 更新 Hysteria2"
+    ui_item 3 "安装 / 更新 CDN"
     ui_gap
     ui_item 0 "返回" muted
     ui_gap
     local c
-    printf '  %s请选择 [0-3] › %s' "$CYN" "$R"
+    printf '  请选择 [0-3]: '
     read -r c || { warn "读取输入失败"; return 1; }
     c=${c//[[:space:]]/}
     case $c in
@@ -1834,24 +1877,66 @@ menu_install() {
 
 menu_uninstall() {
   while true; do
-    print_banner
-    ui_item 1 "卸载 REALITY" danger
-    ui_item 2 "卸载 CDN" danger
-    ui_item 3 "卸载 Hysteria2" danger
+    local actions=() labels=() i n c act
+    actions=()
+    labels=()
+    if component_has_config reality || [[ -f $REALITY_STATE ]]; then
+      actions+=(reality)
+      labels+=("卸载 REALITY")
+    fi
+    if component_has_config cdn || [[ -f $CDN_STATE ]]; then
+      actions+=(cdn)
+      labels+=("卸载 CDN")
+    fi
+    if component_has_config hy2 || [[ -f $HY2_STATE ]]; then
+      actions+=(hy2)
+      labels+=("卸载 Hysteria2")
+    fi
+    clear 2>/dev/null || true
+    ui_head "卸载代理" ""
+    ui_gap
+    n=${#actions[@]}
+    if (( n == 0 )); then
+      ui_status "${D}○${R}  暂无可卸载的节点"
+      ui_gap
+      ui_item 0 "返回" muted
+      ui_gap
+      printf '  请选择 [0-0]: '
+      read -r c || return 1
+      return 0
+    fi
+    for ((i = 0; i < n; i++)); do
+      ui_item "$((i + 1))" "${labels[i]}" danger
+    done
     ui_gap
     ui_item 0 "返回" muted
     ui_gap
-    local c
-    printf '  %s请选择 [0-3] › %s' "$CYN" "$R"
+    printf '  请选择 [0-%s]: ' "$n"
     read -r c || { warn "读取输入失败"; return 1; }
     c=${c//[[:space:]]/}
-    case $c in
-      1) uninstall_reality; pause ;;
-      2) uninstall_cdn; pause ;;
-      3) uninstall_hy2; pause ;;
-      0|"") return ;;
-      *) warn "无效选项"; sleep 1 ;;
+    if [[ $c == 0 || -z $c ]]; then
+      return 0
+    fi
+    if ! [[ $c =~ ^[0-9]+$ ]] || (( c < 1 || c > n )); then
+      warn "无效选项"
+      continue
+    fi
+    act=${actions[c - 1]}
+    case $act in
+      reality)
+        confirm_yes "确定卸载 REALITY？" || { warn "已取消"; continue; }
+        uninstall_reality
+        ;;
+      cdn)
+        confirm_yes "确定卸载 CDN？" || { warn "已取消"; continue; }
+        uninstall_cdn
+        ;;
+      hy2)
+        confirm_yes "确定卸载 Hysteria2？" || { warn "已取消"; continue; }
+        uninstall_hy2
+        ;;
     esac
+    pause
   done
 }
 
@@ -1865,7 +1950,7 @@ main_menu() {
     ui_item 0 "返回" muted
     ui_gap
     local c
-    c=$(ui_prompt) || {
+    c=$(ui_prompt 3) || {
       warn "读取输入失败"
       return 1
     }
