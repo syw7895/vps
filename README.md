@@ -17,27 +17,41 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 | `/usr/local/lib/syw-vps/traffic.sh` | 流量 |
 | `/usr/local/bin/vps` | 日常命令 |
 
-- 已有的 proxy/traffic **不会被入口覆盖**（缺了才下载）。
+- 安装 / 重装入口时会 **重新下载覆盖** `proxy.sh` / `traffic.sh`（只覆盖模块脚本，不动节点配置与证书）。
 - 下载只做 `bash -n` 语法检查。
 - 系统里已有同名且非本工具的 `vps` 时拒绝覆盖。
 
-安装与菜单请分开：`curl|bash` 后新开终端执行 `sudo vps`。
-
 ## 菜单
 
+正常时主菜单不显示状态行（模块文件存在且 `bash -n` 通过）：
+
 ```text
-  VPS  v1.1.6
-  ●  模块就绪
+  VPS  v1.1.8
 
    1  代理管理
    2  流量管理
 
    0  退出
-  请选择 [0-2]:
+
+  请选择 [0-2] ›
 ```
+
+异常时才黄/红提示，例如：`! 代理模块不可用`、`! 流量模块不可用`、`× 功能模块不可用`。
 
 1. 代理管理 — REALITY / Hysteria2 / VLESS+WS+TLS（或历史 `v2`）  
 2. 流量管理 — 额度、限速、检查、卸载  
+
+### 代理：节点与状态
+
+- **仅显示已配置组件**（以 state 文件为准：`reality.conf` / `cdn.conf` / `hy2.conf`）。
+- 未配置的组件不出现「未安装」列表。
+- 运行状态合并在节点标题行（如 `REALITY  ● 运行中  :443`）。
+- 信息文件仅用于连接详情；无 state 的残留 info 只警告，不当作有效节点。
+
+### 流量：状态页
+
+默认显示用量、额度、阈值、网卡、限速策略、自动检查、上次检查。  
+不显示颜色图例、tc handle、qdisc 全文；排障时用 `bash traffic.sh --status-debug` 或状态异常时自动展开。
 
 ## 流量
 
@@ -68,5 +82,9 @@ REALITY / Hysteria2（特权端口靠 `CAP_NET_BIND_SERVICE`）/ VLESS+WS+TLS（
 ## 测试
 
 ```bash
+bash -n vps.sh proxy.sh traffic.sh
+bash -n tests/*.sh
 bash tests/traffic-mock-test.sh
+bash tests/menu-ui-test.sh
+bash tests/status-ui-test.sh
 ```

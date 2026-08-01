@@ -136,7 +136,7 @@ for ch in ╭ ╮ ╰ ╯ │ ├ ┤ ─ ▸; do
 done
 assert "no box chars" '[[ $has_box -eq 0 ]]'
 assert "prompt [0-11]" '[[ "$menu_out" == *"请选择 [0-11]"* ]]'
-assert "version 1.3.5 head" '[[ "$menu_out" == *"v1.3.5"* || "$menu_out" == *"v${VERSION}"* ]]'
+assert "version head" '[[ "$menu_out" == *"v${VERSION}"* ]]'
 
 out10=$(printf '10\n\n0\n' | main_menu 2>&1) || true
 assert "case 10 update" '[[ "$out10" == *"__CALL_cmd_update_module__"* ]]'

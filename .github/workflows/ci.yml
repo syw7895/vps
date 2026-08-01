@@ -30,3 +30,6 @@ jobs:
 
       - name: Menu UI tests
         run: bash tests/menu-ui-test.sh
+
+      - name: Status UI tests
+        run: bash tests/status-ui-test.sh
