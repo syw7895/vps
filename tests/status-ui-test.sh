@@ -299,6 +299,102 @@ out=$(show_info 2>&1)
 assert "running xray no inbound 暂无" '[[ "$out" == *"暂无代理"* ]]'
 assert "running xray no reality block" '[[ "$out" != *"REALITY"* || "$out" == *"残留"* ]]'
 
+# ---------- show_info 返回码 / 缺组件不中断（set -Eeuo + ERR trap）----------
+run_show_info_with_err_trap() {
+  # 在子 shell 中启用与正式脚本相同的 ERR 语义
+  (
+    set -Eeuo pipefail
+    trap 'rc=$?; printf "[ERR] 脚本第 %s 行失败 (exit %s)\n" "$LINENO" "$rc" >&2; exit "$rc"' ERR
+    show_info
+  ) 2>&1
+}
+
+# 只有 REALITY、没有 CDN
+clear_proxy
+write_xray_cfg "$XRAY_CONFIG" reality
+printf '地址: 1.1.1.1\n端口: 443\n' >"$XRAY_INFO"
+MOCK_SVC[xray]=running
+out=$(run_show_info_with_err_trap) || true
+assert "only reality no ERR" '[[ "$out" != *"[ERR]"* ]]'
+assert "only reality shown" '[[ "$out" == *"REALITY"* && "$out" == *"运行中"* ]]'
+assert "only reality no CDN" '[[ "$out" != *"CDN"* ]]'
+assert "only reality no HY2" '[[ "$out" != *"Hysteria2"* ]]'
+assert "only reality not 暂无" '[[ "$out" != *"暂无代理"* ]]'
+
+# REALITY + Hysteria2，没有 CDN（关键：CDN 缺失不得跳过 HY2）
+clear_proxy
+write_xray_cfg "$XRAY_CONFIG" reality
+write_hy2_cfg "$HY2_CONFIG" 55479
+printf '地址: 1.1.1.1\n端口: 443\n' >"$XRAY_INFO"
+printf '地址: 1.1.1.1\n端口: 55479\n' >"$HY2_INFO"
+MOCK_SVC[xray]=running
+MOCK_SVC[hysteria-server]=running
+out=$(run_show_info_with_err_trap) || true
+assert "reality+hy2 no ERR" '[[ "$out" != *"[ERR]"* ]]'
+assert "reality+hy2 both" '[[ "$out" == *"REALITY"* && "$out" == *"Hysteria2"* ]]'
+assert "reality+hy2 no CDN block" '[[ "$out" != *"CDN / WS"* && "$out" != *"未安装"* ]]'
+assert "reality+hy2 not 暂无" '[[ "$out" != *"暂无代理"* ]]'
+assert "reality+hy2 hy2 not skipped" '[[ "$out" == *"Hysteria2"* && "$out" == *"运行中"* ]]'
+
+# 只有 Hysteria2
+clear_proxy
+write_hy2_cfg "$HY2_CONFIG" 40000
+printf '地址: 2.2.2.2\n端口: 40000\n' >"$HY2_INFO"
+MOCK_SVC[hysteria-server]=running
+out=$(run_show_info_with_err_trap) || true
+assert "only hy2 no ERR" '[[ "$out" != *"[ERR]"* ]]'
+assert "only hy2 shown" '[[ "$out" == *"Hysteria2"* && "$out" != *"REALITY"* && "$out" != *"CDN"* ]]'
+
+# 只有 CDN（已有 only cdn，再加 ERR trap）
+clear_proxy
+write_xray_cfg "$XRAY_CONFIG" cdn
+printf '域名: d.com\n端口: 8443\n' >"$CDN_INFO"
+MOCK_SVC[xray]=running
+out=$(run_show_info_with_err_trap) || true
+assert "only cdn no ERR" '[[ "$out" != *"[ERR]"* ]]'
+assert "only cdn trap ok" '[[ "$out" == *"CDN"* && "$out" != *"REALITY"* && "$out" != *"Hysteria2"* ]]'
+
+# 三个组件都不存在
+clear_proxy
+out=$(run_show_info_with_err_trap) || true
+assert "none no ERR" '[[ "$out" != *"[ERR]"* ]]'
+assert "none 暂无代理" '[[ "$out" == *"暂无代理"* ]]'
+
+# 只有残留 info（REALITY）
+clear_proxy
+printf '地址: 9.9.9.9\n' >"$XRAY_INFO"
+out=$(run_show_info_with_err_trap) || true
+assert "residual no ERR" '[[ "$out" != *"[ERR]"* ]]'
+assert "residual warn" '[[ "$out" == *"残留信息文件"* ]]'
+assert "residual no 暂无" '[[ "$out" != *"暂无代理"* ]]'
+
+# 未知返回码仍触发错误（mock show_component）
+(
+  set -Eeuo pipefail
+  show_component() { return 99; }
+  set +e
+  out=$(_show_info_handle_component "X" a b c d e reality 2>&1)
+  rc=$?
+  set -e
+  assert "unknown rc propagates" '[[ $rc -eq 99 ]]'
+)
+
+# show_info 在 set -Eeuo 下整页可完成（组合场景）
+clear_proxy
+write_xray_cfg "$XRAY_CONFIG" reality
+write_hy2_cfg "$HY2_CONFIG" 11111
+MOCK_SVC[xray]=running
+MOCK_SVC[hysteria-server]=running
+set +e
+(
+  set -Eeuo pipefail
+  trap 'rc=$?; printf "[ERR] line=%s exit=%s\n" "$LINENO" "$rc" >&2; exit "$rc"' ERR
+  show_info >/dev/null
+)
+rc_full=$?
+set -e
+assert "show_info under set -e exit 0" '[[ $rc_full -eq 0 ]]'
+
 # ===================== traffic =====================
 export VPS_TRAFFIC_MOCK=1
 export VPS_TRAFFIC_TEST_DIR="$TMP/traffic"
