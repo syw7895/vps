@@ -690,26 +690,35 @@ cmd_set_rate() {
   ok "限速 ${r}"
 }
 
-# 合并额度 / 触发比例 / 限速：回车保持当前值，最后统一确认
+# 合并额度 / 触发比例 / 限速：回车保持当前值，最后统一确认并原子写入
 cmd_settings() {
   require_root
   load_config
   local g p r ans
   local cur_g=${MONTHLY_QUOTA_GB:-} cur_p=${THRESHOLD_PERCENT:-90} cur_r=${LIMIT_RATE:-1mbit}
+  local show_g
+
+  if [[ -n $cur_g ]]; then
+    show_g="${cur_g} GB"
+  else
+    show_g="未设置"
+  fi
 
   printf '\n  %s修改流量设置%s（回车保持当前值）\n' "$B" "$R"
-  printf '  当前额度: %s\n' "${cur_g:-未设置}"
-  read_tty -p "  每月流量额度 GB: " g || true
+  read_tty -p "  每月额度 [${show_g}]：" g || true
   g=${g//[[:space:]]/}
   if [[ -z $g ]]; then
     g=$cur_g
   else
+    g=${g%GB}
+    g=${g%gb}
+    g=${g//[[:space:]]/}
     [[ $g =~ ^[0-9]+([.][0-9]+)?$ ]] || fail "额度必须是数字"
   fi
 
-  printf '  当前触发比例: %s%%\n' "$cur_p"
-  read_tty -p "  触发比例 %: " p || true
+  read_tty -p "  触发比例 [${cur_p}%]：" p || true
   p=${p//[[:space:]]/}
+  p=${p%%%}
   if [[ -z $p ]]; then
     p=$cur_p
   else
@@ -718,8 +727,7 @@ cmd_settings() {
     fi
   fi
 
-  printf '  当前限速: %s\n' "$cur_r"
-  read_tty -p "  限速 (如 1mbit): " r || true
+  read_tty -p "  限速速度 [${cur_r}]：" r || true
   r=${r//[[:space:]]/}
   if [[ -z $r ]]; then
     r=$cur_r
@@ -727,11 +735,7 @@ cmd_settings() {
     [[ $r =~ ^[0-9]+([.][0-9]+)?[kKmMgG]?bit$ ]] || fail "格式示例: 1mbit"
   fi
 
-  printf '\n  将保存:\n'
-  printf '  额度     %s\n' "${g:-未设置}"
-  printf '  触发比例 %s%%\n' "$p"
-  printf '  限速     %s\n' "$r"
-  read_tty -p "  确认保存？[Y/n]: " ans || true
+  read_tty -p "  保存修改？[Y/n]：" ans || true
   ans=${ans//[[:space:]]/}
   if [[ $ans == n || $ans == N ]]; then
     warn "已取消"
@@ -850,11 +854,17 @@ limit_qdisc_present() {
   return 1
 }
 
-# 菜单顶栏：state 与 qdisc 不一致时黄字「状态需检查」，不自动改 tc
+# 菜单顶栏：未安装 / 限速 / 暂停 / 用量摘要（只读，不改 tc）
 menu_status_line() {
   load_config
   load_state
-  local iface="" thr=${THRESHOLD_PERCENT:-90}
+  local iface="" thr=${THRESHOLD_PERCENT:-90} tx= gb="—"
+
+  if ! traffic_is_installed; then
+    printf '%s○%s  尚未安装' "$D" "$R"
+    return 0
+  fi
+
   set +e
   iface=$(resolve_iface 2>/dev/null)
   set -e
@@ -862,16 +872,29 @@ menu_status_line() {
   if [[ $LIMIT_ACTIVE == true || $OWNED_BY_TOOL == true ]]; then
     if limit_qdisc_present "${iface:-}"; then
       printf '%s●%s  限速中 · %s' "$RED" "$R" "$LIMIT_RATE"
-    else
-      printf '%s!%s  状态需检查' "$YEL" "$R"
+      return 0
     fi
-  elif [[ $PAUSED == true ]]; then
-    printf '%s○%s  检查已暂停' "$YEL" "$R"
-  elif [[ -z ${MONTHLY_QUOTA_GB:-} ]]; then
-    printf '%s○%s  待设置额度' "$YEL" "$R"
-  else
-    printf '%s●%s  正常放行' "$GRN" "$R"
+    printf '%s!%s  状态需检查' "$YEL" "$R"
+    return 0
   fi
+
+  if [[ $PAUSED == true ]]; then
+    printf '%s○%s  检查已暂停' "$YEL" "$R"
+    return 0
+  fi
+
+  if [[ -z ${MONTHLY_QUOTA_GB:-} ]]; then
+    printf '%s○%s  待设置额度' "$YEL" "$R"
+    return 0
+  fi
+
+  set +e
+  tx=$(read_monthly_tx_bytes "${iface:-}" 2>/dev/null)
+  set -e
+  if [[ -n ${tx:-} && $tx =~ ^[0-9]+$ ]]; then
+    gb=$(awk -v t="$tx" 'BEGIN{printf "%.0f", t/1000000000}')
+  fi
+  printf '%s●%s  正常运行  本月 %s / %s GB' "$GRN" "$R" "$gb" "$MONTHLY_QUOTA_GB"
 }
 
 cmd_status() {
@@ -1051,7 +1074,7 @@ cmd_update_module() {
 cmd_uninstall() {
   require_root
   local ans keep_vnstat iface
-  read_tty -p "确认卸载流量模块？不影响代理/v2/vps [y/N]: " ans
+  read_tty -p "确认卸载流量模块？不影响代理/vps [y/N]: " ans
   [[ $ans == y || $ans == Y ]] || { log "已取消"; return 0; }
 
   load_state
@@ -1078,7 +1101,7 @@ cmd_uninstall() {
 }
 
 # 动态菜单：编号仅展示，路由走 action 映射
-# 更多：限速时主菜单占「解除」位，此处放暂停/恢复；否则仅更新/卸载
+# 更多：限速时首项「解除」；始终含更新 / 卸载（卸载红色置底）
 menu_more() {
   local c actions=() labels=() styles=() i n act
   while true; do
@@ -1088,15 +1111,9 @@ menu_more() {
     load_config
     load_state
     if traffic_is_limiting; then
-      if [[ $PAUSED == true ]]; then
-        actions+=(resume)
-        labels+=("恢复自动检查")
-        styles+=("")
-      else
-        actions+=(pause)
-        labels+=("暂停自动检查")
-        styles+=("")
-      fi
+      actions+=(remove_limit)
+      labels+=("解除当前限速")
+      styles+=("")
     fi
     actions+=(update)
     labels+=("更新流量模块")
@@ -1130,8 +1147,7 @@ menu_more() {
     fi
     act=${actions[c - 1]}
     case $act in
-      pause) cmd_pause ;;
-      resume) cmd_resume ;;
+      remove_limit) cmd_remove_limit ;;
       update) cmd_update_module ;;
       uninstall) cmd_uninstall; return 0 ;;
     esac
@@ -1161,7 +1177,7 @@ main_menu() {
       styles=("")
     else
       actions+=(status)
-      labels+=("查看流量状态")
+      labels+=("查看状态")
       styles+=("")
       actions+=(settings)
       labels+=("修改流量设置")
@@ -1169,12 +1185,7 @@ main_menu() {
       actions+=(check)
       labels+=("立即检查")
       styles+=("")
-      # 主菜单最多 5 项：限速时优先「解除」；暂停/恢复放入更多或占第 4 位
-      if traffic_is_limiting; then
-        actions+=(remove_limit)
-        labels+=("解除当前限速")
-        styles+=("")
-      elif [[ $PAUSED == true ]]; then
+      if [[ $PAUSED == true ]]; then
         actions+=(resume)
         labels+=("恢复自动检查")
         styles+=("")
@@ -1215,7 +1226,6 @@ main_menu() {
       status) cmd_status ;;
       settings) cmd_settings ;;
       check) cmd_check_now ;;
-      remove_limit) cmd_remove_limit ;;
       pause) cmd_pause ;;
       resume) cmd_resume ;;
       more) menu_more ;;

@@ -178,8 +178,10 @@ printf 'REALITY_PORT=443\n' >"$REALITY_STATE"
 MOCK_SVC[xray]=running
 out=$(show_info 2>&1)
 assert "state no cfg 配置缺失" '[[ "$out" == *"配置缺失"* && "$out" == *"REALITY"* ]]'
+assert "state no cfg 未找到" '[[ "$out" == *"服务配置中未找到该节点"* ]]'
 assert "state no cfg not 运行中" '[[ "$out" != *"运行中"* ]]'
 assert "state no cfg not 暂无" '[[ "$out" != *"暂无代理"* ]]'
+assert "state no cfg no link" '[[ "$out" != *"vless://"* && "$out" != *"分享链接"* ]]'
 line=$(proxy_status_line)
 assert "state no cfg status bad" '[[ "$line" == *"配置异常"* || "$line" == *"代理已停止"* || "$line" == *"暂无"* || "$line" == *"配置"* ]]'
 
@@ -298,6 +300,8 @@ OWNED_BY_TOOL=${5:-false}
 EOF
 }
 
+# 状态行用例先标记已安装
+: >"$VPS_TRAFFIC_TEST_DIR/var/.installed"
 write_cfg ""
 write_st false "" "" "" false
 : >"$VPS_TRAFFIC_TEST_DIR/mock_tc/eth0"
@@ -312,7 +316,7 @@ assert "traffic no box" 'no_box "$out"'
 write_cfg 100
 write_st false "" "" ok_below_threshold false
 line=$(menu_status_line)
-assert "traffic normal menu" '[[ "$line" == *"正常放行"* ]]'
+assert "traffic normal menu" '[[ "$line" == *"正常运行"* || "$line" == *"正常放行"* ]]'
 
 printf 'qdisc tbf 1abc: root refcnt 2 rate 1mbit\n' >"$VPS_TRAFFIC_TEST_DIR/mock_tc/eth0"
 write_st true eth0 "1abc:" applied_limit true
@@ -347,7 +351,7 @@ read_tty() {
 
 out=$(printf '0\n' | main_menu 2>&1) || true
 assert "traffic uninst only install" '[[ "$out" == *"安装流量监控"* && "$out" != *"修改流量设置"* && "$out" != *"更多操作"* ]]'
-assert "traffic uninst no groups" '[[ "$out" != *"监控"* || "$out" == *"安装流量监控"* ]]'
+assert "traffic uninst 尚未安装" '[[ "$out" == *"尚未安装"* ]]'
 assert "traffic menu no box" 'no_box "$out"'
 
 # 菜单动态：已安装
@@ -357,10 +361,10 @@ write_st false "" "" "" false
 : >"$VPS_TRAFFIC_TEST_DIR/mock_tc/eth0"
 out=$(printf '0\n' | main_menu 2>&1) || true
 assert "traffic inst hide install" '[[ "$out" != *"安装流量监控"* ]]'
-assert "traffic inst has settings" '[[ "$out" == *"修改流量设置"* && "$out" == *"查看流量状态"* && "$out" == *"立即检查"* && "$out" == *"更多操作"* ]]'
+assert "traffic inst has settings" '[[ "$out" == *"修改流量设置"* && "$out" == *"查看状态"* && "$out" == *"立即检查"* && "$out" == *"更多操作"* ]]'
 assert "traffic inst has pause" '[[ "$out" == *"暂停自动检查"* ]]'
 assert "traffic inst no dual pause resume" '[[ "$out" != *"恢复自动检查"* ]]'
-assert "traffic inst no remove when free" '[[ "$out" != *"解除当前限速"* ]]'
+assert "traffic inst no remove on main" '[[ "$out" != *"解除当前限速"* ]]'
 assert "traffic max ~5 items" '[[ $(echo "$out" | grep -cE "^[[:space:]]*[1-5][[:space:]]") -le 5 ]]'
 
 out1=$(printf '1\n\n0\n' | main_menu 2>&1) || true
@@ -369,19 +373,20 @@ out2=$(printf '2\n\n0\n' | main_menu 2>&1) || true
 assert "traffic act settings" '[[ "$out2" == *"__CALL_settings__"* ]]'
 out3=$(printf '3\n\n0\n' | main_menu 2>&1) || true
 assert "traffic act check" '[[ "$out3" == *"__CALL_check__"* ]]'
+out4=$(printf '4\n\n0\n' | main_menu 2>&1) || true
+assert "traffic act pause" '[[ "$out4" == *"__CALL_pause__"* ]]'
 
-# 限速中：显示解除
+# 限速中：解除在更多
 write_st true eth0 "1abc:" applied_limit true
 printf 'qdisc tbf 1abc: root\n' >"$VPS_TRAFFIC_TEST_DIR/mock_tc/eth0"
 out=$(printf '0\n' | main_menu 2>&1) || true
-assert "traffic limited shows remove" '[[ "$out" == *"解除当前限速"* ]]'
-out4=$(printf '4\n\n0\n' | main_menu 2>&1) || true
-assert "traffic act remove" '[[ "$out4" == *"__CALL_remove__"* ]]'
+assert "traffic limited pause still main" '[[ "$out" == *"暂停自动检查"* && "$out" != *"解除当前限速"* ]]'
+outrm=$(printf '5\n1\n\n0\n0\n' | main_menu 2>&1) || true
+assert "traffic more remove" '[[ "$outrm" == *"__CALL_remove__"* ]]'
 
-# 更多 → 更新
+# 更多 → 更新（非限速：1 更新 2 卸载）
 write_st false "" "" "" false
 : >"$VPS_TRAFFIC_TEST_DIR/mock_tc/eth0"
-# 已安装非限速：1 status 2 settings 3 check 4 pause 5 more
 outm=$(printf '5\n1\n\n0\n0\n' | main_menu 2>&1) || true
 assert "traffic more update" '[[ "$outm" == *"__CALL_update__"* ]]'
 outu=$(printf '5\n2\n0\n' | main_menu 2>&1) || true

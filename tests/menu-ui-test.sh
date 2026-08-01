@@ -98,7 +98,7 @@ menu_rc=$?
 set -e
 assert "traffic menu exit 0" '[[ $menu_rc -eq 0 ]]'
 assert "traffic flat items" '
-  [[ "$menu_out" == *"查看流量状态"* ]] &&
+  [[ "$menu_out" == *"查看状态"* ]] &&
   [[ "$menu_out" == *"修改流量设置"* ]] &&
   [[ "$menu_out" == *"立即检查"* ]] &&
   [[ "$menu_out" == *"更多操作"* ]] &&

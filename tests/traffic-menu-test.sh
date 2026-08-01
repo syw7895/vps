@@ -87,6 +87,7 @@ read_tty() {
 rm -f "$TMP/var/.installed"
 out=$(printf '0\n' | main_menu 2>&1) || true
 assert "uninst has install" '[[ "$out" == *"安装流量监控"* ]]'
+assert "uninst status 尚未安装" '[[ "$out" == *"尚未安装"* ]]'
 assert "uninst no settings" '[[ "$out" != *"修改流量设置"* ]]'
 assert "uninst prompt 0-1" '[[ "$out" == *"请选择 [0-1]"* ]]'
 out1=$(printf '1\n\n0\n' | main_menu 2>&1) || true
@@ -96,14 +97,10 @@ assert "uninst case install" '[[ "$out1" == *"__CALL_cmd_install__"* ]]'
 : >"$TMP/var/.installed"
 out=$(printf '0\n' | main_menu 2>&1) || true
 assert "inst no install item" '[[ "$out" != *"安装流量监控"* ]]'
-assert "inst has core items" '[[ "$out" == *"查看流量状态"* && "$out" == *"修改流量设置"* && "$out" == *"立即检查"* && "$out" == *"更多操作"* ]]'
-assert "inst has pause" '[[ "$out" == *"暂停自动检查"* ]]'
+assert "inst has core items" '[[ "$out" == *"查看状态"* && "$out" == *"修改流量设置"* && "$out" == *"立即检查"* && "$out" == *"更多操作"* ]]'
+assert "inst has pause only" '[[ "$out" == *"暂停自动检查"* && "$out" != *"恢复自动检查"* ]]'
+assert "inst no remove on main" '[[ "$out" != *"解除当前限速"* ]]'
 assert "inst no groups" '[[ "$out" != *"运维"* && "$out" != *"策略"* && "$out" != *"系统"* ]]'
-assert "inst no box" '
-  has=0
-  for ch in ╭ ╮ ╰ ╯ │ ├ ┤ ─ ▸; do [[ "$out" == *"$ch"* ]] && has=1; done
-  [[ $has -eq 0 ]]
-'
 assert "inst prompt" '[[ "$out" == *"请选择 [0-5]"* ]]'
 
 out1=$(printf '1\n\n0\n' | main_menu 2>&1) || true
@@ -115,7 +112,7 @@ assert "case3 check" '[[ "$out3" == *"__CALL_cmd_check_now__"* ]]'
 out4=$(printf '4\n\n0\n' | main_menu 2>&1) || true
 assert "case4 pause" '[[ "$out4" == *"__CALL_cmd_pause__"* ]]'
 
-# 限速：第 4 项解除
+# 限速：解除在更多第 1 项；主菜单仍是暂停
 cat >"$TMP/var/state" <<EOF
 LIMIT_ACTIVE=true
 LIMIT_IFACE=eth0
@@ -129,15 +126,12 @@ OWNED_BY_TOOL=true
 EOF
 printf 'qdisc tbf 1abc: root\n' >"$TMP/mock_tc/eth0"
 out=$(printf '0\n' | main_menu 2>&1) || true
-assert "limit shows remove" '[[ "$out" == *"解除当前限速"* ]]'
-out4=$(printf '4\n\n0\n' | main_menu 2>&1) || true
-assert "case4 remove when limited" '[[ "$out4" == *"__CALL_cmd_remove_limit__"* ]]'
+assert "limit no remove on main" '[[ "$out" != *"解除当前限速"* ]]'
+assert "limit still pause on main" '[[ "$out" == *"暂停自动检查"* ]]'
+outrm=$(printf '5\n1\n\n0\n0\n' | main_menu 2>&1) || true
+assert "more remove when limited" '[[ "$outrm" == *"__CALL_cmd_remove_limit__"* ]]'
 
-# 更多 → 卸载在最后（限速时 more: pause, update, uninstall）
-outu=$(printf '5\n3\n' | main_menu 2>&1) || true
-assert "more uninstall" '[[ "$outu" == *"__CALL_cmd_uninstall__"* ]]'
-
-# 暂停状态
+# 更多 → 卸载（非限速时：1 更新 2 卸载）
 cat >"$TMP/var/state" <<EOF
 LIMIT_ACTIVE=false
 LIMIT_IFACE=
@@ -150,6 +144,12 @@ LAST_RATIO=
 OWNED_BY_TOOL=false
 EOF
 : >"$TMP/mock_tc/eth0"
+outu=$(printf '5\n2\n' | main_menu 2>&1) || true
+assert "more uninstall" '[[ "$outu" == *"__CALL_cmd_uninstall__"* ]]'
+outup=$(printf '5\n1\n\n0\n0\n' | main_menu 2>&1) || true
+assert "more update" '[[ "$outup" == *"__CALL_cmd_update_module__"* ]]'
+
+# 暂停状态：第 4 项恢复
 cat >"$TMP/etc/config" <<EOF
 MONTHLY_QUOTA_GB=100
 THRESHOLD_PERCENT=90
@@ -169,6 +169,34 @@ out_empty=$(printf '\n' | main_menu 2>&1)
 rc_empty=$?
 set -e
 assert "empty exit 0" '[[ $rc_empty -eq 0 ]]'
+
+# 设置合并保存（重新 source 拿真实 cmd_settings）
+# shellcheck source=../traffic.sh
+source "$TRAFFIC"
+require_root() { return 0; }
+read_tty() {
+  local __var
+  while [[ $# -gt 0 ]]; do
+    case $1 in -p) shift 2 ;; -r) shift ;; *) break ;; esac
+  done
+  __var=${1:-REPLY}
+  # shellcheck disable=SC2034
+  read -r "$__var" || return 1
+}
+cat >"$TMP/etc/config" <<EOF
+MONTHLY_QUOTA_GB=100
+THRESHOLD_PERCENT=90
+LIMIT_RATE=1mbit
+IFACE=eth0
+PAUSED=false
+EOF
+# 空=保持 空=保持 2mbit Y
+printf '\n\n2mbit\nY\n' | cmd_settings >/dev/null
+# shellcheck disable=SC1091
+source "$TMP/etc/config"
+assert "settings keep quota" '[[ "$MONTHLY_QUOTA_GB" == "100" ]]'
+assert "settings keep thr" '[[ "$THRESHOLD_PERCENT" == "90" ]]'
+assert "settings rate 2mbit" '[[ "$LIMIT_RATE" == "2mbit" ]]'
 
 echo ""
 echo "PASS=$pass FAIL=$fail"

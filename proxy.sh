@@ -19,11 +19,12 @@ HY2_CONFIG="/etc/hysteria/config.yaml"
 HY2_CERT_DIR="/etc/hysteria/certs"
 HY2_DROPIN="/etc/systemd/system/hysteria-server.service.d/10-vps-proxy-user.conf"
 HY2_USER="hysteria"
-V2_DIR="/usr/local/lib/vps-proxy"
-V2_SCRIPT="${V2_DIR}/proxy.sh"
-V2_BIN="/usr/local/bin/v2"
 PUBLIC_IP=""
 DEPS_INSTALLED=0
+# 旧版 v2 快捷命令路径（仅用于安全清理，不再安装）
+_LEGACY_V2_DIR="/usr/local/lib/vps-proxy"
+_LEGACY_V2_BIN="/usr/local/bin/v2"
+_LEGACY_V2_CLEANED=0
 
 # 固定提交 + SHA256（可用环境变量覆盖）。勿使用未校验的浮动 main。
 XRAY_INSTALLER_URL="${XRAY_INSTALLER_URL:-https://raw.githubusercontent.com/XTLS/Xray-install/e741a4f56d368afbb9e5be3361b40c4552d3710d/install-release.sh}"
@@ -32,9 +33,6 @@ HY2_INSTALLER_URL="${HY2_INSTALLER_URL:-https://raw.githubusercontent.com/aperne
 HY2_INSTALLER_SHA256="${HY2_INSTALLER_SHA256:-e6b9023dcc0142f155546548b9d7a75ce288704d6dead0c2010d61663b90e217}"
 ACME_INSTALLER_URL="${ACME_INSTALLER_URL:-https://raw.githubusercontent.com/acmesh-official/acme.sh/3.1.0/acme.sh}"
 ACME_INSTALLER_SHA256="${ACME_INSTALLER_SHA256:-5afa747a59a2dad83ac4775c6d67bb3152cef495bf5f2d59bd0b1bf51c2ffb92}"
-# 在线执行时使用独立、不可变的 v2.sh 快照。
-V2_SCRIPT_URL="${V2_SCRIPT_URL:-https://raw.githubusercontent.com/syw7895/vps/d0e30b398be59913c807d9c1d451af05eb3361cc/v2.sh}"
-V2_SCRIPT_SHA256="${V2_SCRIPT_SHA256:-0a313a834aaad064c1adee2cf2449defa2660837785b80043a3240b3d5ea6d62}"
 
 SNI_PRESETS=(
   www.cloudflare.com
@@ -71,7 +69,7 @@ ui_item() {
 ui_prompt() {
   # 提示写到 stderr，避免 $(ui_prompt) 把提示混入返回值
   local c
-  printf '  %s请选择 [0-4] › %s' "$CYN" "$R" >&2
+  printf '  %s请选择 [0-3] › %s' "$CYN" "$R" >&2
   read -r c || return 1
   printf '%s' "$c"
 }
@@ -85,9 +83,7 @@ usage() {
   bash proxy.sh hy2  [参数]     安装/更新 Hysteria2（默认复用）
   bash proxy.sh cdn  [参数]     安装/更新 VLESS+WS+TLS
   bash proxy.sh show
-  bash proxy.sh install-shortcut|shortcut
   bash proxy.sh uninstall-xray | uninstall-hy2 | uninstall-cdn
-  bash proxy.sh uninstall-v2|uninstall-shortcut
 
 公共:
   --public-ip IPv4     分享链接用的公网 IP
@@ -423,13 +419,60 @@ xray_has_inbound_tag() {
   grep -qE "\"tag\"[[:space:]]*:[[:space:]]*\"${tag}\"" "$XRAY_CONFIG" 2>/dev/null
 }
 
+# 只读：从 Xray 配置读取 tag 对应 port
+xray_inbound_port() {
+  local tag=$1 line port
+  [[ -r ${XRAY_CONFIG:-} ]] || return 0
+  line=$(grep -E "\"tag\"[[:space:]]*:[[:space:]]*\"${tag}\"" "$XRAY_CONFIG" 2>/dev/null | head -n1 || true)
+  if [[ $line =~ \"port\"[[:space:]]*:[[:space:]]*([0-9]+) ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  port=$(awk -v tag="$tag" '
+    /"tag"/ && index($0, "\"" tag "\"") { found=1 }
+    found && /"port"/ {
+      if (match($0, /[0-9]+/)) { print substr($0, RSTART, RLENGTH); exit }
+    }
+  ' "$XRAY_CONFIG" 2>/dev/null || true)
+  [[ -n ${port:-} ]] && printf '%s\n' "$port"
+}
+
+# 必要时从 systemd unit 解析 hy2 实际配置路径
+hy2_resolve_config_path() {
+  local exec_line cfg
+  if [[ -r ${HY2_CONFIG:-} ]]; then
+    printf '%s\n' "$HY2_CONFIG"
+    return 0
+  fi
+  exec_line=$(systemctl show -p ExecStart --value hysteria-server 2>/dev/null || true)
+  [[ -n $exec_line ]] || return 1
+  # 常见：hysteria server -c /path/config.yaml
+  if [[ $exec_line =~ -c[[:space:]]+([^[:space:]]+) ]]; then
+    cfg=${BASH_REMATCH[1]}
+    cfg=${cfg//\"/}
+    [[ -r $cfg ]] || return 1
+    printf '%s\n' "$cfg"
+    return 0
+  fi
+  return 1
+}
+
 # 只读：Hysteria2 配置是否具备 listen / tls / auth
 hy2_config_present() {
-  [[ -r ${HY2_CONFIG:-} ]] || return 1
-  grep -qE '^[[:space:]]*listen:' "$HY2_CONFIG" 2>/dev/null || return 1
-  grep -qE '^[[:space:]]*tls:|^[[:space:]]*cert:' "$HY2_CONFIG" 2>/dev/null || return 1
-  grep -qE '^[[:space:]]*auth:|^[[:space:]]*password:' "$HY2_CONFIG" 2>/dev/null || return 1
+  local cfg
+  cfg=$(hy2_resolve_config_path 2>/dev/null || true)
+  [[ -n ${cfg:-} && -r $cfg ]] || return 1
+  grep -qE '^[[:space:]]*listen:' "$cfg" 2>/dev/null || return 1
+  grep -qE '^[[:space:]]*tls:|^[[:space:]]*cert:' "$cfg" 2>/dev/null || return 1
+  grep -qE '^[[:space:]]*auth:|^[[:space:]]*password:' "$cfg" 2>/dev/null || return 1
   return 0
+}
+
+hy2_config_port() {
+  local cfg
+  cfg=$(hy2_resolve_config_path 2>/dev/null || true)
+  [[ -n ${cfg:-} && -r $cfg ]] || return 0
+  sed -nE 's/^[[:space:]]*listen:[[:space:]]*:([0-9]+).*/\1/p' "$cfg" 2>/dev/null | head -n1
 }
 
 port_is_valid() {
@@ -448,28 +491,6 @@ info_get_port() {
   done <"$file"
 }
 
-xray_port_for_tag() {
-  local tag=$1 line port
-  [[ -r ${XRAY_CONFIG:-} ]] || return 0
-  line=$(grep -E "\"tag\"[[:space:]]*:[[:space:]]*\"${tag}\"" "$XRAY_CONFIG" 2>/dev/null | head -n1 || true)
-  if [[ $line =~ \"port\"[[:space:]]*:[[:space:]]*([0-9]+) ]]; then
-    printf '%s\n' "${BASH_REMATCH[1]}"
-    return 0
-  fi
-  port=$(awk -v tag="$tag" '
-    /"tag"/ && index($0, "\"" tag "\"") { found=1 }
-    found && /"port"/ {
-      if (match($0, /[0-9]+/)) { print substr($0, RSTART, RLENGTH); exit }
-    }
-  ' "$XRAY_CONFIG" 2>/dev/null || true)
-  [[ -n ${port:-} ]] && printf '%s\n' "$port"
-}
-
-hy2_port_from_config() {
-  [[ -r ${HY2_CONFIG:-} ]] || return 0
-  sed -nE 's/^[[:space:]]*listen:[[:space:]]*:([0-9]+).*/\1/p' "$HY2_CONFIG" 2>/dev/null | head -n1
-}
-
 # 端口：state → info → 真实配置
 resolve_component_port() {
   local state_file=$1 port_key=$2 info_file=$3 kind=$4 tag=${5:-}
@@ -479,9 +500,9 @@ resolve_component_port() {
   p=$(info_get_port "$info_file")
   if port_is_valid "$p"; then printf '%s\n' "$p"; return 0; fi
   if [[ $kind == xray ]]; then
-    p=$(xray_port_for_tag "$tag")
+    p=$(xray_inbound_port "$tag")
   else
-    p=$(hy2_port_from_config)
+    p=$(hy2_config_port)
   fi
   if port_is_valid "$p"; then printf '%s\n' "$p"; return 0; fi
 }
@@ -621,9 +642,13 @@ show_component() {
     return 1
   fi
 
-  # state 有、真实配置无：配置缺失（不按 systemd 显示运行中）
+  # state 有、真实配置无：配置缺失（不按 systemd 显示运行中，不展示链接）
   if (( has_state && !has_cfg )); then
-    printf '\n  %s%s%s  %s× 配置缺失%s\n' "$B" "$name" "$R" "$RED" "$R"
+    port=$(resolve_component_port "$state_file" "$port_key" "$info_file" "$kind" "$tag")
+    printf '\n  %s%s%s  %s× 配置缺失%s' "$B" "$name" "$R" "$RED" "$R"
+    [[ -n $port ]] && printf '  %s:%s%s' "$D" "$port" "$R"
+    printf '\n'
+    printf '  %s!%s  服务配置中未找到该节点\n' "$YEL" "$R"
     return 0
   fi
 
@@ -1270,73 +1295,42 @@ uninstall_hy2() {
   ok "已卸载 Hysteria2"
 }
 
-uninstall_v2() {
-  require_root
-  if [[ -e $V2_BIN || -e $V2_SCRIPT ]]; then
-    rm -f "$V2_BIN" "$V2_SCRIPT"; rmdir "$V2_DIR" 2>/dev/null || true
-    ok "已删除 v2 快捷命令"
-  else
-    warn "v2 未安装"
-  fi
-}
-
-# ---------- v2 ----------
-is_vps_proxy_blob() {
-  local f=$1
-  [[ -s $f ]] || return 1
-  (( $(wc -c <"$f") > 2000 )) || return 1
-  head -n1 "$f" | grep -q '^#!/usr/bin/env bash' &&
-    grep -q '^APP_NAME="vps-proxy"$' "$f" &&
-    grep -q 'install_reality' "$f"
-}
-
-install_v2_from_file() {
-  local src=$1 rs rt tmp
-  is_vps_proxy_blob "$src" || fail "脚本内容校验失败，拒绝落盘 v2"
-  install -d -m 755 "$V2_DIR"
-  rs=$(readlink -f "$src" 2>/dev/null || true)
-  rt=$(readlink -f "$V2_SCRIPT" 2>/dev/null || true)
-  if [[ -n $rs && $rs == "$rt" ]]; then
-    chmod 755 "$V2_SCRIPT"
-  else
-    tmp=$(mktemp "${V2_DIR}/.proxy.XXXXXX")
-    cp -f "$src" "$tmp"
-    is_vps_proxy_blob "$tmp" || { rm -f "$tmp"; fail "落盘校验失败"; }
-    chmod 755 "$tmp"
-    mv -f "$tmp" "$V2_SCRIPT"
-  fi
-  ln -sfn "$V2_SCRIPT" "$V2_BIN" 2>/dev/null ||
-    install -m 755 "$V2_SCRIPT" "$V2_BIN"
-  ok "已安装快捷命令: v2"
-}
-
-download_v2_snapshot() {
-  local tf actual
-  [[ $V2_SCRIPT_URL == https://* ]] || fail "在线安装 v2 缺少固定快照 URL"
-  is_valid_sha256 "$V2_SCRIPT_SHA256" || fail "在线安装 v2 缺少有效 SHA256"
-  tf=$(mktemp /tmp/${APP_NAME}.v2.XXXXXX.sh)
-  curl_download "$V2_SCRIPT_URL" "$tf" ||
-    { rm -f "$tf"; fail "下载 v2 快照失败"; }
-  actual=$(sha256_file "$tf")
-  [[ ${actual,,} == "${V2_SCRIPT_SHA256,,}" ]] ||
-    { rm -f "$tf"; fail "v2 快照哈希不匹配"; }
-  install_v2_from_file "$tf"
-  rm -f "$tf"
-}
-
-install_v2_files() {
-  local src=${BASH_SOURCE[0]:-}
-  if [[ -n $src && -f $src && $src != /dev/fd/* && $src != /proc/self/fd/* ]]; then
-    install_v2_from_file "$src"
-  else
-    download_v2_snapshot
-  fi
-}
-
-install_v2() { require_root; install_v2_files; log "之后可直接输入: v2"; }
-auto_v2() {
+# 安全清理旧版 v2 快捷命令（仅本项目文件；全程只提示一次）
+cleanup_legacy_v2() {
+  (( _LEGACY_V2_CLEANED )) && return 0
+  _LEGACY_V2_CLEANED=1
   [[ $EUID -eq 0 ]] || return 0
-  install_v2_files 2>/dev/null || warn "自动安装 v2 跳过（不影响代理服务）"
+
+  local bin=${_LEGACY_V2_BIN} dir=${_LEGACY_V2_DIR} script="${_LEGACY_V2_DIR}/proxy.sh"
+  local target="" did=0 own=0
+
+  if [[ -L $bin ]]; then
+    target=$(readlink -f "$bin" 2>/dev/null || true)
+    if [[ -n $target && $target == ${dir}/* ]]; then
+      own=1
+    fi
+  elif [[ -f $bin ]]; then
+    if grep -q '^APP_NAME="vps-proxy"$' "$bin" 2>/dev/null; then
+      own=1
+    fi
+  fi
+  if [[ -f $script ]] && grep -q '^APP_NAME="vps-proxy"$' "$script" 2>/dev/null; then
+    own=1
+  fi
+
+  if (( own )); then
+    if [[ -e $bin || -L $bin ]]; then
+      rm -f "$bin" && did=1
+    fi
+    if [[ -f $script ]]; then
+      rm -f "$script" && did=1
+    fi
+    rmdir "$dir" 2>/dev/null || true
+  fi
+
+  if (( did )); then
+    ok "已清理旧版 v2 快捷命令"
+  fi
 }
 
 # ---------- 菜单 ----------
@@ -1408,7 +1402,7 @@ menu_install() {
         pick_sni "REALITY 伪装 / SNI" "$cur_sni"
         sni=$_SNI_CHOSEN
         install_reality --port "$port" --sni "$sni" --target "${sni}:443"
-        auto_v2; pause
+        pause
         ;;
       2)
         local hp cur_port
@@ -1418,7 +1412,7 @@ menu_install() {
         local args=(--domain "$_SNI_CHOSEN")
         [[ -n $hp ]] && args+=(--port "$hp")
         install_hy2 "${args[@]}"
-        auto_v2; pause
+        pause
         ;;
       3)
         local domain port path email
@@ -1431,7 +1425,7 @@ menu_install() {
         local args=(--domain "$domain" --port "$port" --email "$email")
         [[ -n $path ]] && args+=(--path "$path")
         install_cdn "${args[@]}"
-        auto_v2; pause
+        pause
         ;;
       0|"") return ;;
       *) warn "无效选项"; sleep 1 ;;
@@ -1445,19 +1439,17 @@ menu_uninstall() {
     ui_item 1 "卸载 REALITY" danger
     ui_item 2 "卸载 CDN" danger
     ui_item 3 "卸载 Hysteria2" danger
-    ui_item 4 "卸载 v2" danger
     ui_gap
     ui_item 0 "返回" muted
     ui_gap
     local c
-    printf '  %s请选择 [0-4] › %s' "$CYN" "$R"
+    printf '  %s请选择 [0-3] › %s' "$CYN" "$R"
     read -r c || { warn "读取输入失败"; return 1; }
     c=${c//[[:space:]]/}
     case $c in
       1) uninstall_reality; pause ;;
       2) uninstall_cdn; pause ;;
       3) uninstall_hy2; pause ;;
-      4) uninstall_v2; pause ;;
       0|"") return ;;
       *) warn "无效选项"; sleep 1 ;;
     esac
@@ -1469,8 +1461,7 @@ main_menu() {
     print_banner
     ui_item 1 "安装代理"
     ui_item 2 "节点与状态"
-    ui_item 3 "安装 / 更新 v2"
-    ui_item 4 "卸载" danger
+    ui_item 3 "卸载" danger
     ui_gap
     ui_item 0 "返回" muted
     ui_gap
@@ -1483,8 +1474,7 @@ main_menu() {
     case $c in
       1) menu_install ;;
       2) show_info; pause ;;
-      3) install_v2; pause ;;
-      4) menu_uninstall ;;
+      3) menu_uninstall ;;
       0) return 0 ;;
       "") continue ;;
       *) warn "无效选项"; sleep 1 ;;
@@ -1506,17 +1496,16 @@ elevate_if_needed() {
 main() {
   local cmd=${1:-menu}
   [[ $# -gt 0 ]] && shift
+  cleanup_legacy_v2 2>/dev/null || true
   case $cmd in
-    menu|v2|"") auto_v2 2>/dev/null || true; main_menu ;;
-    xray|reality) install_reality "$@"; auto_v2 ;;
-    hy2|hysteria2) install_hy2 "$@"; auto_v2 ;;
-    cdn|cf|ws) install_cdn "$@"; auto_v2 ;;
+    menu|"") main_menu ;;
+    xray|reality) install_reality "$@" ;;
+    hy2|hysteria2) install_hy2 "$@" ;;
+    cdn|cf|ws) install_cdn "$@" ;;
     show|status) show_info ;;
-    install-shortcut|shortcut) install_v2 ;;
     uninstall-xray|uninstall-reality) uninstall_reality ;;
     uninstall-cdn|uninstall-cf|uninstall-ws) uninstall_cdn ;;
     uninstall-hy2|uninstall-hysteria2) uninstall_hy2 ;;
-    uninstall-v2|uninstall-shortcut) uninstall_v2 ;;
     -h|--help|help) usage ;;
     *) fail "未知命令: $cmd" ;;
   esac
