@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-traffic"
-VERSION="1.4.0"
+VERSION="1.4.1"
 LIB_DIR="/usr/local/lib/syw-vps"
 SELF_LOCAL="${LIB_DIR}/traffic.sh"
 SYW_VPS_REF="${SYW_VPS_REF:-main}"
@@ -102,12 +102,66 @@ load_kv_file() {
   done <"$file"
 }
 
+# 仅创建目录，禁止调用 write_*（避免与 write_* 递归）
 ensure_dirs() {
   mkdir -p "$CONFIG_DIR" "$STATE_DIR"
   chmod 755 "$CONFIG_DIR" "$STATE_DIR" 2>/dev/null || true
+}
+
+# 原子写：临时文件 → 校验非空 → mv 替换（只保证父目录存在）
+atomic_write_file() {
+  local dest=$1 mode=${2:-644} tmp dir
+  dir=$(dirname "$dest")
+  mkdir -p "$dir"
+  tmp=$(mktemp "${dest}.XXXXXX")
+  cat >"$tmp" || { rm -f "$tmp"; return 1; }
+  [[ -s $tmp ]] || { rm -f "$tmp"; return 1; }
+  chmod "$mode" "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$dest"
+}
+
+write_config() {
+  # 禁止调用 ensure_dirs 的初始化逻辑
+  mkdir -p "$CONFIG_DIR"
+  atomic_write_file "$CONFIG_FILE" 644 <<EOF
+# vps-traffic 配置（十进制 GB：1 GB = 1000000000 bytes；仅统计 TX）
+MONTHLY_QUOTA_GB=${MONTHLY_QUOTA_GB:-}
+THRESHOLD_PERCENT=${THRESHOLD_PERCENT:-90}
+LIMIT_RATE=${LIMIT_RATE:-1mbit}
+IFACE=${IFACE:-auto}
+PAUSED=${PAUSED:-false}
+EOF
+}
+
+write_state() {
+  mkdir -p "$STATE_DIR"
+  atomic_write_file "$STATE_FILE" 644 <<EOF
+LIMIT_ACTIVE=${LIMIT_ACTIVE:-false}
+LIMIT_IFACE=${LIMIT_IFACE:-}
+LIMIT_HANDLE=${LIMIT_HANDLE:-}
+LAST_REASON=${LAST_REASON:-}
+LAST_CHECK_TS=${LAST_CHECK_TS:-}
+LAST_TX_BYTES=${LAST_TX_BYTES:-}
+LAST_MONTH=${LAST_MONTH:-}
+LAST_RATIO=${LAST_RATIO:-}
+OWNED_BY_TOOL=${OWNED_BY_TOOL:-false}
+EOF
+}
+
+init_config_if_missing() {
+  ensure_dirs
   if [[ ! -f $CONFIG_FILE ]]; then
+    MONTHLY_QUOTA_GB=${MONTHLY_QUOTA_GB:-}
+    THRESHOLD_PERCENT=${THRESHOLD_PERCENT:-90}
+    LIMIT_RATE=${LIMIT_RATE:-1mbit}
+    IFACE=${IFACE:-auto}
+    PAUSED=${PAUSED:-false}
     write_config
   fi
+}
+
+init_state_if_missing() {
+  ensure_dirs
   if [[ ! -f $STATE_FILE ]]; then
     LIMIT_ACTIVE=false
     LIMIT_IFACE=
@@ -124,6 +178,7 @@ ensure_dirs() {
 
 load_config() {
   ensure_dirs
+  init_config_if_missing
   MONTHLY_QUOTA_GB=
   THRESHOLD_PERCENT=90
   LIMIT_RATE=1mbit
@@ -136,30 +191,9 @@ load_config() {
   PAUSED="${PAUSED:-false}"
 }
 
-# 原子写：临时文件 → 校验非空 → mv 替换
-atomic_write_file() {
-  local dest=$1 mode=${2:-644} tmp
-  tmp=$(mktemp "${dest}.XXXXXX")
-  cat >"$tmp" || { rm -f "$tmp"; return 1; }
-  [[ -s $tmp ]] || { rm -f "$tmp"; return 1; }
-  chmod "$mode" "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$dest"
-}
-
-write_config() {
-  ensure_dirs
-  atomic_write_file "$CONFIG_FILE" 644 <<EOF
-# vps-traffic 配置（十进制 GB：1 GB = 1000000000 bytes；仅统计 TX）
-MONTHLY_QUOTA_GB=${MONTHLY_QUOTA_GB:-}
-THRESHOLD_PERCENT=${THRESHOLD_PERCENT:-90}
-LIMIT_RATE=${LIMIT_RATE:-1mbit}
-IFACE=${IFACE:-auto}
-PAUSED=${PAUSED:-false}
-EOF
-}
-
 load_state() {
   ensure_dirs
+  init_state_if_missing
   LIMIT_ACTIVE=false
   LIMIT_IFACE=
   LIMIT_HANDLE=
@@ -172,21 +206,6 @@ load_state() {
   load_kv_file "$STATE_FILE"
   LIMIT_ACTIVE="${LIMIT_ACTIVE:-false}"
   OWNED_BY_TOOL="${OWNED_BY_TOOL:-false}"
-}
-
-write_state() {
-  ensure_dirs
-  atomic_write_file "$STATE_FILE" 644 <<EOF
-LIMIT_ACTIVE=${LIMIT_ACTIVE:-false}
-LIMIT_IFACE=${LIMIT_IFACE:-}
-LIMIT_HANDLE=${LIMIT_HANDLE:-}
-LAST_REASON=${LAST_REASON:-}
-LAST_CHECK_TS=${LAST_CHECK_TS:-}
-LAST_TX_BYTES=${LAST_TX_BYTES:-}
-LAST_MONTH=${LAST_MONTH:-}
-LAST_RATIO=${LAST_RATIO:-}
-OWNED_BY_TOOL=${OWNED_BY_TOOL:-false}
-EOF
 }
 
 # ---------- 网卡 ----------
@@ -657,45 +676,12 @@ cmd_install() {
   write_systemd_units
   if [[ ${VPS_TRAFFIC_MOCK:-0} == 1 ]]; then
     : >"${STATE_DIR}/.installed"
+    : >"${STATE_DIR}/.timer_enabled"
+    : >"${STATE_DIR}/.timer_active"
   fi
   load_config
   [[ -n $MONTHLY_QUOTA_GB ]] || warn "尚未设置月额度，请使用「修改流量设置」"
   ok "流量监控安装完成"
-}
-
-cmd_set_quota() {
-  require_root
-  load_config
-  local g
-  read_tty -p "每月流量额度（十进制 GB，如 500）: " g
-  [[ $g =~ ^[0-9]+([.][0-9]+)?$ ]] || fail "额度必须是数字"
-  MONTHLY_QUOTA_GB=$g
-  write_config
-  ok "月额度 ${g} GB"
-}
-
-cmd_set_threshold() {
-  require_root
-  load_config
-  local p
-  read_tty -p "触发比例 %（当前 ${THRESHOLD_PERCENT}）: " p
-  if ! [[ $p =~ ^[0-9]+$ ]] || (( p <= 0 || p > 100 )); then
-    fail "比例须为 1-100 整数"
-  fi
-  THRESHOLD_PERCENT=$p
-  write_config
-  ok "触发比例 ${p}%"
-}
-
-cmd_set_rate() {
-  require_root
-  load_config
-  local r
-  read_tty -p "限速（如 1mbit，当前 ${LIMIT_RATE}）: " r
-  [[ $r =~ ^[0-9]+([.][0-9]+)?[kKmMgG]?bit$ ]] || fail "格式示例: 1mbit"
-  LIMIT_RATE=$r
-  write_config
-  ok "限速 ${r}"
 }
 
 # 合并额度 / 触发比例 / 限速：回车保持当前值，最后统一确认并原子写入
@@ -766,12 +752,31 @@ cmd_settings() {
 }
 
 # 是否已安装流量监控（timer/unit；mock 用 .installed 标记）
+# 模块脚本/标记已落地
 traffic_is_installed() {
   if [[ ${VPS_TRAFFIC_MOCK:-0} == 1 ]]; then
     [[ -f ${STATE_DIR}/.installed ]]
     return
   fi
-  [[ -f $UNIT_TIMER || -f $UNIT_SERVICE ]]
+  [[ -f $UNIT_TIMER || -f $UNIT_SERVICE || -f $SELF_LOCAL ]]
+}
+
+# timer 单元是否 enabled
+traffic_timer_enabled() {
+  if [[ ${VPS_TRAFFIC_MOCK:-0} == 1 ]]; then
+    [[ -f ${STATE_DIR}/.timer_enabled ]]
+    return
+  fi
+  systemctl is-enabled --quiet vps-traffic-check.timer 2>/dev/null
+}
+
+# timer 是否 active（running/waiting）
+traffic_timer_active() {
+  if [[ ${VPS_TRAFFIC_MOCK:-0} == 1 ]]; then
+    [[ -f ${STATE_DIR}/.timer_active ]]
+    return
+  fi
+  systemctl is-active --quiet vps-traffic-check.timer 2>/dev/null
 }
 
 # 是否存在本工具限速（state 或 qdisc，只读）
@@ -808,34 +813,6 @@ progress_bar() {
     col=$GRN
   fi
   printf '%s%s%s' "$col" "${fill}${empty}" "$R"
-}
-
-fmt_reason() {
-  case ${1:-} in
-    quota_unset) echo "未设置月额度" ;;
-    paused) echo "自动检查已暂停" ;;
-    ok_below_threshold) echo "低于阈值 · 正常" ;;
-    applied_limit) echo "已触发限速" ;;
-    already_limited) echo "保持限速" ;;
-    removed_below_threshold) echo "已自动解除限速" ;;
-    manual_remove) echo "已手动解除" ;;
-    conflict_foreign_qdisc) echo "网卡存在其它限速，已跳过" ;;
-    vnstat_unavailable_or_bad_month) echo "流量数据暂不可用" ;;
-    iface_unresolved) echo "网卡未识别" ;;
-    "") echo "—" ;;
-    *) echo "$1" ;;
-  esac
-}
-
-fmt_time() {
-  local ts=${1:-}
-  if [[ $ts =~ ^[0-9]+$ ]] && (( ts > 1000000000 )); then
-    date -d "@$ts" '+%Y-%m-%d %H:%M:%S' 2>/dev/null \
-      || date -r "$ts" '+%Y-%m-%d %H:%M:%S' 2>/dev/null \
-      || echo "$ts"
-  else
-    echo "${ts:-—}"
-  fi
 }
 
 # ---------- UI（无重框线） ----------
@@ -882,26 +859,34 @@ menu_status_line() {
     return 0
   fi
 
+  # timer 未启用/未激活：仅状态警告，不改菜单与限速算法
+  local timer_note=""
+  if ! traffic_timer_enabled; then
+    timer_note=" · 定时器未启用"
+  elif ! traffic_timer_active; then
+    timer_note=" · 定时器未运行"
+  fi
+
   set +e
   iface=$(resolve_iface 2>/dev/null)
   set -e
 
   if [[ $LIMIT_ACTIVE == true || $OWNED_BY_TOOL == true ]]; then
     if limit_qdisc_present "${iface:-}"; then
-      printf '%s●%s  限速中 · %s' "$RED" "$R" "$LIMIT_RATE"
+      printf '%s●%s  限速中 · %s%s' "$RED" "$R" "$LIMIT_RATE" "$timer_note"
       return 0
     fi
-    printf '%s!%s  状态需检查' "$YEL" "$R"
+    printf '%s!%s  状态需检查%s' "$YEL" "$R" "$timer_note"
     return 0
   fi
 
   if [[ $PAUSED == true ]]; then
-    printf '%s○%s  检查已暂停' "$YEL" "$R"
+    printf '%s○%s  检查已暂停%s' "$YEL" "$R" "$timer_note"
     return 0
   fi
 
   if [[ -z ${MONTHLY_QUOTA_GB:-} ]]; then
-    printf '%s○%s  待设置额度' "$YEL" "$R"
+    printf '%s○%s  待设置额度%s' "$YEL" "$R" "$timer_note"
     return 0
   fi
 
@@ -911,7 +896,11 @@ menu_status_line() {
   if [[ -n ${tx:-} && $tx =~ ^[0-9]+$ ]]; then
     gb=$(awk -v t="$tx" 'BEGIN{printf "%.1f", t/1000000000}')
   fi
-  printf '%s●%s  正常  %s / %s GB' "$GRN" "$R" "$gb" "$MONTHLY_QUOTA_GB"
+  if [[ -n $timer_note ]]; then
+    printf '%s!%s  正常  %s / %s GB%s' "$YEL" "$R" "$gb" "$MONTHLY_QUOTA_GB" "$timer_note"
+  else
+    printf '%s●%s  正常  %s / %s GB' "$GRN" "$R" "$gb" "$MONTHLY_QUOTA_GB"
+  fi
 }
 
 # 友好时间：今天 HH:MM 或完整日期

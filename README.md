@@ -28,7 +28,7 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 ## 菜单示例
 
 ```text
-  VPS  v1.2.0
+  VPS  v1.2.1
 
    1.  代理管理
    2.  流量管理
@@ -39,7 +39,7 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 ```
 
 ```text
-  代理管理  v1.5.0
+  代理管理  v1.5.1
   ● 2 个节点运行中
 
    1.  安装代理
@@ -52,7 +52,7 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 ```
 
 ```text
-  流量管理  v1.4.0
+  流量管理  v1.4.1
   ● 正常  38.2 / 100 GB
 
    1.  查看状态
@@ -87,4 +87,5 @@ bash tests/traffic-mock-test.sh
 bash tests/traffic-menu-test.sh
 bash tests/menu-ui-test.sh
 bash tests/status-ui-test.sh
+bash tests/integrity-safety-test.sh
 ```
