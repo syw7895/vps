@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-traffic"
-VERSION="1.3.8"
+VERSION="1.4.0"
 LIB_DIR="/usr/local/lib/syw-vps"
 SELF_LOCAL="${LIB_DIR}/traffic.sh"
 SYW_VPS_REF="${SYW_VPS_REF:-main}"
@@ -48,10 +48,10 @@ else
   R='' B='' D='' RED='' GRN='' YEL='' CYN=''
 fi
 
-log()  { printf '%s[%s]%s %s\n' "$CYN" "$APP_NAME" "$R" "$*"; }
-ok()   { printf '%s[%s]%s %s\n' "$GRN" "OK" "$R" "$*"; }
-warn() { printf '%s[%s]%s %s\n' "$YEL" "!" "$R" "$*"; }
-err()  { printf '%s[%s]%s %s\n' "$RED" "ERR" "$R" "$*" >&2; }
+log()  { printf '  %s!%s  %s\n' "$D" "$R" "$*"; }
+ok()   { printf '  %s●%s  %s\n' "$GRN" "$R" "$*"; }
+warn() { printf '  %s!%s  %s\n' "$YEL" "$R" "$*"; }
+err()  { printf '  %s×%s  %s\n' "$RED" "$R" "$*" >&2; }
 fail() { err "$*"; exit 1; }
 
 read_tty() {
@@ -712,8 +712,9 @@ cmd_settings() {
     show_g="未设置"
   fi
 
-  printf '\n  %s修改流量设置%s（回车保持当前值）\n' "$B" "$R"
-  read_tty -p "  每月额度 [${show_g}]：" g || true
+  ui_head "修改流量设置" ""
+  ui_gap
+  read_tty -p "  每月额度 [${show_g}]: " g || true
   g=${g//[[:space:]]/}
   if [[ -z $g ]]; then
     g=$cur_g
@@ -724,7 +725,7 @@ cmd_settings() {
     [[ $g =~ ^[0-9]+([.][0-9]+)?$ ]] || fail "额度必须是数字"
   fi
 
-  read_tty -p "  触发比例 [${cur_p}%]：" p || true
+  read_tty -p "  触发比例 [${cur_p}%]: " p || true
   p=${p//[[:space:]]/}
   p=${p%%%}
   if [[ -z $p ]]; then
@@ -735,15 +736,23 @@ cmd_settings() {
     fi
   fi
 
-  read_tty -p "  限速速度 [${cur_r}]：" r || true
+  # 展示用 1 Mbit/s，内部仍存 1mbit
+  local show_r=$cur_r
+  if [[ $cur_r =~ ^([0-9]+([.][0-9]+)?)mbit$ ]]; then
+    show_r="${BASH_REMATCH[1]} Mbit/s"
+  fi
+  read_tty -p "  限速速度 [${show_r}]: " r || true
   r=${r//[[:space:]]/}
   if [[ -z $r ]]; then
     r=$cur_r
   else
-    [[ $r =~ ^[0-9]+([.][0-9]+)?[kKmMgG]?bit$ ]] || fail "格式示例: 1mbit"
+    r=${r//Mbit\/s/mbit}
+    r=${r//mbit\/s/mbit}
+    r=${r// /}
+    [[ $r =~ ^[0-9]+([.][0-9]+)?[kKmMgG]?bit$ ]] || fail "格式示例: 1mbit 或 1 Mbit/s"
   fi
 
-  read_tty -p "  保存修改？[Y/n]：" ans || true
+  read_tty -p "  保存修改？[Y/n]: " ans || true
   ans=${ans//[[:space:]]/}
   if [[ $ans == n || $ans == N ]]; then
     warn "已取消"
@@ -753,7 +762,7 @@ cmd_settings() {
   THRESHOLD_PERCENT=$p
   LIMIT_RATE=$r
   write_config
-  ok "流量设置已保存"
+  ok "设置已保存"
 }
 
 # 是否已安装流量监控（timer/unit；mock 用 .installed 标记）
@@ -838,14 +847,14 @@ ui_init() {
 ui_head() { printf '\n  %s%s%s  %s%s%s\n' "$B$CYN" "$1" "$R" "$D" "$2" "$R"; }
 ui_status() { printf '  %s\n' "$1"; }
 ui_gap() { printf '\n'; }
-# $1 序号 $2 文案 $3 可选语义: danger|muted（最后必须为 printf，set -e 安全）
+# $1 序号 $2 文案 $3 可选 danger|muted — 序号后带 .
 ui_item() {
   local num=$1 text=$2 style=${3:-} nc=$CYN tc=
   case $style in
     danger) nc=$RED; tc=$RED ;;
     muted)  nc=$D; tc=$D ;;
   esac
-  printf '  %s%2s%s  %s%s%s\n' "$nc" "$num" "$R" "$tc" "$text" "$R"
+  printf '  %s%2s.%s  %s%s%s\n' "$nc" "$num" "$R" "$tc" "$text" "$R"
 }
 ui_kv() { printf '  %s%-8s%s  %s\n' "$D" "$1" "$R" "$2"; }
 ui_note() { printf '  %s%s%s\n' "$D" "$1" "$R"; }
@@ -900,19 +909,35 @@ menu_status_line() {
   tx=$(read_monthly_tx_bytes "${iface:-}" 2>/dev/null)
   set -e
   if [[ -n ${tx:-} && $tx =~ ^[0-9]+$ ]]; then
-    gb=$(awk -v t="$tx" 'BEGIN{printf "%.0f", t/1000000000}')
+    gb=$(awk -v t="$tx" 'BEGIN{printf "%.1f", t/1000000000}')
   fi
-  printf '%s●%s  正常运行  本月 %s / %s GB' "$GRN" "$R" "$gb" "$MONTHLY_QUOTA_GB"
+  printf '%s●%s  正常  %s / %s GB' "$GRN" "$R" "$gb" "$MONTHLY_QUOTA_GB"
+}
+
+# 友好时间：今天 HH:MM 或完整日期
+fmt_time_friendly() {
+  local ts=${1:-} today full hm
+  [[ -n $ts && $ts =~ ^[0-9]+$ ]] || { echo "—"; return; }
+  today=$(date '+%Y-%m-%d' 2>/dev/null || true)
+  full=$(date -d "@$ts" '+%Y-%m-%d %H:%M' 2>/dev/null \
+    || date -r "$ts" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$ts")
+  hm=$(date -d "@$ts" '+%H:%M' 2>/dev/null || date -r "$ts" '+%H:%M' 2>/dev/null || true)
+  if [[ $full == ${today}* && -n $hm ]]; then
+    echo "今天 $hm"
+  else
+    echo "$full"
+  fi
 }
 
 cmd_status() {
   load_config
   load_state
   ui_init
-  local iface tx= gb="—" pct=0 thr_gb="—" status_txt status_col status_mark
-  local paused_txt thr=${THRESHOLD_PERCENT:-90}
+  local iface tx= gb="—" pct=0 thr=${THRESHOLD_PERCENT:-90}
+  local paused_txt rate_show
   local show_debug=${TRAFFIC_STATUS_VERBOSE:-0}
-  local qdisc_brief="" limit_ok=0
+  local qdisc_brief="" limit_ok=0 data_ok=0
+  local status_txt status_col status_mark bar
 
   set +e
   iface=$(resolve_iface 2>/dev/null)
@@ -923,7 +948,8 @@ cmd_status() {
   tx=$(read_monthly_tx_bytes "$iface" 2>/dev/null)
   set -e
   if [[ -n ${tx:-} && $tx =~ ^[0-9]+$ ]]; then
-    gb=$(awk -v t="$tx" 'BEGIN{printf "%.3f", t/1000000000}')
+    data_ok=1
+    gb=$(awk -v t="$tx" 'BEGIN{printf "%.1f", t/1000000000}')
     if [[ -n ${MONTHLY_QUOTA_GB:-} ]]; then
       pct=$(awk -v t="$tx" -v g="$MONTHLY_QUOTA_GB" 'BEGIN{
         if(g<=0){print 0; exit}
@@ -931,22 +957,23 @@ cmd_status() {
         if(p>100)p=100
         printf "%.0f", p
       }')
-      thr_gb=$(awk -v g="$MONTHLY_QUOTA_GB" -v p="$THRESHOLD_PERCENT" 'BEGIN{printf "%.1f", g*p/100}')
     fi
-  else
-    gb="—"
-    pct=0
   fi
 
   if limit_qdisc_present "$iface"; then
     limit_ok=1
   fi
 
+  rate_show=$LIMIT_RATE
+  if [[ $LIMIT_RATE =~ ^([0-9]+([.][0-9]+)?)mbit$ ]]; then
+    rate_show="${BASH_REMATCH[1]} Mbit/s"
+  fi
+
   if [[ $LIMIT_ACTIVE == true || $OWNED_BY_TOOL == true ]]; then
     if (( limit_ok )); then
       status_col=$RED
-      status_mark="●"
-      status_txt="限速中 · ${LIMIT_RATE}"
+      status_mark="!"
+      status_txt="正在限速"
     else
       status_col=$YEL
       status_mark="!"
@@ -961,17 +988,20 @@ cmd_status() {
     status_col=$YEL
     status_mark="○"
     status_txt="待设置额度"
-  elif [[ -n ${tx:-} && -n ${MONTHLY_QUOTA_GB:-} ]] && (( pct >= thr )); then
+  elif (( !data_ok )); then
     status_col=$YEL
-    status_mark="○"
-    status_txt="接近阈值 ${pct}%"
+    status_mark="!"
+    status_txt="用量数据暂不可用"
+  elif (( pct >= thr )); then
+    status_col=$YEL
+    status_mark="!"
+    status_txt="接近阈值"
   else
     status_col=$GRN
     status_mark="●"
-    status_txt="正常放行"
+    status_txt="正常"
   fi
 
-  # 外部 qdisc 冲突时展开排障字段
   if [[ $iface != — ]] && has_blocking_qdisc "$iface" 2>/dev/null; then
     show_debug=1
   fi
@@ -979,35 +1009,40 @@ cmd_status() {
   if [[ $PAUSED == true ]]; then
     paused_txt="已暂停"
   else
-    paused_txt="已启用"
+    paused_txt="已开启"
   fi
 
-  ui_head "流量" "v${VERSION}"
+  ui_head "流量状态" ""
   ui_status "${status_col}${status_mark}${R}  ${status_txt}"
   ui_gap
 
-  if [[ -n ${MONTHLY_QUOTA_GB:-} ]]; then
-    ui_kv "用量" "${gb} / ${MONTHLY_QUOTA_GB} GB"
-    ui_kv "月额度" "${MONTHLY_QUOTA_GB} GB"
-    ui_kv "阈值" "${thr_gb} GB @ ${thr}%"
+  if (( data_ok )) && [[ -n ${MONTHLY_QUOTA_GB:-} ]]; then
+    ui_kv "本月用量" "${gb} / ${MONTHLY_QUOTA_GB} GB"
+    bar=$(progress_bar "$pct" 16 "$thr")
+    printf '  %s  %s%%\n' "$bar" "$pct"
+    ui_gap
+  elif (( !data_ok )); then
+    ui_note "! 无法读取本月用量（不会按 0 处理）"
+    ui_gap
+  elif [[ -z ${MONTHLY_QUOTA_GB:-} ]]; then
+    ui_kv "本月用量" "${gb} GB"
+    ui_note "提示：请先设置每月流量额度"
+    ui_gap
+  fi
+
+  if [[ $status_txt == "正在限速" ]]; then
+    ui_kv "当前速度" "$rate_show"
   else
-    ui_kv "用量" "$gb"
-    ui_kv "月额度" "未设置"
+    ui_kv "触发限速" "${thr}%"
+    ui_kv "限速速度" "$rate_show"
   fi
   ui_kv "统计范围" "出站 TX"
-  ui_kv "网卡" "$iface"
-  ui_kv "限速策略" "${LIMIT_RATE} @ ${thr}%"
   ui_kv "自动检查" "$paused_txt"
-  ui_kv "上次检查" "$(fmt_time "${LAST_CHECK_TS:-}")"
-  if [[ -n ${LAST_REASON:-} ]]; then
-    ui_note "原因：$(fmt_reason "${LAST_REASON}")"
-  fi
-  if [[ -z ${MONTHLY_QUOTA_GB:-} ]]; then
-    ui_note "提示：请先设置每月流量额度"
-  fi
+  ui_kv "最后检查" "$(fmt_time_friendly "${LAST_CHECK_TS:-}")"
 
   if (( show_debug )); then
     ui_gap
+    ui_kv "网卡" "$iface"
     ui_kv "规则" "$([[ $OWNED_BY_TOOL == true ]] && echo 本工具 || echo 无) · ${LIMIT_HANDLE:-—}"
     qdisc_brief=$(tc_qdisc_show "$iface" 2>/dev/null | head -n1 | sed 's/^[[:space:]]*//' || true)
     [[ -n $qdisc_brief ]] || qdisc_brief="—"
@@ -1171,7 +1206,7 @@ menu_more() {
     ui_gap
     ui_item 0 "返回" muted
     ui_gap
-    printf '  请选择 [0-%s] %s›%s ' "$n" "$CYN" "$R"
+    printf '  请选择 [0-%s]: ' "$n"
     c=""
     if ! read_tty c; then
       warn "读取输入失败"
@@ -1203,7 +1238,7 @@ main_menu() {
     load_config
     load_state
     st=$(menu_status_line)
-    ui_head "流量" "v${VERSION}"
+    ui_head "流量管理" "v${VERSION}"
     ui_status "$st"
     ui_gap
 
@@ -1246,7 +1281,7 @@ main_menu() {
     ui_gap
     ui_item 0 "返回" muted
     ui_gap
-    printf '  请选择 [0-%s] %s›%s ' "$n" "$CYN" "$R"
+    printf '  请选择 [0-%s]: ' "$n"
     c=""
     if ! read_tty c; then
       warn "读取输入失败，返回上级"

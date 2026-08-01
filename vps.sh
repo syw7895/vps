@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="syw-vps"
-VERSION="1.1.8"
+VERSION="1.2.0"
 LIB_DIR="/usr/local/lib/syw-vps"
 BIN_VPS="/usr/local/bin/vps"
 MARKER="syw-vps-entrypoint"
@@ -24,8 +24,9 @@ else
   R='' B='' RED='' GRN='' YEL='' CYN='' D=''
 fi
 
-warn() { printf '%s[%s]%s %s\n' "$YEL" "!" "$R" "$*"; }
-fail() { printf '%s[%s]%s %s\n' "$RED" "ERR" "$R" "$*" >&2; exit 1; }
+warn() { printf '  %s!%s  %s\n' "$YEL" "$R" "$*"; }
+fail() { printf '  %s×%s  %s\n' "$RED" "$R" "$*" >&2; exit 1; }
+ok() { printf '  %s●%s  %s\n' "$GRN" "$R" "$*"; }
 
 # ---------- UI ----------
 ui_init() { :; }
@@ -35,8 +36,13 @@ ui_head() {
 ui_status() { printf '  %s\n' "$1"; }
 ui_gap() { printf '\n'; }
 ui_item() {
-  # $1 序号  $2 文案
-  printf '  %s%2s%s  %s\n' "$CYN" "$1" "$R" "$2"
+  # $1 序号  $2 文案  $3 可选 danger|muted
+  local num=$1 text=$2 style=${3:-} nc=$CYN tc=
+  case $style in
+    danger) nc=$RED; tc=$RED ;;
+    muted)  nc=$D; tc=$D ;;
+  esac
+  printf '  %s%2s.%s  %s%s%s\n' "$nc" "$num" "$R" "$tc" "$text" "$R"
 }
 ui_foot() { printf '\n'; }
 
@@ -211,9 +217,9 @@ main_menu() {
     ui_item 1 "代理管理"
     ui_item 2 "流量管理"
     ui_gap
-    ui_item 0 "退出"
+    ui_item 0 "退出" muted
     ui_gap
-    printf '  请选择 [0-2] %s›%s ' "$CYN" "$R"
+    printf '  请选择 [0-2]: '
     c=""
     if ! read_tty c; then
       warn "读取输入失败"
