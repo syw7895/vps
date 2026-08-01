@@ -39,10 +39,10 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 
 异常时才黄/红提示，例如：`! 代理模块不可用`、`× 功能模块不可用`。
 
-### 代理菜单（proxy v1.4.4）
+### 代理菜单（proxy v1.4.6）
 
 ```text
-  代理管理  v1.4.4
+  代理管理  v1.4.6
   ● 代理运行中
 
    1  安装代理
@@ -84,11 +84,10 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 
 ## 代理：节点与状态
 
-- **证据优先级**：`systemctl` ExecStart 实际配置 > 固定路径回退；协议语义识别 REALITY（vless+reality）/ CDN（vless+ws+tls）；tag 仅快路径。
-- systemd 只表示「运行中/已停止」，不能单独证明 inbound 存在。
-- state / info 仅为元数据与连接缓存。
-- 旧版无 state 仍正常显示，并提示「状态元数据缺失」；仅 info 残留不追加「暂无代理」。
-- 查看状态时**只读**，不修改配置 / 端口 / 证书 / 凭据。
+- **状态依据**：真实服务配置（ExecStart + 协议语义）；systemd 只表示运行/停止。
+- state / info 仅为可选管理缓存与连接详情；**正常页不提示「状态元数据缺失」**（`--status-debug` 才显示）。
+- 查看状态**只读**，不创建/修改 state；更新节点时再从真实配置恢复参数。
+- 仅 info 残留不追加「暂无代理」。
 
 ## 流量
 
