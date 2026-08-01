@@ -43,15 +43,17 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 
 ### 代理：节点与状态
 
-- **仅显示已配置组件**（以 state 文件为准：`reality.conf` / `cdn.conf` / `hy2.conf`）。
-- 未配置的组件不出现「未安装」列表。
-- 运行状态合并在节点标题行（如 `REALITY  ● 运行中  :443`）。
-- 信息文件仅用于连接详情；无 state 的残留 info 只警告，不当作有效节点。
+- **证据优先级**：真实服务配置（Xray inbound tag / Hysteria2 yaml）> systemd > state 元数据 > info 缓存。
+- 旧版仅有配置与 info、无 state 时仍正常显示节点，并提示「状态元数据缺失」（不是「残留」）。
+- 未配置的组件不出现「未安装」列表；运行状态合并在标题行。
+- 仅 info、无配置无 state 时提示「残留信息文件」，不追加「暂无代理」。
 
-### 流量：状态页
+### 流量：菜单与状态页
 
-默认显示用量、额度、阈值、网卡、限速策略、自动检查、上次检查。  
-不显示颜色图例、tc handle、qdisc 全文；排障时用 `bash traffic.sh --status-debug` 或状态异常时自动展开。
+- 未安装：仅「安装流量监控」；安装后隐藏安装项。
+- 主菜单动态 ≤5 项：查看状态 / 修改流量设置 / 立即检查 / 暂停或解除限速 / 更多操作。
+- 「更多操作」含更新与卸载（卸载红色置底）；限速时主菜单显示「解除当前限速」。
+- 状态页默认不显示颜色图例、tc handle、qdisc；排障用 `bash traffic.sh --status-debug`。
 
 ## 流量
 

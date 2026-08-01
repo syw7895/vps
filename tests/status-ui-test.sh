@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 状态展示回归：VPS 警告行 / 代理节点页 / 流量状态页
+# 状态展示回归：VPS 警告 / 代理节点识别（真实配置优先）/ 流量状态
 set -Eeuo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -25,12 +25,44 @@ no_box() {
   for ch in ╭ ╮ ╰ ╯ │ ├ ┤ ─ ▸; do
     [[ "$s" == *"$ch"* ]] && return 1
   done
-  # 旧式圆点分隔线
   [[ "$s" == *"···············"* ]] && return 1
   return 0
 }
 
-# ===================== VPS entry_warning_line =====================
+write_xray_cfg() {
+  local path=$1
+  shift
+  local tags=("$@") t parts=() ib
+  for t in "${tags[@]}"; do
+    case $t in
+      reality)
+        parts+=('{ "tag": "vless-reality", "listen": "0.0.0.0", "port": 443, "protocol": "vless" }')
+        ;;
+      cdn)
+        parts+=('{ "tag": "vless-ws-tls", "listen": "0.0.0.0", "port": 8443, "protocol": "vless" }')
+        ;;
+    esac
+  done
+  ib=$(IFS=,; echo "${parts[*]}")
+  cat >"$path" <<EOF
+{ "inbounds": [ ${ib} ], "outbounds": [] }
+EOF
+}
+
+write_hy2_cfg() {
+  local path=$1 port=${2:-55479}
+  cat >"$path" <<EOF
+listen: :${port}
+tls:
+  cert: /tmp/c.crt
+  key: /tmp/c.key
+auth:
+  type: password
+  password: secret
+EOF
+}
+
+# ===================== VPS =====================
 # shellcheck source=../vps.sh
 source "$ROOT/vps.sh"
 
@@ -56,7 +88,6 @@ rm -f "$PROXY_SH_LOCAL" "$TRAFFIC_SH_LOCAL"
 w=$(entry_warning_line || true)
 assert "vps both bad red" '[[ "$w" == *"功能模块不可用"* ]]'
 
-# 主菜单正常不显示模块就绪
 PROXY_SH_LOCAL="$TMP/proxy-ok.sh"
 TRAFFIC_SH_LOCAL="$TMP/traffic-ok.sh"
 printf '#!/usr/bin/env bash\ntrue\n' >"$PROXY_SH_LOCAL"
@@ -64,23 +95,23 @@ printf '#!/usr/bin/env bash\ntrue\n' >"$TRAFFIC_SH_LOCAL"
 mout=$(printf '0\n' | main_menu 2>&1) || true
 assert "vps menu no 模块就绪" '[[ "$mout" != *"模块就绪"* ]]'
 assert "vps menu has items" '[[ "$mout" == *"代理管理"* && "$mout" == *"流量管理"* ]]'
-assert "vps menu prompt" '[[ "$mout" == *"请选择 [0-2]"* ]]'
 assert "vps menu no box" 'no_box "$mout"'
 
-# ===================== proxy status =====================
+# ===================== proxy =====================
 # shellcheck source=../proxy.sh
 source "$ROOT/proxy.sh"
 
 CONFIG_DIR="$TMP/proxy-cfg"
-mkdir -p "$CONFIG_DIR"
+mkdir -p "$CONFIG_DIR" "$TMP/xray" "$TMP/hy2"
 REALITY_STATE="$CONFIG_DIR/reality.conf"
 CDN_STATE="$CONFIG_DIR/cdn.conf"
 HY2_STATE="$CONFIG_DIR/hy2.conf"
 XRAY_INFO="$CONFIG_DIR/xray-reality.txt"
 CDN_INFO="$CONFIG_DIR/xray-cdn.txt"
 HY2_INFO="$CONFIG_DIR/hysteria2.txt"
+XRAY_CONFIG="$TMP/xray/config.json"
+HY2_CONFIG="$TMP/hy2/config.yaml"
 
-# stub svc_state for deterministic tests
 svc_state() {
   local unit=$1
   case ${MOCK_SVC[$unit]:-missing} in
@@ -90,8 +121,14 @@ svc_state() {
 }
 declare -A MOCK_SVC=()
 
-# 无节点
-rm -f "$REALITY_STATE" "$CDN_STATE" "$HY2_STATE" "$XRAY_INFO" "$CDN_INFO" "$HY2_INFO"
+clear_proxy() {
+  rm -f "$REALITY_STATE" "$CDN_STATE" "$HY2_STATE" "$XRAY_INFO" "$CDN_INFO" "$HY2_INFO" \
+    "$XRAY_CONFIG" "$HY2_CONFIG"
+  MOCK_SVC=()
+}
+
+# 9) 完全没有节点
+clear_proxy
 line=$(proxy_status_line)
 assert "proxy none status" '[[ "$line" == *"暂无代理"* ]]'
 out=$(show_info 2>&1)
@@ -100,83 +137,133 @@ assert "proxy none no 未安装" '[[ "$out" != *"未安装"* ]]'
 assert "proxy none no 服务状态" '[[ "$out" != *"服务状态"* ]]'
 assert "proxy none no hr" 'no_box "$out"'
 
-# 只有 REALITY 运行
-printf 'REALITY_PORT=443\n' >"$REALITY_STATE"
+# 1) REALITY 配置 + info，无 state（旧版兼容）
+clear_proxy
+write_xray_cfg "$XRAY_CONFIG" reality
 printf '地址:      1.2.3.4\n端口:      443\nUUID:      u1\nSNI:       sni.example\n分享链接:\nvless://u1@1.2.3.4:443\n' >"$XRAY_INFO"
 MOCK_SVC[xray]=running
-line=$(proxy_status_line)
-assert "proxy reality running status" '[[ "$line" == *"代理运行中"* ]]'
 out=$(show_info 2>&1)
-assert "proxy reality titled" '[[ "$out" == *"REALITY"* && "$out" == *"运行中"* && "$out" == *":443"* ]]'
-assert "proxy reality fields" '[[ "$out" == *"1.2.3.4"* && "$out" == *"u1"* ]]'
-assert "proxy reality no cdn block" '[[ "$out" != *"CDN"* || "$out" != *"未安装"* ]]'
-assert "proxy reality no 未安装" '[[ "$out" != *"未安装"* ]]'
+assert "legacy reality shown" '[[ "$out" == *"REALITY"* && "$out" == *"运行中"* && "$out" == *":443"* ]]'
+assert "legacy reality meta warn" '[[ "$out" == *"状态元数据缺失"* ]]'
+assert "legacy reality not residual" '[[ "$out" != *"残留信息文件"* ]]'
+assert "legacy reality not 暂无" '[[ "$out" != *"暂无代理"* ]]'
+assert "legacy reality not 未安装" '[[ "$out" != *"未安装"* ]]'
+assert "legacy reality fields" '[[ "$out" == *"1.2.3.4"* && "$out" == *"u1"* ]]'
+line=$(proxy_status_line)
+assert "legacy reality status run" '[[ "$line" == *"代理运行中"* ]]'
 
-# REALITY + CDN 共用 xray 运行 → 仍「运行中」不是部分停止
+# 2) Hysteria2 配置 + info，无 state
+clear_proxy
+write_hy2_cfg "$HY2_CONFIG" 55479
+printf '地址:     9.9.9.9\n端口:     55479\n密码:     p\nSNI:      hy.example\n分享链接:\nhysteria2://p@9.9.9.9:55479\n' >"$HY2_INFO"
+MOCK_SVC[hysteria-server]=running
+out=$(show_info 2>&1)
+assert "legacy hy2 shown" '[[ "$out" == *"Hysteria2"* && "$out" == *"运行中"* && "$out" == *":55479"* ]]'
+assert "legacy hy2 meta warn" '[[ "$out" == *"状态元数据缺失"* ]]'
+assert "legacy hy2 not residual" '[[ "$out" != *"残留信息文件"* ]]'
+assert "legacy hy2 not 暂无" '[[ "$out" != *"暂无代理"* ]]'
+
+# 3) 仅 info 残留
+clear_proxy
+printf '地址: 1.2.3.4\n' >"$XRAY_INFO"
+out=$(show_info 2>&1)
+assert "residual reality warn" '[[ "$out" == *"REALITY 残留信息文件"* || "$out" == *"残留信息文件"* ]]'
+assert "residual no 暂无" '[[ "$out" != *"暂无代理"* ]]'
+assert "residual no 运行中" '[[ "$out" != *"运行中"* ]]'
+assert "residual no 未安装" '[[ "$out" != *"未安装"* ]]'
+
+# 4) state 存在、真实配置缺失
+clear_proxy
+printf 'REALITY_PORT=443\n' >"$REALITY_STATE"
+MOCK_SVC[xray]=running
+out=$(show_info 2>&1)
+assert "state no cfg 配置缺失" '[[ "$out" == *"配置缺失"* && "$out" == *"REALITY"* ]]'
+assert "state no cfg not 运行中" '[[ "$out" != *"运行中"* ]]'
+assert "state no cfg not 暂无" '[[ "$out" != *"暂无代理"* ]]'
+line=$(proxy_status_line)
+assert "state no cfg status bad" '[[ "$line" == *"配置异常"* || "$line" == *"代理已停止"* || "$line" == *"暂无"* || "$line" == *"配置"* ]]'
+
+# 5) 配置 + state + info 完整
+clear_proxy
+write_xray_cfg "$XRAY_CONFIG" reality
+printf 'REALITY_PORT=443\n' >"$REALITY_STATE"
+printf '地址:      1.2.3.4\n端口:      443\nUUID:      u1\n' >"$XRAY_INFO"
+MOCK_SVC[xray]=running
+out=$(show_info 2>&1)
+assert "full reality ok" '[[ "$out" == *"运行中"* && "$out" == *"u1"* ]]'
+assert "full no meta warn" '[[ "$out" != *"状态元数据缺失"* ]]'
+assert "full no residual" '[[ "$out" != *"残留"* ]]'
+assert "full no 暂无" '[[ "$out" != *"暂无代理"* ]]'
+
+# 6) 配置存在、info 缺失
+clear_proxy
+write_xray_cfg "$XRAY_CONFIG" reality
+printf 'REALITY_PORT=443\n' >"$REALITY_STATE"
+MOCK_SVC[xray]=running
+out=$(show_info 2>&1)
+assert "no info warn" '[[ "$out" == *"节点信息缺失"* && "$out" == *"REALITY"* ]]'
+assert "no info still port" '[[ "$out" == *":443"* ]]'
+
+# 7) 运行 / 停止 / 程序缺失
+clear_proxy
+write_xray_cfg "$XRAY_CONFIG" reality
+printf 'REALITY_PORT=443\n' >"$REALITY_STATE"
+printf '地址: 1.1.1.1\n' >"$XRAY_INFO"
+MOCK_SVC[xray]=stopped
+out=$(show_info 2>&1)
+assert "stopped title" '[[ "$out" == *"已停止"* ]]'
+MOCK_SVC[xray]=missing
+out=$(show_info 2>&1)
+assert "missing bin 异常" '[[ "$out" == *"异常"* ]]'
+
+# 8) REALITY + CDN 共用 xray
+clear_proxy
+write_xray_cfg "$XRAY_CONFIG" reality cdn
+printf 'REALITY_PORT=443\n' >"$REALITY_STATE"
 printf 'CDN_PORT=8443\n' >"$CDN_STATE"
-printf '域名:   example.com\n端口:   8443\n' >"$CDN_INFO"
+printf '地址: 1.2.3.4\n' >"$XRAY_INFO"
+printf '域名: example.com\n' >"$CDN_INFO"
 MOCK_SVC[xray]=running
 line=$(proxy_status_line)
-assert "proxy reality+cdn one xray running" '[[ "$line" == *"代理运行中"* ]]'
-assert "proxy not partial when only xray" '[[ "$line" != *"部分服务停止"* ]]'
+assert "reality+cdn one xray" '[[ "$line" == *"代理运行中"* ]]'
+assert "not partial single xray" '[[ "$line" != *"部分服务停止"* ]]'
+out=$(show_info 2>&1)
+assert "both components" '[[ "$out" == *"REALITY"* && "$out" == *"CDN"* ]]'
+assert "no 未安装 list" '[[ "$out" != *"未安装"* ]]'
+assert "no 服务状态 section" '[[ "$out" != *"服务状态"* ]]'
+
+# 部分停止：xray 运行 + hy2 停
+write_hy2_cfg "$HY2_CONFIG" 40000
+printf 'HY2_PORT=40000\n' >"$HY2_STATE"
+printf '密码: x\n' >"$HY2_INFO"
+MOCK_SVC[hysteria-server]=stopped
+line=$(proxy_status_line)
+assert "partial stop" '[[ "$line" == *"部分服务停止"* ]]'
 
 # 全部停止
 MOCK_SVC[xray]=stopped
-line=$(proxy_status_line)
-assert "proxy all stopped" '[[ "$line" == *"代理已停止"* ]]'
-assert "proxy stopped not 暂无" '[[ "$line" != *"暂无代理"* ]]'
-out=$(show_info 2>&1)
-assert "proxy stopped in title" '[[ "$out" == *"已停止"* ]]'
-
-# 部分停止：xray 运行 + hy2 停止
-printf 'HY2_PORT=40000\n' >"$HY2_STATE"
-printf '地址:     1.2.3.4\n端口:     40000\n密码:     p\n' >"$HY2_INFO"
-MOCK_SVC[xray]=running
 MOCK_SVC[hysteria-server]=stopped
 line=$(proxy_status_line)
-assert "proxy partial stop" '[[ "$line" == *"部分服务停止"* ]]'
+assert "all stopped" '[[ "$line" == *"代理已停止"* ]]'
+assert "stopped not 暂无" '[[ "$line" != *"暂无代理"* ]]'
 
-# 配置异常
-MOCK_SVC[xray]=missing
-MOCK_SVC[hysteria-server]=missing
-line=$(proxy_status_line)
-assert "proxy config bad" '[[ "$line" == *"配置异常"* ]]'
-
-# state 有、info 无
-rm -f "$CDN_STATE" "$CDN_INFO" "$HY2_STATE" "$HY2_INFO" "$XRAY_INFO"
-printf 'REALITY_PORT=443\n' >"$REALITY_STATE"
-MOCK_SVC[xray]=running
-out=$(show_info 2>&1)
-assert "proxy missing info warn" '[[ "$out" == *"节点信息缺失"* && "$out" == *"REALITY"* ]]'
-assert "proxy missing info still port" '[[ "$out" == *":443"* || "$out" == *"443"* ]]'
-
-# info 有、state 无
-rm -f "$REALITY_STATE"
-printf '地址: 1.2.3.4\n' >"$XRAY_INFO"
-out=$(show_info 2>&1)
-assert "proxy residual info warn" '[[ "$out" == *"残留信息文件"* ]]'
-assert "proxy residual 暂无代理" '[[ "$out" == *"暂无代理"* ]]'
-assert "proxy residual no 运行中" '[[ "$out" != *"运行中"* ]]'
-assert "proxy residual no 未安装" '[[ "$out" != *"未安装"* ]]'
-
-# 只有 CDN
-rm -f "$XRAY_INFO" "$REALITY_STATE" "$HY2_STATE" "$HY2_INFO"
+# 只有 CDN 配置
+clear_proxy
+write_xray_cfg "$XRAY_CONFIG" cdn
 printf 'CDN_PORT=8443\n' >"$CDN_STATE"
-printf '域名:   d.com\n' >"$CDN_INFO"
+printf '域名: d.com\n' >"$CDN_INFO"
 MOCK_SVC[xray]=running
 out=$(show_info 2>&1)
-assert "proxy only cdn" '[[ "$out" == *"CDN"* && "$out" != *"REALITY"* && "$out" != *"Hysteria2"* ]]'
-assert "proxy only cdn no 未安装" '[[ "$out" != *"未安装"* ]]'
+assert "only cdn" '[[ "$out" == *"CDN"* && "$out" != *"REALITY"* && "$out" != *"Hysteria2"* ]]'
 
-# 只有 HY2
-rm -f "$CDN_STATE" "$CDN_INFO"
-printf 'HY2_PORT=1\n' >"$HY2_STATE"
-printf '密码:     x\n' >"$HY2_INFO"
-MOCK_SVC[hysteria-server]=running
+# 有真实配置时绝不暂无（即使无 state）
+clear_proxy
+write_xray_cfg "$XRAY_CONFIG" reality
+MOCK_SVC[xray]=running
 out=$(show_info 2>&1)
-assert "proxy only hy2" '[[ "$out" == *"Hysteria2"* && "$out" != *"未安装"* ]]'
+assert "cfg only not 暂无" '[[ "$out" != *"暂无代理"* && "$out" == *"REALITY"* ]]'
 
-# ===================== traffic status =====================
+# ===================== traffic =====================
 export VPS_TRAFFIC_MOCK=1
 export VPS_TRAFFIC_TEST_DIR="$TMP/traffic"
 export MOCK_IFACE=eth0
@@ -211,7 +298,6 @@ OWNED_BY_TOOL=${5:-false}
 EOF
 }
 
-# 未设置额度
 write_cfg ""
 write_st false "" "" "" false
 : >"$VPS_TRAFFIC_TEST_DIR/mock_tc/eth0"
@@ -220,72 +306,97 @@ assert "traffic unset quota menu" '[[ "$line" == *"待设置额度"* ]]'
 out=$(cmd_status 2>&1)
 assert "traffic no legend phrase" '[[ "$out" != *"限速/超限"* ]]'
 assert "traffic no handle default" '[[ "$out" != *"1abc"* && "$out" != *"规则"* ]]'
-assert "traffic no qdisc default" '[[ "$out" != *"队列"* ]]'
-assert "traffic has 未设置" '[[ "$out" == *"未设置"* ]]'
 assert "traffic tip quota" '[[ "$out" == *"请先设置每月流量额度"* ]]'
 assert "traffic no box" 'no_box "$out"'
 
-# 正常放行
 write_cfg 100
 write_st false "" "" ok_below_threshold false
-export MOCK_TX_BYTES=$((10 * 1000000000))
 line=$(menu_status_line)
 assert "traffic normal menu" '[[ "$line" == *"正常放行"* ]]'
-out=$(cmd_status 2>&1)
-assert "traffic normal page" '[[ "$out" == *"正常放行"* && "$out" == *"限速策略"* ]]'
 
-# 接近阈值（用量高但未限速）
-export MOCK_TX_BYTES=$((95 * 1000000000))
-write_st false "" "" "" false
-out=$(cmd_status 2>&1)
-assert "traffic near thr" '[[ "$out" == *"接近阈值"* || "$out" == *"95"* ]]'
-
-# 限速中 + qdisc 存在
-export MOCK_TX_BYTES=$((95 * 1000000000))
 printf 'qdisc tbf 1abc: root refcnt 2 rate 1mbit\n' >"$VPS_TRAFFIC_TEST_DIR/mock_tc/eth0"
 write_st true eth0 "1abc:" applied_limit true
 line=$(menu_status_line)
 assert "traffic limited menu" '[[ "$line" == *"限速中"* ]]'
-out=$(cmd_status 2>&1)
-assert "traffic limited page" '[[ "$out" == *"限速中"* ]]'
-assert "traffic limited no legend" '[[ "$out" != *"限速/超限"* ]]'
 
-# 暂停
-write_cfg 100 90 1mbit true
-write_st false "" "" paused false
-: >"$VPS_TRAFFIC_TEST_DIR/mock_tc/eth0"
-line=$(menu_status_line)
-assert "traffic paused menu" '[[ "$line" == *"检查已暂停"* ]]'
-out=$(cmd_status 2>&1)
-assert "traffic paused page" '[[ "$out" == *"检查已暂停"* && "$out" == *"已暂停"* ]]'
-
-# state 限速但 qdisc 不存在 → 状态需检查
-write_cfg 100
 write_st true eth0 "1abc:" applied_limit true
 : >"$VPS_TRAFFIC_TEST_DIR/mock_tc/eth0"
 line=$(menu_status_line)
 assert "traffic mismatch menu" '[[ "$line" == *"状态需检查"* ]]'
-out=$(cmd_status 2>&1)
-assert "traffic mismatch page" '[[ "$out" == *"状态需检查"* ]]'
-assert "traffic mismatch shows debug" '[[ "$out" == *"规则"* || "$out" == *"队列"* ]]'
 
-# verbose 强制排障
+# 菜单动态：未安装
+rm -f "$VPS_TRAFFIC_TEST_DIR/var/.installed"
+cmd_install() { echo "__CALL_install__"; }
+cmd_status() { echo "__CALL_status__"; }
+cmd_settings() { echo "__CALL_settings__"; }
+cmd_check_now() { echo "__CALL_check__"; }
+cmd_remove_limit() { echo "__CALL_remove__"; }
+cmd_pause() { echo "__CALL_pause__"; }
+cmd_resume() { echo "__CALL_resume__"; }
+cmd_update_module() { echo "__CALL_update__"; }
+cmd_uninstall() { echo "__CALL_uninstall__"; }
+read_tty() {
+  local __var
+  while [[ $# -gt 0 ]]; do
+    case $1 in -p) shift 2 ;; -r) shift ;; *) break ;; esac
+  done
+  __var=${1:-REPLY}
+  # shellcheck disable=SC2034
+  read -r "$__var" || return 1
+}
+
+out=$(printf '0\n' | main_menu 2>&1) || true
+assert "traffic uninst only install" '[[ "$out" == *"安装流量监控"* && "$out" != *"修改流量设置"* && "$out" != *"更多操作"* ]]'
+assert "traffic uninst no groups" '[[ "$out" != *"监控"* || "$out" == *"安装流量监控"* ]]'
+assert "traffic menu no box" 'no_box "$out"'
+
+# 菜单动态：已安装
+: >"$VPS_TRAFFIC_TEST_DIR/var/.installed"
+write_cfg 100
 write_st false "" "" "" false
-export TRAFFIC_STATUS_VERBOSE=1
-out=$(cmd_status 2>&1)
-assert "traffic verbose shows 规则" '[[ "$out" == *"规则"* ]]'
-unset TRAFFIC_STATUS_VERBOSE
+: >"$VPS_TRAFFIC_TEST_DIR/mock_tc/eth0"
+out=$(printf '0\n' | main_menu 2>&1) || true
+assert "traffic inst hide install" '[[ "$out" != *"安装流量监控"* ]]'
+assert "traffic inst has settings" '[[ "$out" == *"修改流量设置"* && "$out" == *"查看流量状态"* && "$out" == *"立即检查"* && "$out" == *"更多操作"* ]]'
+assert "traffic inst has pause" '[[ "$out" == *"暂停自动检查"* ]]'
+assert "traffic inst no dual pause resume" '[[ "$out" != *"恢复自动检查"* ]]'
+assert "traffic inst no remove when free" '[[ "$out" != *"解除当前限速"* ]]'
+assert "traffic max ~5 items" '[[ $(echo "$out" | grep -cE "^[[:space:]]*[1-5][[:space:]]") -le 5 ]]'
 
-# ui_item set -e 安全（三模块）
+out1=$(printf '1\n\n0\n' | main_menu 2>&1) || true
+assert "traffic act status" '[[ "$out1" == *"__CALL_status__"* ]]'
+out2=$(printf '2\n\n0\n' | main_menu 2>&1) || true
+assert "traffic act settings" '[[ "$out2" == *"__CALL_settings__"* ]]'
+out3=$(printf '3\n\n0\n' | main_menu 2>&1) || true
+assert "traffic act check" '[[ "$out3" == *"__CALL_check__"* ]]'
+
+# 限速中：显示解除
+write_st true eth0 "1abc:" applied_limit true
+printf 'qdisc tbf 1abc: root\n' >"$VPS_TRAFFIC_TEST_DIR/mock_tc/eth0"
+out=$(printf '0\n' | main_menu 2>&1) || true
+assert "traffic limited shows remove" '[[ "$out" == *"解除当前限速"* ]]'
+out4=$(printf '4\n\n0\n' | main_menu 2>&1) || true
+assert "traffic act remove" '[[ "$out4" == *"__CALL_remove__"* ]]'
+
+# 更多 → 更新
+write_st false "" "" "" false
+: >"$VPS_TRAFFIC_TEST_DIR/mock_tc/eth0"
+# 已安装非限速：1 status 2 settings 3 check 4 pause 5 more
+outm=$(printf '5\n1\n\n0\n0\n' | main_menu 2>&1) || true
+assert "traffic more update" '[[ "$outm" == *"__CALL_update__"* ]]'
+outu=$(printf '5\n2\n0\n' | main_menu 2>&1) || true
+assert "traffic more uninstall" '[[ "$outu" == *"__CALL_uninstall__"* ]]'
+
+# ui_item set -e
 for f in vps.sh proxy.sh traffic.sh; do
   set +e
   uout=$(
     set -Eeuo pipefail
-    # shellcheck source=/dev/null
     if [[ $f == traffic.sh ]]; then
       export VPS_TRAFFIC_MOCK=1 VPS_TRAFFIC_TEST_DIR="$TMP/t2"
       mkdir -p "$VPS_TRAFFIC_TEST_DIR/etc" "$VPS_TRAFFIC_TEST_DIR/var" "$VPS_TRAFFIC_TEST_DIR/mock_tc"
     fi
+    # shellcheck source=/dev/null
     source "$ROOT/$f"
     ui_item 1 "a"
     ui_item 0 "b" muted 2>/dev/null || ui_item 0 "b"

@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-traffic"
-VERSION="1.3.6"
+VERSION="1.3.7"
 LIB_DIR="/usr/local/lib/syw-vps"
 SELF_LOCAL="${LIB_DIR}/traffic.sh"
 SYW_VPS_REF="${SYW_VPS_REF:-main}"
@@ -647,8 +647,11 @@ cmd_install() {
   src=$(readlink -f "${BASH_SOURCE[0]}")
   [[ -f $src ]] && install -m 0755 "$src" "$SELF_LOCAL"
   write_systemd_units
+  if [[ ${VPS_TRAFFIC_MOCK:-0} == 1 ]]; then
+    : >"${STATE_DIR}/.installed"
+  fi
   load_config
-  [[ -n $MONTHLY_QUOTA_GB ]] || warn "尚未设置月额度，请执行菜单 2"
+  [[ -n $MONTHLY_QUOTA_GB ]] || warn "尚未设置月额度，请使用「修改流量设置」"
   ok "流量监控安装完成"
 }
 
@@ -685,6 +688,85 @@ cmd_set_rate() {
   LIMIT_RATE=$r
   write_config
   ok "限速 ${r}"
+}
+
+# 合并额度 / 触发比例 / 限速：回车保持当前值，最后统一确认
+cmd_settings() {
+  require_root
+  load_config
+  local g p r ans
+  local cur_g=${MONTHLY_QUOTA_GB:-} cur_p=${THRESHOLD_PERCENT:-90} cur_r=${LIMIT_RATE:-1mbit}
+
+  printf '\n  %s修改流量设置%s（回车保持当前值）\n' "$B" "$R"
+  printf '  当前额度: %s\n' "${cur_g:-未设置}"
+  read_tty -p "  每月流量额度 GB: " g || true
+  g=${g//[[:space:]]/}
+  if [[ -z $g ]]; then
+    g=$cur_g
+  else
+    [[ $g =~ ^[0-9]+([.][0-9]+)?$ ]] || fail "额度必须是数字"
+  fi
+
+  printf '  当前触发比例: %s%%\n' "$cur_p"
+  read_tty -p "  触发比例 %: " p || true
+  p=${p//[[:space:]]/}
+  if [[ -z $p ]]; then
+    p=$cur_p
+  else
+    if ! [[ $p =~ ^[0-9]+$ ]] || (( p <= 0 || p > 100 )); then
+      fail "比例须为 1-100 整数"
+    fi
+  fi
+
+  printf '  当前限速: %s\n' "$cur_r"
+  read_tty -p "  限速 (如 1mbit): " r || true
+  r=${r//[[:space:]]/}
+  if [[ -z $r ]]; then
+    r=$cur_r
+  else
+    [[ $r =~ ^[0-9]+([.][0-9]+)?[kKmMgG]?bit$ ]] || fail "格式示例: 1mbit"
+  fi
+
+  printf '\n  将保存:\n'
+  printf '  额度     %s\n' "${g:-未设置}"
+  printf '  触发比例 %s%%\n' "$p"
+  printf '  限速     %s\n' "$r"
+  read_tty -p "  确认保存？[Y/n]: " ans || true
+  ans=${ans//[[:space:]]/}
+  if [[ $ans == n || $ans == N ]]; then
+    warn "已取消"
+    return 0
+  fi
+  MONTHLY_QUOTA_GB=$g
+  THRESHOLD_PERCENT=$p
+  LIMIT_RATE=$r
+  write_config
+  ok "流量设置已保存"
+}
+
+# 是否已安装流量监控（timer/unit；mock 用 .installed 标记）
+traffic_is_installed() {
+  if [[ ${VPS_TRAFFIC_MOCK:-0} == 1 ]]; then
+    [[ -f ${STATE_DIR}/.installed ]]
+    return
+  fi
+  [[ -f $UNIT_TIMER || -f $UNIT_SERVICE ]]
+}
+
+# 是否存在本工具限速（state 或 qdisc，只读）
+traffic_is_limiting() {
+  load_config
+  load_state
+  local iface=""
+  if [[ $LIMIT_ACTIVE == true || $OWNED_BY_TOOL == true ]]; then
+    return 0
+  fi
+  set +e
+  iface=$(resolve_iface 2>/dev/null)
+  set -e
+  [[ -n ${iface:-} ]] && has_our_qdisc "$iface" && return 0
+  [[ -n ${LIMIT_IFACE:-} ]] && has_our_qdisc "$LIMIT_IFACE" && return 0
+  return 1
 }
 
 # 进度条：pct 0-100；可选 thr（阈值%）决定前景色：<80 绿 / 逼近黄 / ≥阈值 红
@@ -995,52 +1077,151 @@ cmd_uninstall() {
   ok "流量模块已卸载"
 }
 
+# 动态菜单：编号仅展示，路由走 action 映射
+# 更多：限速时主菜单占「解除」位，此处放暂停/恢复；否则仅更新/卸载
+menu_more() {
+  local c actions=() labels=() styles=() i n act
+  while true; do
+    actions=()
+    labels=()
+    styles=()
+    load_config
+    load_state
+    if traffic_is_limiting; then
+      if [[ $PAUSED == true ]]; then
+        actions+=(resume)
+        labels+=("恢复自动检查")
+        styles+=("")
+      else
+        actions+=(pause)
+        labels+=("暂停自动检查")
+        styles+=("")
+      fi
+    fi
+    actions+=(update)
+    labels+=("更新流量模块")
+    styles+=("")
+    actions+=(uninstall)
+    labels+=("卸载流量模块")
+    styles+=("danger")
+
+    ui_head "更多操作" ""
+    ui_gap
+    n=${#actions[@]}
+    for ((i = 0; i < n; i++)); do
+      ui_item "$((i + 1))" "${labels[i]}" "${styles[i]}"
+    done
+    ui_gap
+    ui_item 0 "返回" muted
+    ui_gap
+    printf '  请选择 [0-%s] %s›%s ' "$n" "$CYN" "$R"
+    c=""
+    if ! read_tty c; then
+      warn "读取输入失败"
+      return 1
+    fi
+    c=${c//[[:space:]]/}
+    if [[ $c == 0 || -z $c ]]; then
+      return 0
+    fi
+    if ! [[ $c =~ ^[0-9]+$ ]] || (( c < 1 || c > n )); then
+      warn "无效选项"
+      continue
+    fi
+    act=${actions[c - 1]}
+    case $act in
+      pause) cmd_pause ;;
+      resume) cmd_resume ;;
+      update) cmd_update_module ;;
+      uninstall) cmd_uninstall; return 0 ;;
+    esac
+    [[ $act == uninstall ]] || read_tty -p "  按回车继续…" _ || true
+  done
+}
+
 main_menu() {
-  local c st
+  local c st i n act
+  local actions labels styles
   ui_init
   while true; do
+    load_config
+    load_state
     st=$(menu_status_line)
     ui_head "流量" "v${VERSION}"
     ui_status "$st"
     ui_gap
-    ui_item 1 "安装流量监控"
-    ui_item 2 "设置每月流量额度"
-    ui_item 3 "查看状态"
-    ui_item 4 "修改触发比例"
-    ui_item 5 "修改限速速度"
-    ui_item 6 "立即检查"
-    ui_item 7 "解除当前限速"
-    ui_item 8 "暂停自动检查"
-    ui_item 9 "恢复自动检查"
-    ui_item 10 "更新流量模块"
-    ui_item 11 "卸载流量模块" danger
+
+    actions=()
+    labels=()
+    styles=()
+
+    if ! traffic_is_installed; then
+      actions=(install)
+      labels=("安装流量监控")
+      styles=("")
+    else
+      actions+=(status)
+      labels+=("查看流量状态")
+      styles+=("")
+      actions+=(settings)
+      labels+=("修改流量设置")
+      styles+=("")
+      actions+=(check)
+      labels+=("立即检查")
+      styles+=("")
+      # 主菜单最多 5 项：限速时优先「解除」；暂停/恢复放入更多或占第 4 位
+      if traffic_is_limiting; then
+        actions+=(remove_limit)
+        labels+=("解除当前限速")
+        styles+=("")
+      elif [[ $PAUSED == true ]]; then
+        actions+=(resume)
+        labels+=("恢复自动检查")
+        styles+=("")
+      else
+        actions+=(pause)
+        labels+=("暂停自动检查")
+        styles+=("")
+      fi
+      actions+=(more)
+      labels+=("更多操作")
+      styles+=("")
+    fi
+
+    n=${#actions[@]}
+    for ((i = 0; i < n; i++)); do
+      ui_item "$((i + 1))" "${labels[i]}" "${styles[i]}"
+    done
     ui_gap
     ui_item 0 "返回" muted
     ui_gap
-    # 提示默认色，› 青色（不经 read -p 以免整行染色）
-    printf '  请选择 [0-11] %s›%s ' "$CYN" "$R"
+    printf '  请选择 [0-%s] %s›%s ' "$n" "$CYN" "$R"
     c=""
     if ! read_tty c; then
       warn "读取输入失败，返回上级"
       return 1
     fi
     c=${c//[[:space:]]/}
-    case $c in
-      1) cmd_install ;;
-      2) cmd_set_quota ;;
-      3) cmd_status ;;
-      4) cmd_set_threshold ;;
-      5) cmd_set_rate ;;
-      6) cmd_check_now ;;
-      7) cmd_remove_limit ;;
-      8) cmd_pause ;;
-      9) cmd_resume ;;
-      10) cmd_update_module ;;
-      11) cmd_uninstall; return 0 ;;
-      0|"") return 0 ;;
+    if [[ $c == 0 || -z $c ]]; then
+      return 0
+    fi
+    if ! [[ $c =~ ^[0-9]+$ ]] || (( c < 1 || c > n )); then
+      warn "无效选项"
+      continue
+    fi
+    act=${actions[c - 1]}
+    case $act in
+      install) cmd_install ;;
+      status) cmd_status ;;
+      settings) cmd_settings ;;
+      check) cmd_check_now ;;
+      remove_limit) cmd_remove_limit ;;
+      pause) cmd_pause ;;
+      resume) cmd_resume ;;
+      more) menu_more ;;
       *) warn "无效选项"; continue ;;
     esac
-    [[ $c == 0 || $c == 11 || -z $c ]] || read_tty -p "  按回车继续…" _ || true
+    [[ $act == more ]] || read_tty -p "  按回车继续…" _ || true
   done
 }
 

@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
-VERSION="1.4.2"
+VERSION="1.4.3"
 CONFIG_DIR="/root/proxy-info"
 BACKUP_DIR="${CONFIG_DIR}/backups"
 BACKUP_KEEP="${BACKUP_KEEP:-15}"
@@ -416,11 +416,92 @@ svc_state() {
   fi
 }
 
-# 菜单顶栏一行状态（REALITY/CDN 共用 xray，只计一次）
+# 只读：Xray inbound 是否存在指定 tag（不修改配置）
+xray_has_inbound_tag() {
+  local tag=$1
+  [[ -n $tag && -r ${XRAY_CONFIG:-} ]] || return 1
+  grep -qE "\"tag\"[[:space:]]*:[[:space:]]*\"${tag}\"" "$XRAY_CONFIG" 2>/dev/null
+}
+
+# 只读：Hysteria2 配置是否具备 listen / tls / auth
+hy2_config_present() {
+  [[ -r ${HY2_CONFIG:-} ]] || return 1
+  grep -qE '^[[:space:]]*listen:' "$HY2_CONFIG" 2>/dev/null || return 1
+  grep -qE '^[[:space:]]*tls:|^[[:space:]]*cert:' "$HY2_CONFIG" 2>/dev/null || return 1
+  grep -qE '^[[:space:]]*auth:|^[[:space:]]*password:' "$HY2_CONFIG" 2>/dev/null || return 1
+  return 0
+}
+
+port_is_valid() {
+  [[ ${1:-} =~ ^[0-9]+$ ]] && ((1 <= 10#$1 && 10#$1 <= 65535))
+}
+
+# 从 info 文本提取「端口」字段
+info_get_port() {
+  local file=$1 line
+  [[ -f $file ]] || return 0
+  while IFS= read -r line || [[ -n $line ]]; do
+    if [[ $line =~ 端口[[:space:]]*[:：][[:space:]]*([0-9]+) ]]; then
+      printf '%s\n' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+  done <"$file"
+}
+
+xray_port_for_tag() {
+  local tag=$1 line port
+  [[ -r ${XRAY_CONFIG:-} ]] || return 0
+  line=$(grep -E "\"tag\"[[:space:]]*:[[:space:]]*\"${tag}\"" "$XRAY_CONFIG" 2>/dev/null | head -n1 || true)
+  if [[ $line =~ \"port\"[[:space:]]*:[[:space:]]*([0-9]+) ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  port=$(awk -v tag="$tag" '
+    /"tag"/ && index($0, "\"" tag "\"") { found=1 }
+    found && /"port"/ {
+      if (match($0, /[0-9]+/)) { print substr($0, RSTART, RLENGTH); exit }
+    }
+  ' "$XRAY_CONFIG" 2>/dev/null || true)
+  [[ -n ${port:-} ]] && printf '%s\n' "$port"
+}
+
+hy2_port_from_config() {
+  [[ -r ${HY2_CONFIG:-} ]] || return 0
+  sed -nE 's/^[[:space:]]*listen:[[:space:]]*:([0-9]+).*/\1/p' "$HY2_CONFIG" 2>/dev/null | head -n1
+}
+
+# 端口：state → info → 真实配置
+resolve_component_port() {
+  local state_file=$1 port_key=$2 info_file=$3 kind=$4 tag=${5:-}
+  local p
+  p=$(state_get "$state_file" "$port_key")
+  if port_is_valid "$p"; then printf '%s\n' "$p"; return 0; fi
+  p=$(info_get_port "$info_file")
+  if port_is_valid "$p"; then printf '%s\n' "$p"; return 0; fi
+  if [[ $kind == xray ]]; then
+    p=$(xray_port_for_tag "$tag")
+  else
+    p=$(hy2_port_from_config)
+  fi
+  if port_is_valid "$p"; then printf '%s\n' "$p"; return 0; fi
+}
+
+# 组件是否具备真实服务配置
+component_has_config() {
+  local kind=$1 tag=${2:-}
+  if [[ $kind == xray ]]; then
+    xray_has_inbound_tag "$tag"
+  else
+    hy2_config_present
+  fi
+}
+
+# 菜单顶栏：以真实配置为主（state 仅元数据；REALITY/CDN 共用 xray 只计一次）
 proxy_status_line() {
   local any=0 run=0 stop=0 bad=0
   local st
-  if [[ -f $REALITY_STATE || -f $CDN_STATE ]]; then
+
+  if xray_has_inbound_tag "vless-reality" || xray_has_inbound_tag "vless-ws-tls"; then
     any=1
     st=$(svc_state xray xray)
     case $st in
@@ -428,8 +509,12 @@ proxy_status_line() {
       stopped) stop=1 ;;
       *) bad=1 ;;
     esac
+  elif [[ -f $REALITY_STATE || -f $CDN_STATE ]]; then
+    any=1
+    bad=1
   fi
-  if [[ -f $HY2_STATE ]]; then
+
+  if hy2_config_present; then
     any=1
     st=$(svc_state hysteria-server hysteria)
     case $st in
@@ -437,12 +522,18 @@ proxy_status_line() {
       stopped) stop=1 ;;
       *) bad=1 ;;
     esac
+  elif [[ -f $HY2_STATE ]]; then
+    any=1
+    bad=1
   fi
+
   if (( any == 0 )); then
-    printf '%s○%s  暂无代理' "$YEL" "$R"
-  elif (( bad == 1 )); then
+    printf '%s○%s  暂无代理' "$D" "$R"
+  elif (( bad == 1 && run == 0 )); then
     printf '%s×%s  配置异常' "$RED" "$R"
-  elif (( run == 1 && stop == 0 )); then
+  elif (( bad == 1 && run == 1 )); then
+    printf '%s!%s  部分服务停止' "$YEL" "$R"
+  elif (( run == 1 && stop == 0 && bad == 0 )); then
     printf '%s●%s  代理运行中' "$GRN" "$R"
   elif (( run == 1 )); then
     printf '%s!%s  部分服务停止' "$YEL" "$R"
@@ -506,19 +597,38 @@ print_block() {
   printf '\n'
 }
 
-# 节点页：仅 state 证明已配置；info 仅供详情。返回 0=已配置并展示
+# 节点页证据优先级：真实配置 > systemd > state 元数据 > info 缓存
+# 返回：0=展示有效/异常组件  1=无此组件  2=仅残留 info
 show_component() {
-  local name=$1 state_file=$2 info_file=$3 unit=$4 bin=$5 port_key=$6
+  local name=$1 state_file=$2 info_file=$3 unit=$4 bin=$5 port_key=$6 kind=$7 tag=${8:-}
+  local has_cfg=0 has_state=0 has_info=0
   local st port="" sc stxt
 
-  if [[ ! -f $state_file ]]; then
-    if [[ -f $info_file ]]; then
-      printf '  %s!%s  发现 %s 残留信息文件\n' "$YEL" "$R" "$name"
-    fi
+  if component_has_config "$kind" "$tag"; then
+    has_cfg=1
+  fi
+  [[ -f $state_file ]] && has_state=1
+  [[ -f $info_file ]] && has_info=1
+
+  # 仅 info 残留
+  if (( !has_cfg && !has_state && has_info )); then
+    printf '  %s!%s  %s 残留信息文件\n' "$YEL" "$R" "$name"
+    return 2
+  fi
+
+  # 完全无此组件
+  if (( !has_cfg && !has_state && !has_info )); then
     return 1
   fi
 
-  port=$(state_get "$state_file" "$port_key")
+  # state 有、真实配置无：配置缺失（不按 systemd 显示运行中）
+  if (( has_state && !has_cfg )); then
+    printf '\n  %s%s%s  %s× 配置缺失%s\n' "$B" "$name" "$R" "$RED" "$R"
+    return 0
+  fi
+
+  # 真实配置存在（state/info 可缺）
+  port=$(resolve_component_port "$state_file" "$port_key" "$info_file" "$kind" "$tag")
   st=$(svc_state "$unit" "$bin")
   case $st in
     running) sc=$GRN; stxt="● 运行中" ;;
@@ -530,10 +640,14 @@ show_component() {
   [[ -n $port ]] && printf '  %s:%s%s' "$D" "$port" "$R"
   printf '\n'
 
-  if [[ -f $info_file ]]; then
+  if (( !has_state )); then
+    printf '  %s!%s  状态元数据缺失\n' "$YEL" "$R"
+  fi
+
+  if (( has_info )); then
     print_info_fields "$info_file"
   else
-    printf '  %s!%s  %s 已配置，但节点信息缺失\n' "$YEL" "$R" "$name"
+    printf '  %s!%s  节点信息缺失\n' "$YEL" "$R"
   fi
   return 0
 }
@@ -1065,19 +1179,33 @@ EOF
 
 # ---------- 展示 / 卸载 ----------
 show_info() {
-  local found=0
+  local found=0 residual=0 rc
   printf '\n  %s节点与状态%s\n' "$B$CYN" "$R"
-  if show_component "REALITY" "$REALITY_STATE" "$XRAY_INFO" xray xray REALITY_PORT; then
-    found=1
-  fi
-  if show_component "CDN / WS+TLS" "$CDN_STATE" "$CDN_INFO" xray xray CDN_PORT; then
-    found=1
-  fi
-  if show_component "Hysteria2" "$HY2_STATE" "$HY2_INFO" hysteria-server hysteria HY2_PORT; then
-    found=1
-  fi
-  if (( found == 0 )); then
-    printf '  %s○%s  暂无代理\n' "$YEL" "$R"
+
+  set +e
+  show_component "REALITY" "$REALITY_STATE" "$XRAY_INFO" xray xray REALITY_PORT xray vless-reality
+  rc=$?
+  set -e
+  (( rc == 0 )) && found=1
+  (( rc == 2 )) && residual=1
+
+  set +e
+  show_component "CDN / WS+TLS" "$CDN_STATE" "$CDN_INFO" xray xray CDN_PORT xray vless-ws-tls
+  rc=$?
+  set -e
+  (( rc == 0 )) && found=1
+  (( rc == 2 )) && residual=1
+
+  set +e
+  show_component "Hysteria2" "$HY2_STATE" "$HY2_INFO" hysteria-server hysteria HY2_PORT hy2
+  rc=$?
+  set -e
+  (( rc == 0 )) && found=1
+  (( rc == 2 )) && residual=1
+
+  # 有真实节点/异常组件时不显示「暂无」；仅残留时也不追加「暂无」
+  if (( found == 0 && residual == 0 )); then
+    printf '  %s○%s  暂无代理\n' "$D" "$R"
   fi
   printf '\n'
 }
