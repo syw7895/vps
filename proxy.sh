@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
-VERSION="1.4.4"
+VERSION="1.4.5"
 CONFIG_DIR="/root/proxy-info"
 BACKUP_DIR="${CONFIG_DIR}/backups"
 BACKUP_KEEP="${BACKUP_KEEP:-15}"
@@ -1481,30 +1481,39 @@ EOF
 }
 
 # ---------- 展示 / 卸载 ----------
+# show_component 返回码协议：
+#   0  已显示真实节点或配置异常组件
+#   1  完全没有该组件（正常，不触发 ERR）
+#   2  只有残留信息文件（正常，不触发 ERR）
+#   其他  真正执行错误，上抛
+_show_info_handle_component() {
+  # $1=显示名 $2=state $3=info $4=unit $5=bin $6=port_key $7=comp
+  # 通过 nameref 更新 found/residual；未知 rc 则 return 该值
+  local name=$1 state_file=$2 info_file=$3 unit=$4 bin=$5 port_key=$6 comp=$7
+  local rc=0
+  if show_component "$name" "$state_file" "$info_file" "$unit" "$bin" "$port_key" "$comp"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  case $rc in
+    0) found=1 ;;
+    1) ;; # 无此组件，静默跳过
+    2) residual=1 ;;
+    *) return "$rc" ;;
+  esac
+  return 0
+}
+
 show_info() {
-  local found=0 residual=0 rc
+  local found=0 residual=0
   printf '\n  %s节点与状态%s\n' "$B$CYN" "$R"
 
-  set +e
-  show_component "REALITY" "$REALITY_STATE" "$XRAY_INFO" xray xray REALITY_PORT reality
-  rc=$?
-  set -e
-  (( rc == 0 )) && found=1
-  (( rc == 2 )) && residual=1
-
-  set +e
-  show_component "CDN / WS+TLS" "$CDN_STATE" "$CDN_INFO" xray xray CDN_PORT cdn
-  rc=$?
-  set -e
-  (( rc == 0 )) && found=1
-  (( rc == 2 )) && residual=1
-
-  set +e
-  show_component "Hysteria2" "$HY2_STATE" "$HY2_INFO" hysteria-server hysteria HY2_PORT hy2
-  rc=$?
-  set -e
-  (( rc == 0 )) && found=1
-  (( rc == 2 )) && residual=1
+  # 用 if/else 接返回码，避免 set -e / ERR trap 把 rc=1（无组件）当致命错误
+  # 从而在「有 REALITY、无 CDN」时仍能继续展示 Hysteria2
+  _show_info_handle_component "REALITY" "$REALITY_STATE" "$XRAY_INFO" xray xray REALITY_PORT reality
+  _show_info_handle_component "CDN / WS+TLS" "$CDN_STATE" "$CDN_INFO" xray xray CDN_PORT cdn
+  _show_info_handle_component "Hysteria2" "$HY2_STATE" "$HY2_INFO" hysteria-server hysteria HY2_PORT hy2
 
   # 有真实节点/异常组件时不显示「暂无」；仅残留时也不追加「暂无」
   if (( found == 0 && residual == 0 )); then
@@ -1789,8 +1798,14 @@ main() {
   esac
 }
 
+on_error() {
+  local rc=$1 line=$2
+  printf '%s[%s]%s 脚本第 %s 行失败 (exit %s)\n' "$RED" "ERR" "$R" "$line" "$rc" >&2
+  exit "$rc"
+}
+
 if [[ -z ${BASH_SOURCE[0]:-} || ${BASH_SOURCE[0]} == "$0" ]]; then
   elevate_if_needed "$@"
-  trap 'fail "脚本第 $LINENO 行失败 (exit $?) "' ERR
+  trap 'rc=$?; on_error "$rc" "$LINENO"' ERR
   main "$@"
 fi
