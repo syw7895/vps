@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-traffic"
-VERSION="1.3.7"
+VERSION="1.3.8"
 LIB_DIR="/usr/local/lib/syw-vps"
 SELF_LOCAL="${LIB_DIR}/traffic.sh"
 SYW_VPS_REF="${SYW_VPS_REF:-main}"
@@ -136,9 +136,19 @@ load_config() {
   PAUSED="${PAUSED:-false}"
 }
 
+# 原子写：临时文件 → 校验非空 → mv 替换
+atomic_write_file() {
+  local dest=$1 mode=${2:-644} tmp
+  tmp=$(mktemp "${dest}.XXXXXX")
+  cat >"$tmp" || { rm -f "$tmp"; return 1; }
+  [[ -s $tmp ]] || { rm -f "$tmp"; return 1; }
+  chmod "$mode" "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$dest"
+}
+
 write_config() {
   ensure_dirs
-  cat >"$CONFIG_FILE" <<EOF
+  atomic_write_file "$CONFIG_FILE" 644 <<EOF
 # vps-traffic 配置（十进制 GB：1 GB = 1000000000 bytes；仅统计 TX）
 MONTHLY_QUOTA_GB=${MONTHLY_QUOTA_GB:-}
 THRESHOLD_PERCENT=${THRESHOLD_PERCENT:-90}
@@ -146,7 +156,6 @@ LIMIT_RATE=${LIMIT_RATE:-1mbit}
 IFACE=${IFACE:-auto}
 PAUSED=${PAUSED:-false}
 EOF
-  chmod 644 "$CONFIG_FILE" 2>/dev/null || true
 }
 
 load_state() {
@@ -167,7 +176,7 @@ load_state() {
 
 write_state() {
   ensure_dirs
-  cat >"$STATE_FILE" <<EOF
+  atomic_write_file "$STATE_FILE" 644 <<EOF
 LIMIT_ACTIVE=${LIMIT_ACTIVE:-false}
 LIMIT_IFACE=${LIMIT_IFACE:-}
 LIMIT_HANDLE=${LIMIT_HANDLE:-}
@@ -178,7 +187,6 @@ LAST_MONTH=${LAST_MONTH:-}
 LAST_RATIO=${LAST_RATIO:-}
 OWNED_BY_TOOL=${OWNED_BY_TOOL:-false}
 EOF
-  chmod 644 "$STATE_FILE" 2>/dev/null || true
 }
 
 # ---------- 网卡 ----------
@@ -986,6 +994,7 @@ cmd_status() {
     ui_kv "用量" "$gb"
     ui_kv "月额度" "未设置"
   fi
+  ui_kv "统计范围" "出站 TX"
   ui_kv "网卡" "$iface"
   ui_kv "限速策略" "${LIMIT_RATE} @ ${thr}%"
   ui_kv "自动检查" "$paused_txt"
@@ -1016,8 +1025,39 @@ cmd_remove_limit() {
   require_root
   load_config
   load_state
-  local iface=${LIMIT_IFACE:-}
+  local iface=${LIMIT_IFACE:-} show
   [[ -n $iface ]] || iface=$(resolve_iface)
+  [[ -n $iface ]] || fail "无法确定网卡，拒绝解除限速"
+
+  # 解除前确认：网卡上确有本工具 handle 的 qdisc
+  show=$(tc_qdisc_show "$iface" 2>/dev/null || true)
+  if [[ $show != *"${TC_HANDLE_MAJOR}:"* ]]; then
+    if [[ -n ${LIMIT_IFACE:-} && $LIMIT_IFACE != "$iface" ]]; then
+      show=$(tc_qdisc_show "$LIMIT_IFACE" 2>/dev/null || true)
+      if [[ $show == *"${TC_HANDLE_MAJOR}:"* ]]; then
+        iface=$LIMIT_IFACE
+      else
+        warn "网卡 ${iface} 上未发现本工具限速规则 (${TC_ROOT_HANDLE})，仅清理状态"
+        LIMIT_ACTIVE=false
+        LIMIT_IFACE=
+        LIMIT_HANDLE=
+        OWNED_BY_TOOL=false
+        LAST_REASON=manual_remove
+        write_state
+        return 0
+      fi
+    else
+      warn "网卡 ${iface} 上未发现本工具限速规则 (${TC_ROOT_HANDLE})，仅清理状态"
+      LIMIT_ACTIVE=false
+      LIMIT_IFACE=
+      LIMIT_HANDLE=
+      OWNED_BY_TOOL=false
+      LAST_REASON=manual_remove
+      write_state
+      return 0
+    fi
+  fi
+
   with_lock remove_limit "$iface"
   LAST_REASON=manual_remove
   write_state

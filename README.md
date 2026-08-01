@@ -39,10 +39,10 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 
 异常时才黄/红提示，例如：`! 代理模块不可用`、`× 功能模块不可用`。
 
-### 代理菜单（proxy v1.4.3）
+### 代理菜单（proxy v1.4.4）
 
 ```text
-  代理管理  v1.4.3
+  代理管理  v1.4.4
   ● 代理运行中
 
    1  安装代理
@@ -52,12 +52,12 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
    0  返回
 ```
 
-### 流量菜单（traffic v1.3.7）
+### 流量菜单（traffic v1.3.8）
 
 未安装：
 
 ```text
-  流量  v1.3.7
+  流量  v1.3.8
   ○ 尚未安装
 
    1  安装流量监控
@@ -68,7 +68,7 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 已安装：
 
 ```text
-  流量  v1.3.7
+  流量  v1.3.8
   ● 正常运行  本月 38 / 100 GB
 
    1  查看状态
@@ -84,10 +84,10 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 
 ## 代理：节点与状态
 
-- **证据优先级**：真实服务配置（Xray inbound tag / Hysteria2 yaml）> systemd > state 元数据 > info 缓存。
-- 旧版仅有配置与 info、无 state 时仍正常显示，并提示「状态元数据缺失」。
-- 未配置组件不出现「未安装」列表；无独立「服务状态」区。
-- 仅 info 残留时提示「残留信息文件」，不追加「暂无代理」。
+- **证据优先级**：`systemctl` ExecStart 实际配置 > 固定路径回退；协议语义识别 REALITY（vless+reality）/ CDN（vless+ws+tls）；tag 仅快路径。
+- systemd 只表示「运行中/已停止」，不能单独证明 inbound 存在。
+- state / info 仅为元数据与连接缓存。
+- 旧版无 state 仍正常显示，并提示「状态元数据缺失」；仅 info 残留不追加「暂无代理」。
 - 查看状态时**只读**，不修改配置 / 端口 / 证书 / 凭据。
 
 ## 流量

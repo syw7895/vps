@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
-VERSION="1.4.3"
+VERSION="1.4.4"
 CONFIG_DIR="/root/proxy-info"
 BACKUP_DIR="${CONFIG_DIR}/backups"
 BACKUP_KEEP="${BACKUP_KEEP:-15}"
@@ -412,52 +412,333 @@ svc_state() {
   fi
 }
 
-# 只读：Xray inbound 是否存在指定 tag（不修改配置）
-xray_has_inbound_tag() {
-  local tag=$1
-  [[ -n $tag && -r ${XRAY_CONFIG:-} ]] || return 1
-  grep -qE "\"tag\"[[:space:]]*:[[:space:]]*\"${tag}\"" "$XRAY_CONFIG" 2>/dev/null
+# ---------- 只读节点检测（不修改配置） ----------
+# 证据：真实服务配置 > systemd 运行态(仅展示) > state 元数据 > info 缓存
+
+port_is_valid() {
+  [[ ${1:-} =~ ^[0-9]+$ ]] && ((1 <= 10#$1 && 10#$1 <= 65535))
 }
 
-# 只读：从 Xray 配置读取 tag 对应 port
-xray_inbound_port() {
-  local tag=$1 line port
-  [[ -r ${XRAY_CONFIG:-} ]] || return 0
-  line=$(grep -E "\"tag\"[[:space:]]*:[[:space:]]*\"${tag}\"" "$XRAY_CONFIG" 2>/dev/null | head -n1 || true)
-  if [[ $line =~ \"port\"[[:space:]]*:[[:space:]]*([0-9]+) ]]; then
-    printf '%s\n' "${BASH_REMATCH[1]}"
-    return 0
-  fi
-  port=$(awk -v tag="$tag" '
-    /"tag"/ && index($0, "\"" tag "\"") { found=1 }
-    found && /"port"/ {
-      if (match($0, /[0-9]+/)) { print substr($0, RSTART, RLENGTH); exit }
-    }
-  ' "$XRAY_CONFIG" 2>/dev/null || true)
-  [[ -n ${port:-} ]] && printf '%s\n' "$port"
+# 从 systemd ExecStart 行解析 -config / -c / --config / -confdir
+# 输出：file:/path 或 dir:/path（可能多行）
+parse_execstart_config_specs() {
+  local exec_line=$1
+  local -a tokens=()
+  local t i next
+  # 去掉前导 path= 与多余引号
+  exec_line=${exec_line#path=}
+  exec_line=${exec_line//$'\n'/ }
+  # shell 分词（忽略无法展开的转义）
+  # shellcheck disable=SC2206
+  tokens=($exec_line)
+  for ((i = 0; i < ${#tokens[@]}; i++)); do
+    t=${tokens[i]}
+    t=${t//\"/}
+    t=${t//\'/}
+    case $t in
+      -config=*|--config=*|-c=*)
+        next=${t#*=}
+        [[ -n $next ]] && printf 'file:%s\n' "$next"
+        ;;
+      -confdir=*)
+        next=${t#*=}
+        [[ -n $next ]] && printf 'dir:%s\n' "$next"
+        ;;
+      -config|--config|-c)
+        next=${tokens[i + 1]:-}
+        next=${next//\"/}
+        next=${next//\'/}
+        [[ -n $next && $next != -* ]] && printf 'file:%s\n' "$next"
+        ((i++)) || true
+        ;;
+      -confdir)
+        next=${tokens[i + 1]:-}
+        next=${next//\"/}
+        next=${next//\'/}
+        [[ -n $next && $next != -* ]] && printf 'dir:%s\n' "$next"
+        ((i++)) || true
+        ;;
+    esac
+  done
 }
 
-# 必要时从 systemd unit 解析 hy2 实际配置路径
-hy2_resolve_config_path() {
-  local exec_line cfg
-  if [[ -r ${HY2_CONFIG:-} ]]; then
-    printf '%s\n' "$HY2_CONFIG"
+# JSON 查询：优先 jq，否则 python3。$1=文件 $2=jq 表达式（输出文本行）
+json_query() {
+  local file=$1 expr=$2
+  [[ -r $file ]] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    jq -r "$expr" "$file" 2>/dev/null
+    return $?
+  fi
+  command -v python3 >/dev/null 2>&1 || return 1
+  EXPR=$expr FILE=$file python3 - <<'PY' 2>/dev/null
+import json, os, sys
+path = os.environ["FILE"]
+expr = os.environ["EXPR"]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(1)
+
+def walk_inbounds(d):
+    if isinstance(d, dict):
+        ib = d.get("inbounds")
+        if isinstance(ib, list):
+            return ib
+        # 部分 confdir 单文件可能是数组
+    if isinstance(d, list):
+        return d
+    return []
+
+inbounds = walk_inbounds(data)
+# 支持有限表达式子集（本脚本固定用法）
+# reality_port / cdn_port / has_reality / has_cdn / has_tag:TAG
+if expr == "has_reality":
+    for ib in inbounds:
+        if not isinstance(ib, dict):
+            continue
+        if ib.get("protocol") != "vless":
+            continue
+        ss = ib.get("streamSettings") or {}
+        if ss.get("security") == "reality":
+            print("true"); sys.exit(0)
+    print("false"); sys.exit(0)
+if expr == "has_cdn":
+    for ib in inbounds:
+        if not isinstance(ib, dict):
+            continue
+        if ib.get("protocol") != "vless":
+            continue
+        ss = ib.get("streamSettings") or {}
+        if ss.get("network") == "ws" and ss.get("security") == "tls":
+            print("true"); sys.exit(0)
+    print("false"); sys.exit(0)
+if expr.startswith("has_tag:"):
+    tag = expr.split(":", 1)[1]
+    for ib in inbounds:
+        if isinstance(ib, dict) and ib.get("tag") == tag:
+            print("true"); sys.exit(0)
+    print("false"); sys.exit(0)
+if expr == "reality_port":
+    for ib in inbounds:
+        if not isinstance(ib, dict):
+            continue
+        if ib.get("protocol") != "vless":
+            continue
+        ss = ib.get("streamSettings") or {}
+        if ss.get("security") == "reality":
+            p = ib.get("port")
+            if p is not None:
+                print(p); sys.exit(0)
+    # tag 快路径
+    for ib in inbounds:
+        if isinstance(ib, dict) and ib.get("tag") == "vless-reality" and ib.get("port") is not None:
+            print(ib.get("port")); sys.exit(0)
+    sys.exit(1)
+if expr == "cdn_port":
+    for ib in inbounds:
+        if not isinstance(ib, dict):
+            continue
+        if ib.get("protocol") != "vless":
+            continue
+        ss = ib.get("streamSettings") or {}
+        if ss.get("network") == "ws" and ss.get("security") == "tls":
+            p = ib.get("port")
+            if p is not None:
+                print(p); sys.exit(0)
+    for ib in inbounds:
+        if isinstance(ib, dict) and ib.get("tag") == "vless-ws-tls" and ib.get("port") is not None:
+            print(ib.get("port")); sys.exit(0)
+    sys.exit(1)
+sys.exit(1)
+PY
+}
+
+# 列出 Xray 生效配置 JSON 文件（ExecStart 优先，再回退固定路径）
+xray_list_config_files() {
+  local exec_line spec path f
+  local -a files=()
+  exec_line=$(systemctl show -p ExecStart --value xray 2>/dev/null || true)
+  if [[ -n $exec_line ]]; then
+    while IFS= read -r spec; do
+      [[ -n $spec ]] || continue
+      path=${spec#*:}
+      case $spec in
+        file:*)
+          [[ -r $path ]] && files+=("$path")
+          ;;
+        dir:*)
+          if [[ -d $path ]]; then
+            while IFS= read -r f; do
+              [[ -r $f ]] && files+=("$f")
+            done < <(find "$path" -type f -name '*.json' 2>/dev/null || true)
+          fi
+          ;;
+      esac
+    done < <(parse_execstart_config_specs "$exec_line")
+  fi
+  # 去重
+  if ((${#files[@]})); then
+    printf '%s\n' "${files[@]}" | awk 'NF && !seen[$0]++'
     return 0
   fi
-  exec_line=$(systemctl show -p ExecStart --value hysteria-server 2>/dev/null || true)
-  [[ -n $exec_line ]] || return 1
-  # 常见：hysteria server -c /path/config.yaml
-  if [[ $exec_line =~ -c[[:space:]]+([^[:space:]]+) ]]; then
-    cfg=${BASH_REMATCH[1]}
-    cfg=${cfg//\"/}
-    [[ -r $cfg ]] || return 1
-    printf '%s\n' "$cfg"
+  # 回退固定路径
+  if [[ -r ${XRAY_CONFIG:-} ]]; then
+    printf '%s\n' "$XRAY_CONFIG"
     return 0
   fi
   return 1
 }
 
-# 只读：Hysteria2 配置是否具备 listen / tls / auth
+# 纯 bash 回退（无 jq/python3）：近似语义匹配，tag 快路径
+xray_file_has_reality() {
+  local f=$1
+  grep -qE '"tag"[[:space:]]*:[[:space:]]*"vless-reality"' "$f" 2>/dev/null && return 0
+  grep -qE '"protocol"[[:space:]]*:[[:space:]]*"vless"' "$f" 2>/dev/null || return 1
+  grep -qE '"security"[[:space:]]*:[[:space:]]*"reality"' "$f" 2>/dev/null
+}
+
+xray_file_has_cdn() {
+  local f=$1
+  grep -qE '"tag"[[:space:]]*:[[:space:]]*"vless-ws-tls"' "$f" 2>/dev/null && return 0
+  grep -qE '"protocol"[[:space:]]*:[[:space:]]*"vless"' "$f" 2>/dev/null || return 1
+  grep -qE '"network"[[:space:]]*:[[:space:]]*"ws"' "$f" 2>/dev/null || return 1
+  grep -qE '"security"[[:space:]]*:[[:space:]]*"tls"' "$f" 2>/dev/null
+}
+
+xray_file_port_near() {
+  # 粗取：优先同文件第一个 "port": N
+  local f=$1
+  local p
+  p=$(grep -oE '"port"[[:space:]]*:[[:space:]]*[0-9]+' "$f" 2>/dev/null | head -n1 | grep -oE '[0-9]+' || true)
+  [[ -n $p ]] && printf '%s\n' "$p"
+}
+
+# kind: reality | cdn — 语义识别；tag 仅快路径
+xray_has_component() {
+  local kind=$1 f r
+  while IFS= read -r f; do
+    [[ -n $f ]] || continue
+    case $kind in
+      reality)
+        if command -v jq >/dev/null 2>&1; then
+          jq -e '
+            [.inbounds[]? // empty | select(type=="object")]
+            | map(select(
+                (.protocol=="vless" and (.streamSettings.security=="reality"))
+                or (.tag=="vless-reality")
+              )) | length > 0
+          ' "$f" >/dev/null 2>&1 && return 0
+        fi
+        r=$(json_query "$f" "has_reality" 2>/dev/null || true)
+        [[ $r == true ]] && return 0
+        xray_file_has_reality "$f" && return 0
+        ;;
+      cdn)
+        if command -v jq >/dev/null 2>&1; then
+          jq -e '
+            [.inbounds[]? // empty | select(type=="object")]
+            | map(select(
+                (.protocol=="vless"
+                  and (.streamSettings.network=="ws")
+                  and (.streamSettings.security=="tls"))
+                or (.tag=="vless-ws-tls")
+              )) | length > 0
+          ' "$f" >/dev/null 2>&1 && return 0
+        fi
+        r=$(json_query "$f" "has_cdn" 2>/dev/null || true)
+        [[ $r == true ]] && return 0
+        xray_file_has_cdn "$f" && return 0
+        ;;
+    esac
+  done < <(xray_list_config_files 2>/dev/null || true)
+  return 1
+}
+
+xray_inbound_port() {
+  local kind=$1 f p
+  while IFS= read -r f; do
+    [[ -n $f ]] || continue
+    p=""
+    if command -v jq >/dev/null 2>&1; then
+      case $kind in
+        reality)
+          p=$(jq -r '
+            ([.inbounds[]? // empty | select(type=="object")
+              | select((.protocol=="vless" and .streamSettings.security=="reality")
+                       or .tag=="vless-reality")
+              | .port] | map(select(.!=null)) | .[0] // empty)
+          ' "$f" 2>/dev/null || true)
+          ;;
+        cdn)
+          p=$(jq -r '
+            ([.inbounds[]? // empty | select(type=="object")
+              | select((.protocol=="vless" and .streamSettings.network=="ws"
+                        and .streamSettings.security=="tls")
+                       or .tag=="vless-ws-tls")
+              | .port] | map(select(.!=null)) | .[0] // empty)
+          ' "$f" 2>/dev/null || true)
+          ;;
+      esac
+    else
+      case $kind in
+        reality) p=$(json_query "$f" "reality_port" 2>/dev/null || true) ;;
+        cdn) p=$(json_query "$f" "cdn_port" 2>/dev/null || true) ;;
+      esac
+    fi
+    if ! port_is_valid "$p"; then
+      # bash 回退：文件确认有该组件后再取 port
+      case $kind in
+        reality) xray_file_has_reality "$f" && p=$(xray_file_port_near "$f") ;;
+        cdn) xray_file_has_cdn "$f" && p=$(xray_file_port_near "$f") ;;
+      esac
+    fi
+    if port_is_valid "$p"; then
+      printf '%s\n' "$p"
+      return 0
+    fi
+  done < <(xray_list_config_files 2>/dev/null || true)
+  return 0
+}
+
+# 兼容旧名：tag 快路径
+xray_has_inbound_tag() {
+  local tag=$1 f
+  while IFS= read -r f; do
+    [[ -n $f ]] || continue
+    if command -v jq >/dev/null 2>&1; then
+      jq -e --arg t "$tag" '
+        ([.inbounds[]? // .[]? | select(type=="object") | select(.tag==$t)] | length) > 0
+      ' "$f" >/dev/null 2>&1 && return 0
+    else
+      grep -qE "\"tag\"[[:space:]]*:[[:space:]]*\"${tag}\"" "$f" 2>/dev/null && return 0
+    fi
+  done < <(xray_list_config_files 2>/dev/null || true)
+  return 1
+}
+
+hy2_resolve_config_path() {
+  local exec_line spec path
+  exec_line=$(systemctl show -p ExecStart --value hysteria-server 2>/dev/null || true)
+  if [[ -n $exec_line ]]; then
+    while IFS= read -r spec; do
+      [[ $spec == file:* ]] || continue
+      path=${spec#file:}
+      if [[ -r $path ]]; then
+        printf '%s\n' "$path"
+        return 0
+      fi
+    done < <(parse_execstart_config_specs "$exec_line")
+  fi
+  # 回退固定路径
+  if [[ -r ${HY2_CONFIG:-} ]]; then
+    printf '%s\n' "$HY2_CONFIG"
+    return 0
+  fi
+  return 1
+}
+
 hy2_config_present() {
   local cfg
   cfg=$(hy2_resolve_config_path 2>/dev/null || true)
@@ -475,10 +756,6 @@ hy2_config_port() {
   sed -nE 's/^[[:space:]]*listen:[[:space:]]*:([0-9]+).*/\1/p' "$cfg" 2>/dev/null | head -n1
 }
 
-port_is_valid() {
-  [[ ${1:-} =~ ^[0-9]+$ ]] && ((1 <= 10#$1 && 10#$1 <= 65535))
-}
-
 # 从 info 文本提取「端口」字段
 info_get_port() {
   local file=$1 line
@@ -491,38 +768,38 @@ info_get_port() {
   done <"$file"
 }
 
-# 端口：state → info → 真实配置
+# 端口：state → info → 真实配置；comp=reality|cdn|hy2
 resolve_component_port() {
-  local state_file=$1 port_key=$2 info_file=$3 kind=$4 tag=${5:-}
+  local state_file=$1 port_key=$2 info_file=$3 comp=$4
   local p
   p=$(state_get "$state_file" "$port_key")
   if port_is_valid "$p"; then printf '%s\n' "$p"; return 0; fi
   p=$(info_get_port "$info_file")
   if port_is_valid "$p"; then printf '%s\n' "$p"; return 0; fi
-  if [[ $kind == xray ]]; then
-    p=$(xray_inbound_port "$tag")
-  else
-    p=$(hy2_config_port)
-  fi
+  case $comp in
+    reality|cdn) p=$(xray_inbound_port "$comp") ;;
+    hy2) p=$(hy2_config_port) ;;
+  esac
   if port_is_valid "$p"; then printf '%s\n' "$p"; return 0; fi
 }
 
-# 组件是否具备真实服务配置
+# 真实服务配置是否存在：comp=reality|cdn|hy2
 component_has_config() {
-  local kind=$1 tag=${2:-}
-  if [[ $kind == xray ]]; then
-    xray_has_inbound_tag "$tag"
-  else
-    hy2_config_present
-  fi
+  local comp=$1
+  case $comp in
+    reality) xray_has_component reality ;;
+    cdn) xray_has_component cdn ;;
+    hy2) hy2_config_present ;;
+    *) return 1 ;;
+  esac
 }
 
-# 菜单顶栏：以真实配置为主（state 仅元数据；REALITY/CDN 共用 xray 只计一次）
+# 菜单顶栏：真实配置证明存在；systemd 只表示运行态
 proxy_status_line() {
   local any=0 run=0 stop=0 bad=0
   local st
 
-  if xray_has_inbound_tag "vless-reality" || xray_has_inbound_tag "vless-ws-tls"; then
+  if component_has_config reality || component_has_config cdn; then
     any=1
     st=$(svc_state xray xray)
     case $st in
@@ -535,7 +812,7 @@ proxy_status_line() {
     bad=1
   fi
 
-  if hy2_config_present; then
+  if component_has_config hy2; then
     any=1
     st=$(svc_state hysteria-server hysteria)
     case $st in
@@ -618,14 +895,15 @@ print_block() {
   printf '\n'
 }
 
-# 节点页证据优先级：真实配置 > systemd > state 元数据 > info 缓存
+# 节点页：comp=reality|cdn|hy2
 # 返回：0=展示有效/异常组件  1=无此组件  2=仅残留 info
+# systemd 仅用于「运行中/已停止」展示，不证明 inbound 存在
 show_component() {
-  local name=$1 state_file=$2 info_file=$3 unit=$4 bin=$5 port_key=$6 kind=$7 tag=${8:-}
+  local name=$1 state_file=$2 info_file=$3 unit=$4 bin=$5 port_key=$6 comp=$7
   local has_cfg=0 has_state=0 has_info=0
   local st port="" sc stxt
 
-  if component_has_config "$kind" "$tag"; then
+  if component_has_config "$comp"; then
     has_cfg=1
   fi
   [[ -f $state_file ]] && has_state=1
@@ -644,7 +922,7 @@ show_component() {
 
   # state 有、真实配置无：配置缺失（不按 systemd 显示运行中，不展示链接）
   if (( has_state && !has_cfg )); then
-    port=$(resolve_component_port "$state_file" "$port_key" "$info_file" "$kind" "$tag")
+    port=$(resolve_component_port "$state_file" "$port_key" "$info_file" "$comp")
     printf '\n  %s%s%s  %s× 配置缺失%s' "$B" "$name" "$R" "$RED" "$R"
     [[ -n $port ]] && printf '  %s:%s%s' "$D" "$port" "$R"
     printf '\n'
@@ -653,7 +931,7 @@ show_component() {
   fi
 
   # 真实配置存在（state/info 可缺）
-  port=$(resolve_component_port "$state_file" "$port_key" "$info_file" "$kind" "$tag")
+  port=$(resolve_component_port "$state_file" "$port_key" "$info_file" "$comp")
   st=$(svc_state "$unit" "$bin")
   case $st in
     running) sc=$GRN; stxt="● 运行中" ;;
@@ -1208,14 +1486,14 @@ show_info() {
   printf '\n  %s节点与状态%s\n' "$B$CYN" "$R"
 
   set +e
-  show_component "REALITY" "$REALITY_STATE" "$XRAY_INFO" xray xray REALITY_PORT xray vless-reality
+  show_component "REALITY" "$REALITY_STATE" "$XRAY_INFO" xray xray REALITY_PORT reality
   rc=$?
   set -e
   (( rc == 0 )) && found=1
   (( rc == 2 )) && residual=1
 
   set +e
-  show_component "CDN / WS+TLS" "$CDN_STATE" "$CDN_INFO" xray xray CDN_PORT xray vless-ws-tls
+  show_component "CDN / WS+TLS" "$CDN_STATE" "$CDN_INFO" xray xray CDN_PORT cdn
   rc=$?
   set -e
   (( rc == 0 )) && found=1
