@@ -152,13 +152,16 @@ printf '地址:      1.2.3.4\n端口:      443\nUUID:      u1\nSNI:       sni.ex
 MOCK_SVC[xray]=running
 out=$(show_info 2>&1)
 assert "legacy reality shown" '[[ "$out" == *"REALITY"* && "$out" == *"运行中"* && "$out" == *":443"* ]]'
-assert "legacy reality meta warn" '[[ "$out" == *"状态元数据缺失"* ]]'
+assert "legacy reality no meta warn" '[[ "$out" != *"状态元数据缺失"* ]]'
 assert "legacy reality not residual" '[[ "$out" != *"残留信息文件"* ]]'
 assert "legacy reality not 暂无" '[[ "$out" != *"暂无代理"* ]]'
 assert "legacy reality not 未安装" '[[ "$out" != *"未安装"* ]]'
 assert "legacy reality fields" '[[ "$out" == *"1.2.3.4"* && "$out" == *"u1"* ]]'
 line=$(proxy_status_line)
 assert "legacy reality status run" '[[ "$line" == *"代理运行中"* ]]'
+# 排障模式才显示元数据提示
+out_dbg=$(PROXY_STATUS_DEBUG=1 show_info 2>&1)
+assert "debug shows meta warn" '[[ "$out_dbg" == *"状态元数据缺失"* ]]'
 
 # 2) Hysteria2 配置 + info，无 state
 clear_proxy
@@ -167,7 +170,7 @@ printf '地址:     9.9.9.9\n端口:     55479\n密码:     p\nSNI:      hy.exam
 MOCK_SVC[hysteria-server]=running
 out=$(show_info 2>&1)
 assert "legacy hy2 shown" '[[ "$out" == *"Hysteria2"* && "$out" == *"运行中"* && "$out" == *":55479"* ]]'
-assert "legacy hy2 meta warn" '[[ "$out" == *"状态元数据缺失"* ]]'
+assert "legacy hy2 no meta warn" '[[ "$out" != *"状态元数据缺失"* ]]'
 assert "legacy hy2 not residual" '[[ "$out" != *"残留信息文件"* ]]'
 assert "legacy hy2 not 暂无" '[[ "$out" != *"暂无代理"* ]]'
 

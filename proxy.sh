@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
-VERSION="1.4.5"
+VERSION="1.4.6"
 CONFIG_DIR="/root/proxy-info"
 BACKUP_DIR="${CONFIG_DIR}/backups"
 BACKUP_KEEP="${BACKUP_KEEP:-15}"
@@ -83,6 +83,7 @@ usage() {
   bash proxy.sh hy2  [参数]     安装/更新 Hysteria2（默认复用）
   bash proxy.sh cdn  [参数]     安装/更新 VLESS+WS+TLS
   bash proxy.sh show
+  bash proxy.sh show --status-debug   排障：显示内部元数据提示
   bash proxy.sh uninstall-xray | uninstall-hy2 | uninstall-cdn
 
 公共:
@@ -897,11 +898,14 @@ print_block() {
 
 # 节点页：comp=reality|cdn|hy2
 # 返回：0=展示有效/异常组件  1=无此组件  2=仅残留 info
-# systemd 仅用于「运行中/已停止」展示，不证明 inbound 存在
+# 正常模式：真实配置为唯一依据，不向用户暴露 state 概念
+# PROXY_STATUS_DEBUG=1 / --status-debug：才显示「状态元数据缺失」等排障信息
+# 查看状态只读，不创建或修改 state
 show_component() {
   local name=$1 state_file=$2 info_file=$3 unit=$4 bin=$5 port_key=$6 comp=$7
   local has_cfg=0 has_state=0 has_info=0
   local st port="" sc stxt
+  local debug=${PROXY_STATUS_DEBUG:-0}
 
   if component_has_config "$comp"; then
     has_cfg=1
@@ -909,19 +913,23 @@ show_component() {
   [[ -f $state_file ]] && has_state=1
   [[ -f $info_file ]] && has_info=1
 
-  # 仅 info 残留
-  if (( !has_cfg && !has_state && has_info )); then
+  # 仅 info 残留（无真实配置）
+  if (( !has_cfg && has_info )); then
+    # 有 state 无配置：更像配置丢失，而非「残留」
+    if (( has_state )); then
+      port=$(resolve_component_port "$state_file" "$port_key" "$info_file" "$comp")
+      printf '\n  %s%s%s  %s× 配置缺失%s' "$B" "$name" "$R" "$RED" "$R"
+      [[ -n $port ]] && printf '  %s:%s%s' "$D" "$port" "$R"
+      printf '\n'
+      printf '  %s!%s  服务配置中未找到该节点\n' "$YEL" "$R"
+      return 0
+    fi
     printf '  %s!%s  %s 残留信息文件\n' "$YEL" "$R" "$name"
     return 2
   fi
 
-  # 完全无此组件
-  if (( !has_cfg && !has_state && !has_info )); then
-    return 1
-  fi
-
-  # state 有、真实配置无：配置缺失（不按 systemd 显示运行中，不展示链接）
-  if (( has_state && !has_cfg )); then
+  # state 有、真实配置无、无 info
+  if (( !has_cfg && has_state )); then
     port=$(resolve_component_port "$state_file" "$port_key" "$info_file" "$comp")
     printf '\n  %s%s%s  %s× 配置缺失%s' "$B" "$name" "$R" "$RED" "$R"
     [[ -n $port ]] && printf '  %s:%s%s' "$D" "$port" "$R"
@@ -930,7 +938,12 @@ show_component() {
     return 0
   fi
 
-  # 真实配置存在（state/info 可缺）
+  # 完全无此组件
+  if (( !has_cfg && !has_state && !has_info )); then
+    return 1
+  fi
+
+  # 真实配置存在（state 可选，正常页不提示缺失）
   port=$(resolve_component_port "$state_file" "$port_key" "$info_file" "$comp")
   st=$(svc_state "$unit" "$bin")
   case $st in
@@ -943,13 +956,14 @@ show_component() {
   [[ -n $port ]] && printf '  %s:%s%s' "$D" "$port" "$R"
   printf '\n'
 
-  if (( !has_state )); then
+  if (( debug && !has_state )); then
     printf '  %s!%s  状态元数据缺失\n' "$YEL" "$R"
   fi
 
   if (( has_info )); then
     print_info_fields "$info_file"
   else
+    # 正常用户可见：连接详情不可用；非内部 state 概念
     printf '  %s!%s  节点信息缺失\n' "$YEL" "$R"
   fi
   return 0
@@ -1105,25 +1119,123 @@ generate_reality_keys() {
   printf '%s\n%s\n' "$priv" "$pub"
 }
 
+# 从真实 Xray 配置恢复 REALITY 参数（更新/重装时用，show 路径不调用）
+# 成功时设置 REALITY_PORT/UUID/SNI/TARGET/PRIV/PUB/SHORT 并 return 0
+recover_reality_from_live() {
+  local f raw
+  while IFS= read -r f; do
+    [[ -r $f ]] || continue
+    if command -v jq >/dev/null 2>&1; then
+      raw=$(jq -c '
+        [.inbounds[]? // empty | select(type=="object")
+          | select((.protocol=="vless" and .streamSettings.security=="reality")
+                   or .tag=="vless-reality")] | .[0] // empty
+      ' "$f" 2>/dev/null || true)
+      [[ -n $raw && $raw != null ]] || continue
+      REALITY_PORT=$(printf '%s' "$raw" | jq -r '.port // empty')
+      REALITY_UUID=$(printf '%s' "$raw" | jq -r '.settings.clients[0].id // empty')
+      REALITY_SNI=$(printf '%s' "$raw" | jq -r '.streamSettings.realitySettings.serverNames[0] // empty')
+      REALITY_TARGET=$(printf '%s' "$raw" | jq -r '.streamSettings.realitySettings.dest // empty')
+      REALITY_PRIV=$(printf '%s' "$raw" | jq -r '.streamSettings.realitySettings.privateKey // empty')
+      REALITY_SHORT=$(printf '%s' "$raw" | jq -r '.streamSettings.realitySettings.shortIds[0] // empty')
+    elif command -v python3 >/dev/null 2>&1; then
+      raw=$(FILE=$f python3 - <<'PY' 2>/dev/null || true
+import json, os
+with open(os.environ["FILE"], encoding="utf-8") as fh:
+    data = json.load(fh)
+ibs = data.get("inbounds") or []
+for ib in ibs:
+    if not isinstance(ib, dict):
+        continue
+    ss = ib.get("streamSettings") or {}
+    if ib.get("protocol") == "vless" and ss.get("security") == "reality" or ib.get("tag") == "vless-reality":
+        rs = ss.get("realitySettings") or {}
+        clients = ((ib.get("settings") or {}).get("clients") or [{}])
+        print(ib.get("port") or "")
+        print((clients[0] or {}).get("id") or "")
+        names = rs.get("serverNames") or [""]
+        print(names[0] if names else "")
+        print(rs.get("dest") or "")
+        print(rs.get("privateKey") or "")
+        sids = rs.get("shortIds") or [""]
+        print(sids[0] if sids else "")
+        break
+PY
+)
+      [[ -n $raw ]] || continue
+      REALITY_PORT=$(printf '%s\n' "$raw" | sed -n '1p')
+      REALITY_UUID=$(printf '%s\n' "$raw" | sed -n '2p')
+      REALITY_SNI=$(printf '%s\n' "$raw" | sed -n '3p')
+      REALITY_TARGET=$(printf '%s\n' "$raw" | sed -n '4p')
+      REALITY_PRIV=$(printf '%s\n' "$raw" | sed -n '5p')
+      REALITY_SHORT=$(printf '%s\n' "$raw" | sed -n '6p')
+    else
+      continue
+    fi
+    # 公钥：优先 info 缓存，否则尝试 xray x25519 派生（若支持）
+    REALITY_PUB=$(info_get_field "$XRAY_INFO" "PublicKey" 2>/dev/null || true)
+    [[ -n $REALITY_PUB ]] || REALITY_PUB=$(info_get_field "$XRAY_INFO" "公钥" 2>/dev/null || true)
+    if [[ -n ${REALITY_PRIV:-} && -n ${REALITY_SHORT:-} && -n ${REALITY_UUID:-} ]]; then
+      return 0
+    fi
+  done < <(xray_list_config_files 2>/dev/null || true)
+  return 1
+}
+
+info_get_field() {
+  local file=$1 key=$2 line
+  [[ -f $file ]] || return 0
+  while IFS= read -r line || [[ -n $line ]]; do
+    if [[ $line =~ ^[[:space:]]*${key}[[:space:]]*[:：][[:space:]]*(.*)$ ]]; then
+      printf '%s\n' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+  done <"$file"
+}
+
 install_reality() {
   parse_reality_args "$@"
   prepare_env
 
   local priv pub short ip link reused=0
   local arg_port=$REALITY_PORT arg_sni=$REALITY_SNI arg_target=$REALITY_TARGET arg_uuid=$REALITY_UUID
+  local live_exists=0
 
-  # 默认完整复用已有节点（端口/SNI/target/密钥），仅 CLI 显式参数覆盖
+  component_has_config reality && live_exists=1
+
+  # 1) 优先 state 管理缓存  2) 再从真实服务配置恢复  3) 全新安装
   if [[ -f $REALITY_STATE ]]; then
     load_state_safe "$REALITY_STATE"
     if [[ -n ${REALITY_PRIV:-} && -n ${REALITY_PUB:-} && -n ${REALITY_SHORT:-} ]]; then
       priv=$REALITY_PRIV; pub=$REALITY_PUB; short=$REALITY_SHORT
       reused=1
-      # load_state 已填充 REALITY_*；用 CLI 显式参数覆盖
       [[ -n $arg_port ]] && REALITY_PORT=$arg_port
       [[ -n $arg_sni ]] && REALITY_SNI=$arg_sni
       [[ -n $arg_target ]] && REALITY_TARGET=$arg_target
       [[ -n $arg_uuid ]] && REALITY_UUID=$arg_uuid
       log "复用已有 REALITY 配置（密钥/参数）；CLI 指定项优先"
+    fi
+  fi
+
+  if (( reused == 0 && live_exists )); then
+    if recover_reality_from_live; then
+      priv=$REALITY_PRIV
+      short=$REALITY_SHORT
+      pub=${REALITY_PUB:-}
+      reused=1
+      [[ -n $arg_port ]] && REALITY_PORT=$arg_port
+      [[ -n $arg_sni ]] && REALITY_SNI=$arg_sni
+      [[ -n $arg_target ]] && REALITY_TARGET=$arg_target
+      [[ -n $arg_uuid ]] && REALITY_UUID=$arg_uuid
+      log "从真实服务配置恢复 REALITY 参数"
+      # 无私钥对应公钥时，仍写入 state 用 privateKey；分享链接需要 pub
+      if [[ -z $pub ]]; then
+        warn "无法从缓存读取 PublicKey，更新后将重新生成分享链接字段"
+        # 尝试 xray 无法从 priv 直接得 pub 时保持空，save_info 仍写出
+        pub="unknown"
+      fi
+    else
+      fail "无法读取旧节点参数，请先修复配置"
     fi
   fi
 
@@ -1784,12 +1896,20 @@ main() {
   local cmd=${1:-menu}
   [[ $# -gt 0 ]] && shift
   cleanup_legacy_v2 2>/dev/null || true
+  # show --status-debug / status-debug
+  if [[ $cmd == show || $cmd == status ]]; then
+    if [[ ${1:-} == --status-debug || ${1:-} == status-debug ]]; then
+      PROXY_STATUS_DEBUG=1
+      shift || true
+    fi
+  fi
   case $cmd in
     menu|"") main_menu ;;
     xray|reality) install_reality "$@" ;;
     hy2|hysteria2) install_hy2 "$@" ;;
     cdn|cf|ws) install_cdn "$@" ;;
     show|status) show_info ;;
+    status-debug|--status-debug) PROXY_STATUS_DEBUG=1; show_info ;;
     uninstall-xray|uninstall-reality) uninstall_reality ;;
     uninstall-cdn|uninstall-cf|uninstall-ws) uninstall_cdn ;;
     uninstall-hy2|uninstall-hysteria2) uninstall_hy2 ;;
