@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="syw-vps"
-VERSION="1.1.7"
+VERSION="1.1.8"
 LIB_DIR="/usr/local/lib/syw-vps"
 BIN_VPS="/usr/local/bin/vps"
 MARKER="syw-vps-entrypoint"
@@ -40,13 +40,26 @@ ui_item() {
 }
 ui_foot() { printf '\n'; }
 
-entry_status_line() {
+# 模块可用：文件存在且 bash -n 通过。正常时不输出（无状态行）。
+module_usable() {
+  local f=$1
+  [[ -f $f && -s $f ]] && bash -n "$f" 2>/dev/null
+}
+
+entry_warning_line() {
   local okp=0 okt=0
-  [[ -f $PROXY_SH_LOCAL && -s $PROXY_SH_LOCAL ]] && okp=1
-  [[ -f $TRAFFIC_SH_LOCAL && -s $TRAFFIC_SH_LOCAL ]] && okt=1
-  if (( okp && okt )); then printf '%s●%s  模块就绪' "$GRN" "$R"
-  elif (( okp || okt )); then printf '%s○%s  模块不完整' "$YEL" "$R"
-  else printf '%s○%s  待安装模块' "$YEL" "$R"; fi
+  module_usable "$PROXY_SH_LOCAL" && okp=1 || true
+  module_usable "$TRAFFIC_SH_LOCAL" && okt=1 || true
+  if (( okp && okt )); then
+    return 0
+  fi
+  if (( !okp && !okt )); then
+    printf '%s×%s  功能模块不可用' "$RED" "$R"
+  elif (( !okp )); then
+    printf '%s!%s  代理模块不可用' "$YEL" "$R"
+  else
+    printf '%s!%s  流量模块不可用' "$YEL" "$R"
+  fi
 }
 
 read_tty() {
@@ -189,17 +202,20 @@ main_menu() {
   local c st
   ui_init
   while true; do
-    st=$(entry_status_line)
+    st=$(entry_warning_line || true)
     ui_head "VPS" "v${VERSION}"
-    ui_status "$st"
+    if [[ -n ${st:-} ]]; then
+      ui_status "$st"
+    fi
     ui_gap
     ui_item 1 "代理管理"
     ui_item 2 "流量管理"
     ui_gap
     ui_item 0 "退出"
-    ui_foot
+    ui_gap
+    printf '  请选择 [0-2] %s›%s ' "$CYN" "$R"
     c=""
-    if ! read_tty -p "  请选择 [0-2]: " c; then
+    if ! read_tty c; then
       warn "读取输入失败"
       return 1
     fi

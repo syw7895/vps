@@ -32,7 +32,9 @@ assert "menu shows 代理管理" '[[ "$out" == *"代理管理"* ]]'
 assert "menu shows 流量管理" '[[ "$out" == *"流量管理"* ]]'
 assert "no REALITY subtitle" '[[ "$out" != *"REALITY · HY2 · CDN"* ]]'
 assert "no traffic subtitle" '[[ "$out" != *"额度 · 限速 · 检查"* ]]'
+assert "no 模块就绪" '[[ "$out" != *"模块就绪"* ]]'
 assert "shows exit" '[[ "$out" == *"退出"* ]]'
+assert "prompt 0-2" '[[ "$out" == *"请选择 [0-2]"* ]]'
 
 echo ""
 echo "PASS=$pass FAIL=$fail"

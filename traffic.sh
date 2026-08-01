@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-traffic"
-VERSION="1.3.5"
+VERSION="1.3.6"
 LIB_DIR="/usr/local/lib/syw-vps"
 SELF_LOCAL="${LIB_DIR}/traffic.sh"
 SYW_VPS_REF="${SYW_VPS_REF:-main}"
@@ -757,16 +757,32 @@ ui_kv() { printf '  %s%-8s%s  %s\n' "$D" "$1" "$R" "$2"; }
 ui_note() { printf '  %s%s%s\n' "$D" "$1" "$R"; }
 ui_foot() { printf '\n'; }
 # 状态图例（一行弱化）
-ui_legend() {
-  printf '  %s%s●%s 正常  %s●%s 接近阈值  %s●%s 限速/超限%s\n' \
-    "$D" "$GRN" "$D" "$YEL" "$D" "$RED" "$D" "$R"
+# 本工具限速 qdisc 是否在网卡上（只读，不改 tc）
+limit_qdisc_present() {
+  local iface=$1
+  [[ -n $iface && $iface != — ]] || return 1
+  has_our_qdisc "$iface" && return 0
+  if [[ -n ${LIMIT_IFACE:-} && $LIMIT_IFACE != "$iface" ]]; then
+    has_our_qdisc "$LIMIT_IFACE" && return 0
+  fi
+  return 1
 }
 
+# 菜单顶栏：state 与 qdisc 不一致时黄字「状态需检查」，不自动改 tc
 menu_status_line() {
   load_config
   load_state
+  local iface="" thr=${THRESHOLD_PERCENT:-90}
+  set +e
+  iface=$(resolve_iface 2>/dev/null)
+  set -e
+
   if [[ $LIMIT_ACTIVE == true || $OWNED_BY_TOOL == true ]]; then
-    printf '%s●%s  限速中 · %s' "$RED" "$R" "$LIMIT_RATE"
+    if limit_qdisc_present "${iface:-}"; then
+      printf '%s●%s  限速中 · %s' "$RED" "$R" "$LIMIT_RATE"
+    else
+      printf '%s!%s  状态需检查' "$YEL" "$R"
+    fi
   elif [[ $PAUSED == true ]]; then
     printf '%s○%s  检查已暂停' "$YEL" "$R"
   elif [[ -z ${MONTHLY_QUOTA_GB:-} ]]; then
@@ -780,8 +796,10 @@ cmd_status() {
   load_config
   load_state
   ui_init
-  local iface tx= gb="—" pct=0 bar thr_gb="—" status_txt status_col
-  local qdisc_brief paused_txt limit_txt thr=${THRESHOLD_PERCENT:-90}
+  local iface tx= gb="—" pct=0 thr_gb="—" status_txt status_col status_mark
+  local paused_txt thr=${THRESHOLD_PERCENT:-90}
+  local show_debug=${TRAFFIC_STATUS_VERBOSE:-0}
+  local qdisc_brief="" limit_ok=0
 
   set +e
   iface=$(resolve_iface 2>/dev/null)
@@ -807,54 +825,83 @@ cmd_status() {
     pct=0
   fi
 
-  bar=$(progress_bar "$pct" 24 "$thr")
+  if limit_qdisc_present "$iface"; then
+    limit_ok=1
+  fi
 
   if [[ $LIMIT_ACTIVE == true || $OWNED_BY_TOOL == true ]]; then
-    status_col=$RED
-    status_txt="限速中 · ${LIMIT_RATE}"
+    if (( limit_ok )); then
+      status_col=$RED
+      status_mark="●"
+      status_txt="限速中 · ${LIMIT_RATE}"
+    else
+      status_col=$YEL
+      status_mark="!"
+      status_txt="状态需检查"
+      show_debug=1
+    fi
   elif [[ $PAUSED == true ]]; then
     status_col=$YEL
+    status_mark="○"
     status_txt="检查已暂停"
   elif [[ -z ${MONTHLY_QUOTA_GB:-} ]]; then
     status_col=$YEL
+    status_mark="○"
     status_txt="待设置额度"
   elif [[ -n ${tx:-} && -n ${MONTHLY_QUOTA_GB:-} ]] && (( pct >= thr )); then
-    status_col=$RED
-    status_txt="已达阈值 ${thr}%"
+    status_col=$YEL
+    status_mark="○"
+    status_txt="接近阈值 ${pct}%"
   else
     status_col=$GRN
+    status_mark="●"
     status_txt="正常放行"
   fi
 
-  paused_txt=$([[ $PAUSED == true ]] && echo "是" || echo "否")
-  limit_txt=$([[ $LIMIT_ACTIVE == true ]] && echo "是" || echo "否")
+  # 外部 qdisc 冲突时展开排障字段
+  if [[ $iface != — ]] && has_blocking_qdisc "$iface" 2>/dev/null; then
+    show_debug=1
+  fi
 
-  qdisc_brief=$(tc_qdisc_show "$iface" 2>/dev/null | head -n1 | sed 's/^[[:space:]]*//' || true)
-  [[ -n $qdisc_brief ]] || qdisc_brief="—"
-  if (( ${#qdisc_brief} > 42 )); then
-    qdisc_brief="${qdisc_brief:0:39}..."
+  if [[ $PAUSED == true ]]; then
+    paused_txt="已暂停"
+  else
+    paused_txt="已启用"
   fi
 
   ui_head "流量" "v${VERSION}"
-  ui_status "${status_col}●${R}  ${B}${status_txt}${R}"
-  ui_legend
+  ui_status "${status_col}${status_mark}${R}  ${status_txt}"
   ui_gap
+
   if [[ -n ${MONTHLY_QUOTA_GB:-} ]]; then
-    printf '  %s  %s%s%%%s\n' "$bar" "$B" "$pct" "$R"
-    ui_kv "用量" "${B}${gb}${R} / ${MONTHLY_QUOTA_GB} GB"
+    ui_kv "用量" "${gb} / ${MONTHLY_QUOTA_GB} GB"
+    ui_kv "月额度" "${MONTHLY_QUOTA_GB} GB"
     ui_kv "阈值" "${thr_gb} GB @ ${thr}%"
   else
-    ui_kv "用量" "${B}${gb}${R} GB"
-    ui_note "月额度未设置 → 菜单选 2"
+    ui_kv "用量" "$gb"
+    ui_kv "月额度" "未设置"
   fi
-  ui_gap
   ui_kv "网卡" "$iface"
-  ui_kv "限速" "${LIMIT_RATE} · 自动检查 ${paused_txt} · 当前 ${limit_txt}"
-  ui_kv "规则" "$([[ $OWNED_BY_TOOL == true ]] && echo 本工具 || echo 无) · ${LIMIT_HANDLE:-—}"
-  ui_kv "检查" "$(fmt_time "${LAST_CHECK_TS:-}") · $(fmt_reason "${LAST_REASON:-}")"
-  ui_kv "队列" "$qdisc_brief"
-  ui_gap
-  ui_note "说明: ${LIMIT_RATE} 约 10.8 GB/天量级；vnStat 与云厂商可能有误差"
+  ui_kv "限速策略" "${LIMIT_RATE} @ ${thr}%"
+  ui_kv "自动检查" "$paused_txt"
+  ui_kv "上次检查" "$(fmt_time "${LAST_CHECK_TS:-}")"
+  if [[ -n ${LAST_REASON:-} ]]; then
+    ui_note "原因：$(fmt_reason "${LAST_REASON}")"
+  fi
+  if [[ -z ${MONTHLY_QUOTA_GB:-} ]]; then
+    ui_note "提示：请先设置每月流量额度"
+  fi
+
+  if (( show_debug )); then
+    ui_gap
+    ui_kv "规则" "$([[ $OWNED_BY_TOOL == true ]] && echo 本工具 || echo 无) · ${LIMIT_HANDLE:-—}"
+    qdisc_brief=$(tc_qdisc_show "$iface" 2>/dev/null | head -n1 | sed 's/^[[:space:]]*//' || true)
+    [[ -n $qdisc_brief ]] || qdisc_brief="—"
+    if (( ${#qdisc_brief} > 56 )); then
+      qdisc_brief="${qdisc_brief:0:53}..."
+    fi
+    ui_kv "队列" "$qdisc_brief"
+  fi
   ui_foot
 }
 
@@ -1012,6 +1059,10 @@ main() {
     -h|--help|help) usage ;;
     --check|check) require_root; with_lock run_check ;;
     --status|status) cmd_status ;;
+    --verbose|status-debug|--status-debug)
+      TRAFFIC_STATUS_VERBOSE=1
+      cmd_status
+      ;;
     menu|"") main_menu ;;
     *) fail "未知命令: $1" ;;
   esac

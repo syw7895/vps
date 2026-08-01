@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
-VERSION="1.4.1"
+VERSION="1.4.2"
 CONFIG_DIR="/root/proxy-info"
 BACKUP_DIR="${CONFIG_DIR}/backups"
 BACKUP_KEEP="${BACKUP_KEEP:-15}"
@@ -75,7 +75,6 @@ ui_prompt() {
   read -r c || return 1
   printf '%s' "$c"
 }
-hr() { printf '  %s···············%s\n' "$D" "$R"; }
 pause() { read -r -p $'\n  按回车返回…' _; }
 
 usage() {
@@ -417,31 +416,7 @@ svc_state() {
   fi
 }
 
-component_line() {
-  local name=$1 state_file=$2 unit=$3 bin=$4 port_key=$5
-  local st port=""
-  if [[ ! -f $state_file ]]; then
-    printf '  %s- %-10s 未安装%s\n' "$D" "$name" "$R"
-    return
-  fi
-  port=$(state_get "$state_file" "$port_key")
-  st=$(svc_state "$unit" "$bin")
-  case $st in
-    running) printf '  %s● %-10s 运行中%s' "$GRN" "$name" "$R" ;;
-    stopped) printf '  %s○ %-10s 已停止%s' "$YEL" "$name" "$R" ;;
-    *)       printf '  %s○ %-10s 异常%s' "$YEL" "$name" "$R" ;;
-  esac
-  [[ -n $port ]] && printf '  %s:%s%s' "$D" "$port" "$R"
-  printf '\n'
-}
-
-print_component_statuses() {
-  component_line "REALITY" "$REALITY_STATE" xray xray REALITY_PORT
-  component_line "CDN/WS" "$CDN_STATE" xray xray CDN_PORT
-  component_line "Hysteria2" "$HY2_STATE" hysteria-server hysteria HY2_PORT
-}
-
-# 菜单顶栏一行状态
+# 菜单顶栏一行状态（REALITY/CDN 共用 xray，只计一次）
 proxy_status_line() {
   local any=0 run=0 stop=0 bad=0
   local st
@@ -472,7 +447,7 @@ proxy_status_line() {
   elif (( run == 1 )); then
     printf '%s!%s  部分服务停止' "$YEL" "$R"
   else
-    printf '%s○%s  暂无代理' "$YEL" "$R"
+    printf '%s○%s  代理已停止' "$YEL" "$R"
   fi
 }
 
@@ -499,11 +474,68 @@ save_info() {
   chmod 600 "$file"
 }
 
+# 打印 info 文件中的连接字段（跳过纯标题行，无分隔线）
+print_info_fields() {
+  local file=$1 line k v
+  [[ -f $file ]] || return 0
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ -z ${line//[[:space:]]/} ]] && continue
+    if [[ $line == *://* ]]; then
+      printf '  %s\n' "$line"
+      continue
+    fi
+    if [[ $line != *:* ]]; then
+      continue
+    fi
+    k=${line%%:*}
+    v=${line#*:}
+    v=${v#"${v%%[![:space:]]*}"}
+    k=${k%"${k##*[![:space:]]}"}
+    if [[ -z $v ]]; then
+      printf '  %s%-10s%s\n' "$D" "$k" "$R"
+    else
+      printf '  %s%-10s%s %s\n' "$D" "$k" "$R" "$v"
+    fi
+  done <"$file"
+}
+
+# 安装完成后展示节点字段
 print_block() {
-  printf '\n%s%s%s\n' "$B$CYN" "$1" "$R"
-  hr
-  cat "$2"
+  printf '\n  %s%s%s\n' "$B$CYN" "$1" "$R"
+  print_info_fields "$2"
   printf '\n'
+}
+
+# 节点页：仅 state 证明已配置；info 仅供详情。返回 0=已配置并展示
+show_component() {
+  local name=$1 state_file=$2 info_file=$3 unit=$4 bin=$5 port_key=$6
+  local st port="" sc stxt
+
+  if [[ ! -f $state_file ]]; then
+    if [[ -f $info_file ]]; then
+      printf '  %s!%s  发现 %s 残留信息文件\n' "$YEL" "$R" "$name"
+    fi
+    return 1
+  fi
+
+  port=$(state_get "$state_file" "$port_key")
+  st=$(svc_state "$unit" "$bin")
+  case $st in
+    running) sc=$GRN; stxt="● 运行中" ;;
+    stopped) sc=$YEL; stxt="○ 已停止" ;;
+    *)       sc=$RED; stxt="× 异常" ;;
+  esac
+
+  printf '\n  %s%s%s  %s%s%s' "$B" "$name" "$R" "$sc" "$stxt" "$R"
+  [[ -n $port ]] && printf '  %s:%s%s' "$D" "$port" "$R"
+  printf '\n'
+
+  if [[ -f $info_file ]]; then
+    print_info_fields "$info_file"
+  else
+    printf '  %s!%s  %s 已配置，但节点信息缺失\n' "$YEL" "$R" "$name"
+  fi
+  return 0
 }
 
 # ---------- Xray / 证书 ----------
@@ -1034,12 +1066,19 @@ EOF
 # ---------- 展示 / 卸载 ----------
 show_info() {
   local found=0
-  [[ -f $XRAY_INFO ]] && { print_block "REALITY" "$XRAY_INFO"; found=1; }
-  [[ -f $CDN_INFO ]] && { print_block "CDN / WS+TLS" "$CDN_INFO"; found=1; }
-  [[ -f $HY2_INFO ]] && { print_block "Hysteria2" "$HY2_INFO"; found=1; }
-  ((found)) || { printf '\n'; log "暂无已保存节点"; }
-  printf '\n%s服务状态%s\n' "$B" "$R"; hr
-  print_component_statuses
+  printf '\n  %s节点与状态%s\n' "$B$CYN" "$R"
+  if show_component "REALITY" "$REALITY_STATE" "$XRAY_INFO" xray xray REALITY_PORT; then
+    found=1
+  fi
+  if show_component "CDN / WS+TLS" "$CDN_STATE" "$CDN_INFO" xray xray CDN_PORT; then
+    found=1
+  fi
+  if show_component "Hysteria2" "$HY2_STATE" "$HY2_INFO" hysteria-server hysteria HY2_PORT; then
+    found=1
+  fi
+  if (( found == 0 )); then
+    printf '  %s○%s  暂无代理\n' "$YEL" "$R"
+  fi
   printf '\n'
 }
 
@@ -1189,16 +1228,16 @@ pick_sni() {
   local title=$1 default_sni=${2:-} i n c
   n=${#SNI_PRESETS[@]}
   printf '\n  %s%s%s\n' "$B" "$title" "$R"
-  hr
+  ui_gap
   if [[ -n $default_sni ]]; then
     printf '  %s0%s  保持当前: %s（默认）\n' "$CYN" "$R" "$default_sni"
   else
     printf '  %s0%s  随机（默认）\n' "$CYN" "$R"
   fi
   for ((i = 0; i < n; i++)); do
-    printf '  %s%d%s  %s\n' "$GRN" "$((i + 1))" "$R" "${SNI_PRESETS[i]}"
+    printf '  %s%d%s  %s\n' "$CYN" "$((i + 1))" "$R" "${SNI_PRESETS[i]}"
   done
-  hr
+  ui_gap
   read -r -p "  请选择 [0]: " c
   c=${c:-0}
   if [[ $c == 0 ]]; then
