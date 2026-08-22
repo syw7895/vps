@@ -441,9 +441,9 @@ parse_execstart_config_specs() {
   local exec_line=$1
   exec_line=${exec_line#path=}
   if command -v python3 >/dev/null 2>&1; then
-    printf '%s' "$exec_line" | python3 - <<'PY'
-import shlex, sys
-line = sys.stdin.read()
+    EXEC_LINE="$exec_line" python3 - <<'PY'
+import os, shlex
+line = os.environ.get("EXEC_LINE", "")
 try:
     tokens = shlex.split(line, posix=True)
 except Exception:
@@ -1033,8 +1033,12 @@ xray_validate_path() {
 xray_apply_perms() {
   local path=$1 xg
   xg=$(xray_run_group)
-  install -d -o root -g "$xg" -m 750 "$(dirname "$path")"
-  chown "root:$xg" "$path" 2>/dev/null || true
+  if ((EUID == 0)); then
+    install -d -o root -g "$xg" -m 750 "$(dirname "$path")"
+    chown "root:$xg" "$path" 2>/dev/null || true
+  else
+    install -d -m 750 "$(dirname "$path")"
+  fi
   chmod 640 "$path" 2>/dev/null || true
 }
 

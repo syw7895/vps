@@ -72,6 +72,7 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 - 节点标题含端口协议，如 `443/TCP`；分享链接单独成块
 - Hysteria2 每周检查稳定版更新；下载后核对官方 SHA256，启动失败自动回滚
 - 可在代理菜单立即更新，或运行 `sudo bash /usr/local/lib/syw-vps/proxy.sh update-hy2`
+- 修复 Xray `ExecStart` 配置路径解析，并兼容非 root 的只读测试环境
 
 ## 流量
 
