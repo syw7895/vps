@@ -1723,6 +1723,12 @@ EOF
   systemctl enable --now syw-hy2-update.timer >/dev/null
 }
 
+update_hy2_manual() {
+  update_hy2_core manual
+  enable_hy2_auto_update
+  ok "Hysteria2 每周自动更新已启用"
+}
+
 parse_hy2_args() {
   HY2_PORT="${HY2_PORT:-}"; HY2_PASSWORD="${HY2_PASSWORD:-}"
   HY2_DOMAIN="${HY2_DOMAIN:-}"; HY2_MASQUERADE="${HY2_MASQUERADE:-}"
@@ -2266,7 +2272,7 @@ main_menu() {
     case $c in
       1) menu_install ;;
       2) show_info; pause ;;
-      3) update_hy2_core manual; pause ;;
+      3) update_hy2_manual; pause ;;
       4) menu_uninstall ;;
       0) return 0 ;;
       "") continue ;;
@@ -2301,7 +2307,11 @@ main() {
     menu|"") main_menu ;;
     xray|reality) install_reality "$@" ;;
     hy2|hysteria2) install_hy2 "$@" ;;
-    update-hy2|update-hysteria2) update_hy2_core "${1:-manual}" ;;
+    update-hy2|update-hysteria2)
+      if [[ ${1:-} == --auto ]]; then update_hy2_core --auto
+      else update_hy2_manual
+      fi
+      ;;
     cdn|cf|ws) install_cdn "$@" ;;
     show|status) show_info ;;
     status-debug|--status-debug) PROXY_STATUS_DEBUG=1; show_info ;;

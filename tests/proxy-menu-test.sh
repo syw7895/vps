@@ -27,7 +27,7 @@ show_info() { :; }
 pause() { :; }
 menu_uninstall() { echo "__CALL_menu_uninstall__"; }
 menu_install() { echo "__CALL_menu_install__"; }
-update_hy2_core() { echo "__CALL_update_hy2_core__"; }
+update_hy2_manual() { echo "__CALL_update_hy2_manual__"; }
 cleanup_legacy_v2() { :; }
 
 out=$(printf '0\n' | main_menu 2>&1) || true
@@ -46,7 +46,7 @@ assert "no box chars" '[[ $has_box -eq 0 ]]'
 assert "prompt present" '[[ "$out" == *"请选择 [0-4]"* ]]'
 
 out3=$(printf '3\n0\n' | main_menu 2>&1) || true
-assert "case 3 update hy2" '[[ "$out3" == *"__CALL_update_hy2_core__"* ]]'
+assert "case 3 update hy2" '[[ "$out3" == *"__CALL_update_hy2_manual__"* ]]'
 
 out4=$(printf '4\n0\n' | main_menu 2>&1) || true
 assert "case 4 menu_uninstall" '[[ "$out4" == *"__CALL_menu_uninstall__"* ]]'

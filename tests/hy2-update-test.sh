@@ -98,6 +98,13 @@ enable_hy2_auto_update
 assert "timer is weekly and persistent" 'grep -q "OnCalendar=Mon" "$HY2_UPDATE_TIMER" && grep -q "Persistent=true" "$HY2_UPDATE_TIMER"'
 assert "service invokes auto update" 'grep -q "proxy.sh update-hy2 --auto" "$HY2_UPDATE_SERVICE"'
 
+manual_updated=0
+timer_enabled=0
+update_hy2_core() { [[ $1 == manual ]] && manual_updated=1; }
+enable_hy2_auto_update() { timer_enabled=1; }
+update_hy2_manual >/dev/null
+assert "manual update enables timer" '[[ $manual_updated -eq 1 && $timer_enabled -eq 1 ]]'
+
 echo ""
 echo "PASS=$pass FAIL=$failed"
 [[ $failed -eq 0 ]]
