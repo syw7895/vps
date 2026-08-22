@@ -1019,7 +1019,16 @@ xray_validate_path() {
   local path=$1 mode=${2:-file}
   if [[ ${VPS_PROXY_SKIP_XRAY_TEST:-0} == 1 ]] || ! command -v xray >/dev/null 2>&1; then
     if command -v python3 >/dev/null 2>&1; then
-      python3 -c "import json; json.load(open(r'''$path''',encoding='utf-8'))" 2>/dev/null || return 1
+      python3 - "$path" "$mode" <<'PY' 2>/dev/null || return 1
+import glob, json, os, sys
+path, mode = sys.argv[1:3]
+files = sorted(glob.glob(os.path.join(path, "*.json"))) if mode == "dir" else [path]
+if not files:
+    raise SystemExit(1)
+for file in files:
+    with open(file, encoding="utf-8") as stream:
+        json.load(stream)
+PY
     fi
     return 0
   fi
