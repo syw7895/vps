@@ -37,6 +37,9 @@ jobs:
       - name: Integrity safety tests
         run: bash tests/integrity-safety-test.sh
 
+      - name: Hysteria2 update tests
+        run: bash tests/hy2-update-test.sh
+
       - name: ShellCheck (advisory)
         continue-on-error: true
         run: |

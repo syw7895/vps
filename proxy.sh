@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
-VERSION="1.5.1"
+VERSION="1.6.0"
 CONFIG_DIR="/root/proxy-info"
 BACKUP_DIR="${CONFIG_DIR}/backups"
 BACKUP_KEEP="${BACKUP_KEEP:-15}"
@@ -28,6 +28,13 @@ HY2_CONFIG="/etc/hysteria/config.yaml"
 HY2_CERT_DIR="/etc/hysteria/certs"
 HY2_DROPIN="/etc/systemd/system/hysteria-server.service.d/10-vps-proxy-user.conf"
 HY2_USER="hysteria"
+HY2_BIN="${HY2_BIN:-/usr/local/bin/hysteria}"
+HY2_UPDATE_STATE="${CONFIG_DIR}/hy2-update.conf"
+HY2_UPDATE_SERVICE="/etc/systemd/system/syw-hy2-update.service"
+HY2_UPDATE_TIMER="/etc/systemd/system/syw-hy2-update.timer"
+HY2_UPDATE_LOCK="/run/lock/syw-hy2-update.lock"
+HY2_UPDATE_API="${HY2_UPDATE_API:-https://api.hy2.io/v1/update?cver=installscript&plat=linux&arch=amd64&chan=release&side=server}"
+HY2_RELEASE_BASE="${HY2_RELEASE_BASE:-https://github.com/HyNetworks/hysteria/releases/download/app}"
 PUBLIC_IP=""
 DEPS_INSTALLED=0
 # 旧版 v2 快捷命令路径（仅用于安全清理，不再安装）
@@ -89,6 +96,7 @@ usage() {
   bash proxy.sh                 进入菜单
   bash proxy.sh xray [参数]     安装/更新 REALITY（默认复用已有节点参数）
   bash proxy.sh hy2  [参数]     安装/更新 Hysteria2（默认复用）
+  bash proxy.sh update-hy2      立即检查/更新 Hysteria2 核心
   bash proxy.sh cdn  [参数]     安装/更新 VLESS+WS+TLS
   bash proxy.sh show
   bash proxy.sh show --status-debug   排障：显示内部元数据提示
@@ -1564,6 +1572,144 @@ install_cdn() {
 }
 
 # ---------- Hysteria2 ----------
+hy2_arch() {
+  case $(uname -m) in
+    x86_64|amd64) echo amd64 ;;
+    i386|i486|i586|i686) echo 386 ;;
+    aarch64|arm64) echo arm64 ;;
+    armv7l|armv7) echo armv7 ;;
+    s390x|ppc64le|mips64le|riscv64|loongarch64) uname -m ;;
+    *) return 1 ;;
+  esac
+}
+
+hy2_version_of() {
+  "$1" version 2>/dev/null | grep -Eo 'v[0-9]+\.[0-9]+\.[0-9]+' | head -n1
+}
+
+hy2_latest_version() {
+  local data version
+  data=$(curl -fsSL --retry 3 --connect-timeout 10 --max-time 60 "$HY2_UPDATE_API") || return 1
+  version=$(sed -nE 's/.*"lver"[[:space:]]*:[[:space:]]*"(v[0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' <<<"$data" | head -n1)
+  [[ $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  printf '%s\n' "$version"
+}
+
+hy2_version_lt() {
+  [[ $1 != "$2" && $(printf '%s\n%s\n' "${1#v}" "${2#v}" | sort -V | tail -n1) == "${2#v}" ]]
+}
+
+hy2_record_update() {
+  local result=$1 current=${2:-unknown} latest=${3:-unknown}
+  ensure_dirs
+  write_kv_file "$HY2_UPDATE_STATE" \
+    "LAST_CHECK=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "RESULT=${result}" "CURRENT=${current}" "LATEST=${latest}"
+}
+
+hy2_download_verified() {
+  local version=$1 arch=$2 dest=$3 work hashes asset expected actual
+  asset="hysteria-linux-${arch}"
+  work=$(mktemp -d /tmp/${APP_NAME}.hy2.XXXXXX)
+  hashes="$work/hashes.txt"
+  if ! curl_download "${HY2_RELEASE_BASE}/${version}/hashes.txt" "$hashes" ||
+     ! curl_download "${HY2_RELEASE_BASE}/${version}/${asset}" "$work/$asset"; then
+    rm -rf -- "$work"
+    return 1
+  fi
+  expected=$(awk -v name="build/${asset}" '$2 == name {print $1; exit}' "$hashes")
+  actual=$(sha256_file "$work/$asset")
+  if ! is_valid_sha256 "$expected" || [[ ${actual,,} != "${expected,,}" ]]; then
+    rm -rf -- "$work"
+    return 2
+  fi
+  install -m 755 "$work/$asset" "$dest"
+  rm -rf -- "$work"
+}
+
+update_hy2_core() {
+  local mode=${1:-manual} current latest arch candidate backup was_active=0
+  mode=${mode#--}
+  require_root
+  require_systemd
+  ensure_dirs
+  for cmd in curl sha256sum sort flock; do
+    command -v "$cmd" >/dev/null || fail "更新 Hysteria2 缺少命令: $cmd"
+  done
+  [[ -x $HY2_BIN ]] || fail "Hysteria2 尚未安装"
+  install -d -m 755 "$(dirname "$HY2_UPDATE_LOCK")"
+  exec 9>"$HY2_UPDATE_LOCK"
+  if ! flock -n 9; then
+    [[ $mode == auto ]] || warn "已有 Hysteria2 更新任务运行中"
+    return 0
+  fi
+
+  current=$(hy2_version_of "$HY2_BIN") || true
+  [[ -n $current ]] || { hy2_record_update invalid-version; fail "无法识别当前 Hysteria2 版本"; }
+  latest=$(hy2_latest_version) || { hy2_record_update check-failed "$current"; fail "无法获取 Hysteria2 最新稳定版"; }
+  if ! hy2_version_lt "$current" "$latest"; then
+    hy2_record_update current "$current" "$latest"
+    [[ $mode == auto ]] || ok "Hysteria2 已是最新稳定版: ${current}"
+    return 0
+  fi
+  arch=$(hy2_arch) || { hy2_record_update unsupported-arch "$current" "$latest"; fail "不支持的 CPU 架构: $(uname -m)"; }
+  candidate=$(mktemp /tmp/${APP_NAME}.hy2-bin.XXXXXX)
+  backup=$(mktemp /tmp/${APP_NAME}.hy2-old.XXXXXX)
+  cp -p "$HY2_BIN" "$backup"
+  if ! hy2_download_verified "$latest" "$arch" "$candidate"; then
+    rm -f -- "$candidate" "$backup"
+    hy2_record_update verify-failed "$current" "$latest"
+    fail "Hysteria2 下载或 SHA256 校验失败"
+  fi
+  systemctl is-active --quiet hysteria-server 2>/dev/null && was_active=1
+  install -m 755 "$candidate" "${HY2_BIN}.new"
+  mv -f "${HY2_BIN}.new" "$HY2_BIN"
+  rm -f -- "$candidate"
+  if ((was_active)); then
+    systemctl restart hysteria-server || true
+    sleep 2
+    if ! systemctl is-active --quiet hysteria-server; then
+      install -m 755 "$backup" "$HY2_BIN"
+      systemctl restart hysteria-server || true
+      rm -f -- "$backup"
+      hy2_record_update rolled-back "$current" "$latest"
+      fail "新版启动失败，已恢复 ${current}"
+    fi
+  fi
+  rm -f -- "$backup"
+  hy2_record_update updated "$latest" "$latest"
+  ok "Hysteria2 已更新: ${current} → ${latest}"
+}
+
+enable_hy2_auto_update() {
+  cat >"$HY2_UPDATE_SERVICE" <<EOF
+[Unit]
+Description=syw-vps Hysteria2 stable update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /usr/local/lib/syw-vps/proxy.sh update-hy2 --auto
+EOF
+  cat >"$HY2_UPDATE_TIMER" <<'EOF'
+[Unit]
+Description=Weekly Hysteria2 stable update check
+
+[Timer]
+OnCalendar=Mon *-*-* 04:00:00
+RandomizedDelaySec=6h
+Persistent=true
+Unit=syw-hy2-update.service
+
+[Install]
+WantedBy=timers.target
+EOF
+  chmod 644 "$HY2_UPDATE_SERVICE" "$HY2_UPDATE_TIMER"
+  systemctl daemon-reload
+  systemctl enable --now syw-hy2-update.timer >/dev/null
+}
+
 parse_hy2_args() {
   HY2_PORT="${HY2_PORT:-}"; HY2_PASSWORD="${HY2_PASSWORD:-}"
   HY2_DOMAIN="${HY2_DOMAIN:-}"; HY2_MASQUERADE="${HY2_MASQUERADE:-}"
@@ -1591,7 +1737,8 @@ install_hy2_core() {
     log "安装 Hysteria2（校验远程安装脚本）..."
     HYSTERIA_USER=$HY2_USER run_verified_script "$HY2_INSTALLER_URL" "$HY2_INSTALLER_SHA256"
   else
-    log "Hysteria2 已安装"
+    log "检查 Hysteria2 核心更新..."
+    update_hy2_core install
   fi
   command -v hysteria >/dev/null || fail "Hysteria2 安装失败"
 }
@@ -1709,6 +1856,7 @@ EOF
 
   configure_hy2_service
   restart_svc hysteria-server "Hysteria2"
+  enable_hy2_auto_update
   open_port "$HY2_PORT" udp
 
   link="hysteria2://${HY2_PASSWORD}@${ip}:${HY2_PORT}/?sni=${HY2_DOMAIN}&insecure=1&pinSHA256=${cert_sha}#HY2-${ip}"
@@ -1862,11 +2010,14 @@ uninstall_hy2() {
     run_verified_script "$HY2_INSTALLER_URL" "$HY2_INSTALLER_SHA256" --remove ||
       fail "Hysteria2 卸载器执行失败"
   fi
+  systemctl disable --now syw-hy2-update.timer 2>/dev/null || true
+  rm -f "$HY2_UPDATE_SERVICE" "$HY2_UPDATE_TIMER" "$HY2_UPDATE_STATE"
   systemctl disable hysteria-server 2>/dev/null || true
   rm -f "$HY2_INFO" "$HY2_CONFIG" "$HY2_STATE" "$HY2_DROPIN"
   rm -rf "$HY2_CERT_DIR"
   rmdir "$(dirname "$HY2_DROPIN")" /etc/hysteria 2>/dev/null || true
   userdel -r "$HY2_USER" 2>/dev/null || true
+  systemctl daemon-reload
   ok "已卸载 Hysteria2"
 }
 
@@ -2088,12 +2239,13 @@ main_menu() {
     print_banner
     ui_item 1 "安装代理"
     ui_item 2 "节点与状态"
-    ui_item 3 "卸载" danger
+    ui_item 3 "更新 Hysteria2 核心"
+    ui_item 4 "卸载" danger
     ui_gap
     ui_item 0 "返回" muted
     ui_gap
     local c
-    c=$(ui_prompt 3) || {
+    c=$(ui_prompt 4) || {
       warn "读取输入失败"
       return 1
     }
@@ -2101,7 +2253,8 @@ main_menu() {
     case $c in
       1) menu_install ;;
       2) show_info; pause ;;
-      3) menu_uninstall ;;
+      3) update_hy2_core manual; pause ;;
+      4) menu_uninstall ;;
       0) return 0 ;;
       "") continue ;;
       *) warn "无效选项"; sleep 1 ;;
@@ -2135,6 +2288,7 @@ main() {
     menu|"") main_menu ;;
     xray|reality) install_reality "$@" ;;
     hy2|hysteria2) install_hy2 "$@" ;;
+    update-hy2|update-hysteria2) update_hy2_core "${1:-manual}" ;;
     cdn|cf|ws) install_cdn "$@" ;;
     show|status) show_info ;;
     status-debug|--status-debug) PROXY_STATUS_DEBUG=1; show_info ;;

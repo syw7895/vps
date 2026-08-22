@@ -39,16 +39,17 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 ```
 
 ```text
-  代理管理  v1.5.1
+  代理管理  v1.6.0
   ● 2 个节点运行中
 
    1.  安装代理
    2.  节点与状态
-   3.  卸载
+   3.  更新 Hysteria2 核心
+   4.  卸载
 
    0.  返回
 
-  请选择 [0-3]:
+  请选择 [0-4]:
 ```
 
 ```text
@@ -69,6 +70,8 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 - 状态依据：真实服务配置（ExecStart + 协议语义）
 - 正常页不显示 state / 元数据提示（`--status-debug` 可开）
 - 节点标题含端口协议，如 `443/TCP`；分享链接单独成块
+- Hysteria2 每周检查稳定版更新；下载后核对官方 SHA256，启动失败自动回滚
+- 可在代理菜单立即更新，或运行 `sudo bash /usr/local/lib/syw-vps/proxy.sh update-hy2`
 
 ## 流量
 
@@ -88,4 +91,5 @@ bash tests/traffic-menu-test.sh
 bash tests/menu-ui-test.sh
 bash tests/status-ui-test.sh
 bash tests/integrity-safety-test.sh
+bash tests/hy2-update-test.sh
 ```
