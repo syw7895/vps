@@ -101,6 +101,20 @@ assert "ws mode parser" '[[ $CDN_MODE == cloudflare && $CDN_SERVER == 203.0.113.
 validate_ws_mode direct
 validate_server_host example.com
 
+# 旧版 Hysteria2 没有 state/drop-in 标记时，专用配置 + 信息文件仍可安全识别。
+HY2_CONFIG="$CONFIG_DIR/hysteria.yaml"
+HY2_INFO="$CONFIG_DIR/hysteria2.txt"
+HY2_DROPIN="$CONFIG_DIR/hy2-dropin"
+cat >"$HY2_CONFIG" <<'EOF'
+listen: :23456
+tls:
+  cert: /etc/hysteria/certs/server.crt
+auth:
+  password: test-password
+EOF
+: >"$HY2_INFO"
+assert "legacy hy2 managed detection" 'managed_component_present hy2'
+
 # 多 inbound：目标不是第一个
 cat >"$XRAY_CONFIG" <<'EOF'
 {

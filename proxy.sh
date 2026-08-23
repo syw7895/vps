@@ -918,13 +918,24 @@ xray_has_managed_tag() {
   return 1
 }
 
+# 兼容旧版本项目安装：旧版本没有写入 state/drop-in 标记，但会使用专用配置、服务和信息文件。
+hy2_legacy_layout_present() {
+  local unit
+  hy2_config_present || return 1
+  [[ -f $HY2_INFO ]] && return 0
+  unit=$(systemctl cat hysteria-server 2>/dev/null || true)
+  grep -qE '/usr/local/bin/hysteria([[:space:]]|$)' <<<"$unit" && return 0
+  return 1
+}
+
 managed_component_present() {
   local comp=$1
   case $comp in
     reality) [[ -f $REALITY_STATE ]] || xray_has_managed_tag reality ;;
     cdn) [[ -f $CDN_STATE ]] || xray_has_managed_tag cdn ;;
     hy2) [[ -f $HY2_STATE ]] ||
-      { [[ -r $HY2_DROPIN ]] && grep -q '^# syw-vps-managed=vps-proxy$' "$HY2_DROPIN" 2>/dev/null; } ;;
+      { [[ -r $HY2_DROPIN ]] && grep -q '^# syw-vps-managed=vps-proxy$' "$HY2_DROPIN" 2>/dev/null; } ||
+      hy2_legacy_layout_present ;;
     *) return 1 ;;
   esac
 }
@@ -2783,7 +2794,7 @@ menu_uninstall() {
       actions+=(cdn)
       labels+=("卸载 WS+TLS")
     fi
-    if component_has_config hy2 || [[ -f $HY2_STATE ]]; then
+    if managed_component_present hy2; then
       actions+=(hy2)
       labels+=("卸载 Hysteria2")
     fi
