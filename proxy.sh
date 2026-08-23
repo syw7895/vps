@@ -2517,30 +2517,50 @@ restart_svc_or_fail() {
   return 1
 }
 
+# 卸载期间仅保留同目录临时快照，成功后立即删除，不进入备份归档。
+uninstall_snapshot_file() {
+  local src=$1 snap
+  [[ -f $src ]] || return 0
+  snap=$(mktemp "$src.uninstall.XXXXXX") || return 1
+  cp -p -- "$src" "$snap" || { rm -f -- "$snap"; return 1; }
+  printf '%s\n' "$snap"
+}
+
+uninstall_restore_snapshot() {
+  local dst=$1 snap=$2
+  [[ -n $snap && -f $snap ]] || return 0
+  cp -p -- "$snap" "$dst"
+}
+
 uninstall_reality() {
   require_root
   managed_component_present reality || { warn "未找到本项目管理的 REALITY，未执行卸载"; return 0; }
   xray_discover
-  local dest=${XRAY_CONFIG_FILE:-$XRAY_CONFIG}
-  local -a xray_targets=()
-  mapfile -t xray_targets < <(xray_backup_target_list)
-  backup_paths reality-rm "$REALITY_STATE" "$XRAY_INFO" "${xray_targets[@]}"
-  [[ -f $dest ]] && cp -a "$dest" "${dest}.pre-uninstall-reality" || true
+  local dest=${XRAY_CONFIG_FILE:-$XRAY_CONFIG} state_snap="" info_snap=""
+  state_snap=$(uninstall_snapshot_file "$REALITY_STATE") || fail "无法创建临时回滚快照"
+  info_snap=$(uninstall_snapshot_file "$XRAY_INFO") || { rm -f -- "$state_snap"; fail "无法创建临时回滚快照"; }
+  LAST_BACKUP=""; LAST_BACKUP_MISSING=()
+  [[ -f $dest ]] && cp -a "$dest" "$dest.pre-uninstall-reality" || true
   rm -f "$REALITY_STATE" "$XRAY_INFO"
   # 按剩余 state 重建，精确去掉本管理 REALITY inbound，保留 WS+TLS/第三方
   if ! build_xray_config; then
-    restore_last_backup || true
-    [[ -f ${dest}.pre-uninstall-reality ]] && mv -f "${dest}.pre-uninstall-reality" "$dest"
+    uninstall_restore_snapshot "$REALITY_STATE" "$state_snap"
+    uninstall_restore_snapshot "$XRAY_INFO" "$info_snap"
+    [[ -f "$dest.pre-uninstall-reality" ]] && mv -f "$dest.pre-uninstall-reality" "$dest"
+    rm -f -- "$state_snap" "$info_snap"
     fail "移除 REALITY 配置失败，已回滚"
   fi
   if systemctl is-enabled xray >/dev/null 2>&1 || systemctl is-active xray >/dev/null 2>&1; then
     if ! restart_svc_or_fail xray "Xray"; then
-      [[ -f ${dest}.pre-uninstall-reality ]] && mv -f "${dest}.pre-uninstall-reality" "$dest"
+      uninstall_restore_snapshot "$REALITY_STATE" "$state_snap"
+      uninstall_restore_snapshot "$XRAY_INFO" "$info_snap"
+      [[ -f "$dest.pre-uninstall-reality" ]] && mv -f "$dest.pre-uninstall-reality" "$dest"
+      rm -f -- "$state_snap" "$info_snap"
       systemctl restart xray 2>/dev/null || true
       fail "Xray 重启失败，已回滚配置"
     fi
   fi
-  rm -f "${dest}.pre-uninstall-reality"
+  rm -f "$dest.pre-uninstall-reality" "$state_snap" "$info_snap"
   if [[ -f $CDN_STATE ]] || component_has_config cdn; then
     ok "已移除 REALITY，保留其他配置"
   else
@@ -2553,33 +2573,38 @@ uninstall_cdn() {
   managed_component_present cdn || { warn "未找到本项目管理的 WS+TLS，未执行卸载"; return 0; }
   xray_discover
   local dest=${XRAY_CONFIG_FILE:-$XRAY_CONFIG}
-  local dom certdir="" acme="/root/.acme.sh/acme.sh"
-  local -a xray_targets=()
+  local dom certdir="" acme="/root/.acme.sh/acme.sh" state_snap="" info_snap=""
   dom=$(state_get "$CDN_STATE" CDN_DOMAIN)
   if [[ -n $dom ]]; then
     validate_domain "$dom"
     certdir=$(xray_cert_dir "$dom")
   fi
-  mapfile -t xray_targets < <(xray_backup_target_list)
-  backup_paths cdn-rm "$CDN_STATE" "$CDN_INFO" "${xray_targets[@]}" "$certdir"
-  [[ -f $dest ]] && cp -a "$dest" "${dest}.pre-uninstall-cdn" || true
-  [[ -n $dom && -x $acme ]] &&
-    "$acme" --remove -d "$dom" --ecc >/dev/null 2>&1 || true
+  state_snap=$(uninstall_snapshot_file "$CDN_STATE") || fail "无法创建临时回滚快照"
+  info_snap=$(uninstall_snapshot_file "$CDN_INFO") || { rm -f -- "$state_snap"; fail "无法创建临时回滚快照"; }
+  LAST_BACKUP=""; LAST_BACKUP_MISSING=()
+  [[ -f $dest ]] && cp -a "$dest" "$dest.pre-uninstall-cdn" || true
   rm -f "$CDN_STATE" "$CDN_INFO"
-  [[ -n $certdir ]] && rm -rf "$certdir"
   if ! build_xray_config; then
-    restore_last_backup || true
-    [[ -f ${dest}.pre-uninstall-cdn ]] && mv -f "${dest}.pre-uninstall-cdn" "$dest"
+    uninstall_restore_snapshot "$CDN_STATE" "$state_snap"
+    uninstall_restore_snapshot "$CDN_INFO" "$info_snap"
+    [[ -f "$dest.pre-uninstall-cdn" ]] && mv -f "$dest.pre-uninstall-cdn" "$dest"
+    rm -f -- "$state_snap" "$info_snap"
     fail "移除 WS+TLS 配置失败，已回滚"
   fi
   if systemctl is-enabled xray >/dev/null 2>&1 || systemctl is-active xray >/dev/null 2>&1; then
     if ! restart_svc_or_fail xray "Xray"; then
-      [[ -f ${dest}.pre-uninstall-cdn ]] && mv -f "${dest}.pre-uninstall-cdn" "$dest"
+      uninstall_restore_snapshot "$CDN_STATE" "$state_snap"
+      uninstall_restore_snapshot "$CDN_INFO" "$info_snap"
+      [[ -f "$dest.pre-uninstall-cdn" ]] && mv -f "$dest.pre-uninstall-cdn" "$dest"
+      rm -f -- "$state_snap" "$info_snap"
       systemctl restart xray 2>/dev/null || true
       fail "Xray 重启失败，已回滚配置"
     fi
   fi
-  rm -f "${dest}.pre-uninstall-cdn"
+  [[ -n $dom && -x $acme ]] &&
+    "$acme" --remove -d "$dom" --ecc >/dev/null 2>&1 || true
+  [[ -n $certdir ]] && rm -rf -- "$certdir"
+  rm -f "$dest.pre-uninstall-cdn" "$state_snap" "$info_snap"
   if [[ -f $REALITY_STATE ]] || component_has_config reality; then
     ok "已移除 WS+TLS，保留其他配置"
   else
@@ -2590,7 +2615,7 @@ uninstall_cdn() {
 uninstall_hy2() {
   require_root
   managed_component_present hy2 || { warn "未找到本项目管理的 Hysteria2，未执行卸载"; return 0; }
-  backup_paths hy2-rm "$HY2_STATE" "$HY2_INFO" "$HY2_CONFIG" "$HY2_CERT_DIR"
+  LAST_BACKUP=""; LAST_BACKUP_MISSING=()
   if command -v hysteria >/dev/null || systemctl cat hysteria-server >/dev/null 2>&1; then
     run_verified_script "$HY2_INSTALLER_URL" "$HY2_INSTALLER_SHA256" --remove ||
       fail "Hysteria2 卸载器执行失败"

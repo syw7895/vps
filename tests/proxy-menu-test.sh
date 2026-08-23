@@ -42,6 +42,7 @@ assert "ws cloudflare menu item" 'grep -q "VLESS + WS + TLS（Cloudflare CDN）"
 assert "ws random port prompt" 'grep -q "输入 random=随机" "$PROXY"'
 assert "ws random port cli" 'grep -q -- "--random-port" "$PROXY"'
 assert "cloudflare port restriction" 'grep -q "Cloudflare CDN 的 HTTPS 端口" "$PROXY"'
+assert "uninstall no persistent archive" '! grep -qE "backup_paths (reality-rm|cdn-rm|hy2-rm)" "$PROXY"'
 assert "no group 管理" '! grep -qE "^[[:space:]]*管理[[:space:]]*$" <<<"$out"'
 assert "no group 系统" '! grep -qE "^[[:space:]]*系统[[:space:]]*$" <<<"$out"'
 has_box=0
