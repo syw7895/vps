@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
-VERSION="1.7.4"
+VERSION="1.7.5"
 CONFIG_DIR="/root/proxy-info"
 REALITY_STATE="${CONFIG_DIR}/reality.conf"
 WS_STATE="${CONFIG_DIR}/ws.conf"
@@ -1452,19 +1452,20 @@ migrate_ws_certs_if_needed() {
 }
 
 issue_selfsigned_ws_cert() {
-  local sni=$1 certdir
-  [[ -n $sni ]] || fail "自签证书需要 SNI"
+  local ip=$1 certdir
+  is_ipv4 "$ip" || fail "自签证书需要公网 IP"
   certdir=$(xray_cert_dir "$WS_IP_CERT_ID")
   install -d -m 750 "$certdir"
   WS_CERT="$certdir/fullchain.pem"
   WS_KEY="$certdir/privkey.pem"
   if [[ -f $WS_CERT && -f $WS_KEY ]] &&
-     openssl x509 -in "$WS_CERT" -checkend 86400 -checkhost "$sni" -noout >/dev/null 2>&1; then
+     openssl x509 -in "$WS_CERT" -checkend 86400 -noout >/dev/null 2>&1 &&
+     openssl x509 -in "$WS_CERT" -noout -ext subjectAltName 2>/dev/null | grep -q "IP Address:${ip}"; then
     log "复用已有自签证书"
   else
     openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
       -keyout "$WS_KEY" -out "$WS_CERT" \
-      -days 3650 -subj "/CN=${sni}" -addext "subjectAltName=DNS:${sni}" >/dev/null 2>&1 ||
+      -days 3650 -subj "/CN=${ip}" -addext "subjectAltName=IP:${ip}" >/dev/null 2>&1 ||
       fail "生成自签证书失败"
     log "已生成自签证书: $certdir"
   fi
@@ -1953,19 +1954,17 @@ install_ws() {
   local arg_port=$WS_PORT arg_path=$WS_PATH arg_uuid=$WS_UUID
   local arg_random=$WS_RANDOM_PORT
   local want_domain=$WS_DOMAIN
-  local old_domain old_path old_uuid old_port old_sni
+  local old_domain old_path old_uuid old_port
   local ip_mode=0 cert_id link path_enc addr
   old_domain=$(state_get "$WS_STATE" WS_DOMAIN)
   old_path=$(state_get "$WS_STATE" WS_PATH)
   old_uuid=$(state_get "$WS_STATE" WS_UUID)
   old_port=$(state_get "$WS_STATE" WS_PORT)
-  old_sni=$(state_get "$WS_STATE" WS_SNI)
   [[ -z $want_domain ]] && ip_mode=1
   if [[ -f $WS_STATE && $old_domain == "$want_domain" ]]; then
     [[ -n $arg_path ]] || WS_PATH=$old_path
     [[ -n $arg_uuid ]] || WS_UUID=$old_uuid
     if ((ip_mode)); then
-      [[ -n ${WS_SNI:-} ]] || WS_SNI=$old_sni
       log "复用已有 WS+TLS 节点参数（IP 直连）"
     else
       log "复用已有 WS+TLS 节点参数（同域名）"
@@ -1987,9 +1986,8 @@ install_ws() {
   validate_ws_path "$WS_PATH"
 
   if ((ip_mode)); then
-    [[ -n ${WS_SNI:-} ]] || WS_SNI=${SNI_PRESETS[RANDOM % ${#SNI_PRESETS[@]}]}
-    validate_domain "$WS_SNI"
     WS_ADDR=$(resolve_public_ip)
+    WS_SNI=
     cert_id=$WS_IP_CERT_ID
     log "未指定域名，使用公网 IP 直连 + 自签 TLS"
   else
@@ -2007,7 +2005,7 @@ install_ws() {
   xray_discover
 
   if ((ip_mode)); then
-    issue_selfsigned_ws_cert "$WS_SNI"
+    issue_selfsigned_ws_cert "$WS_ADDR"
   else
     issue_cert "$WS_DOMAIN" "$WS_EMAIL"
   fi
@@ -2022,12 +2020,12 @@ install_ws() {
   path_enc=$(printf %s "$WS_PATH" | sed 's|/|%2F|g')
   addr=$WS_ADDR
   if ((ip_mode)); then
-    link="vless://${WS_UUID}@${addr}:${WS_PORT}?encryption=none&security=tls&type=ws&host=${WS_SNI}&sni=${WS_SNI}&allowInsecure=1&fp=chrome&path=${path_enc}#WS-IP"
+    link="vless://${WS_UUID}@${addr}:${WS_PORT}?encryption=none&security=tls&type=ws&allowInsecure=1&fp=chrome&path=${path_enc}#WS-IP"
     save_info "$WS_INFO" \
       "Xray VLESS + WS + TLS（IP 直连）" "" \
       "连接地址: ${addr}" "端口:   ${WS_PORT}" "UUID:   ${WS_UUID}" \
       "传输:   WebSocket" "TLS:    自签（需允许不安全证书）" \
-      "Host/SNI: ${WS_SNI}" "Path:   ${WS_PATH}" \
+      "Path:   ${WS_PATH}" \
       "" "分享链接:" "${link}" "" \
       "说明: 不用自己的域名；客户端填写 VPS IP，并开启允许不安全证书。"
     ok "VLESS + WS + TLS 节点安装完成（IP 直连）"

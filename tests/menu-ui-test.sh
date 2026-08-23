@@ -132,7 +132,7 @@ assert "empty input no crash" '[[ $rc_empty -eq 0 ]]'
 
 assert "no ui_group def" '! grep -qE "^ui_group\\(\\)" "$ROOT/traffic.sh"'
 assert "VERSION traffic 1.4.3" 'grep -q VERSION=\"1.4.3\" "$ROOT/traffic.sh"'
-assert "VERSION proxy 1.7.4" 'grep -q VERSION=\"1.7.4\" "$ROOT/proxy.sh"'
+assert "VERSION proxy 1.7.5" 'grep -q VERSION=\"1.7.5\" "$ROOT/proxy.sh"'
 assert "VERSION vps 1.3.1" 'grep -q VERSION=\"1.3.1\" "$ROOT/vps.sh"'
 
 echo ""
