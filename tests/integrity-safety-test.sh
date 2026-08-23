@@ -95,11 +95,9 @@ SPECIAL_STATE="$CONFIG_DIR/special.conf"
 write_kv_file "$SPECIAL_STATE" "HY2_MASQUERADE=https://example.com/a?x=1&y=2"
 assert "masquerade query chars survive state write" 'grep -q "HY2_MASQUERADE=https://example.com/a?x=1&y=2" "$SPECIAL_STATE"'
 
-# WS+TLS 可在直连与 Cloudflare 之间选择，并支持单独指定分享链接地址。
-parse_cdn_args --mode cloudflare --server 203.0.113.10
-assert "ws mode parser" '[[ $CDN_MODE == cloudflare && $CDN_SERVER == 203.0.113.10 ]]'
-validate_ws_mode direct
-validate_server_host example.com
+# WS+TLS 仅保留直连参数。
+parse_cdn_args --domain example.com --port 8443
+assert "ws direct parser" '[[ $CDN_DOMAIN == example.com && $CDN_PORT == 8443 ]]'
 
 # 旧版 Hysteria2 没有 state/drop-in 标记时，专用配置 + 信息文件仍可安全识别。
 HY2_CONFIG="$CONFIG_DIR/hysteria.yaml"

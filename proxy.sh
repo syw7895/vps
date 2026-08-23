@@ -105,18 +105,17 @@ usage() {
   bash proxy.sh update-hy2      立即检查/更新 Hysteria2 核心
   bash proxy.sh update-cores    检查/更新 Xray 与 Hysteria2 核心
   bash proxy.sh ws   [参数]     安装/更新 VLESS+WS+TLS（直连）
-  bash proxy.sh cdn  [参数]     安装/更新 VLESS+WS+TLS（Cloudflare；cf 为别名）
   bash proxy.sh show
   bash proxy.sh show --status-debug   排障：显示内部元数据提示
-  bash proxy.sh uninstall-reality | uninstall-xray-core | uninstall-hy2 | uninstall-cdn
+  bash proxy.sh uninstall-reality | uninstall-xray-core | uninstall-hy2 | uninstall-ws
 
 公共:
   --public-ip IPv4     分享链接用的公网 IP
 
 REALITY:  --port --sni --target --uuid
 Hysteria2: --port --password --domain --masquerade
-WS+TLS:   --domain [--port|--random-port] --path --uuid --email --mode direct|cloudflare --server host/IP
-          未指定 --port 时，新节点随机选择空闲 TCP 端口；同域名更新默认复用原端口。
+WS+TLS:   --domain [--port|--random-port] --path --uuid --email
+          未指定 --port 时，随机选择空闲 TCP 端口。
 
 环境变量可覆盖安装器 pin（见 README）。
 EOF
@@ -169,22 +168,6 @@ validate_target() {
 validate_cdn_path() {
   [[ $1 =~ ^/[A-Za-z0-9._~/-]{1,128}$ ]] || fail "path 仅允许 / 与字母数字 ._-~，长度 1-128"
   [[ $1 != *..* ]] || fail "path 不能包含 .."
-}
-
-validate_ws_mode() {
-  case $1 in
-    direct|cloudflare) ;;
-    *) fail "WS+TLS 模式必须是 direct 或 cloudflare: $1" ;;
-  esac
-}
-
-validate_server_host() {
-  local host=$1
-  if is_ipv4 "$host"; then
-    return 0
-  fi
-  [[ $host =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$ ]] ||
-    fail "连接地址必须是域名或 IPv4: $host"
 }
 
 validate_hy2_password() {
@@ -468,36 +451,8 @@ random_free_port() {
   fail "找不到空闲 ${proto} 端口，请 --port 指定"
 }
 
-is_cloudflare_ws_port() {
-  case $1 in
-    443|2053|2083|2087|2096|8443) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-validate_ws_port_for_mode() {
-  [[ $1 != cloudflare ]] || is_cloudflare_ws_port "$2" ||
-    fail "Cloudflare CDN 的 HTTPS 端口仅支持 443、2053、2083、2087、2096、8443；如需随机端口请选择直连"
-}
-
 random_ws_port() {
-  local mode=$1 p i idx start
-  if [[ $mode != cloudflare ]]; then
-    random_free_port tcp
-    return
-  fi
-  # Cloudflare 代理只接受固定 HTTPS 端口，不能使用普通随机端口。
-  local -a ports=(443 2053 2083 2087 2096 8443)
-  start=$((RANDOM % ${#ports[@]}))
-  for ((i = 0; i < ${#ports[@]}; i++)); do
-    idx=$(((start + i) % ${#ports[@]}))
-    p=${ports[idx]}
-    listener_uses_port "$p" tcp && continue
-    port_forwarded "$p" tcp && continue
-    printf %s "$p"
-    return
-  done
-  fail "Cloudflare 支持的 HTTPS 端口均已占用，请 --port 指定"
+  random_free_port tcp
 }
 
 resolve_public_ip() {
@@ -1469,7 +1424,7 @@ xray_apply_perms() {
   chmod 640 "$path" 2>/dev/null || true
 }
 
-migrate_cdn_certs_if_needed() {
+migrate_ws_certs_if_needed() {
   [[ -f $CDN_STATE ]] || return 0
   [[ -n ${CDN_DOMAIN:-} && -n ${CDN_CERT:-} && -f ${CDN_CERT:-} ]] || return 0
   case $CDN_CERT in
@@ -1489,8 +1444,7 @@ migrate_cdn_certs_if_needed() {
   CDN_CERT=$cert; CDN_KEY=$key
   write_kv_file "$CDN_STATE" \
     "CDN_PORT=${CDN_PORT}" "CDN_UUID=${CDN_UUID}" "CDN_DOMAIN=${CDN_DOMAIN}" \
-    "CDN_PATH=${CDN_PATH}" "CDN_CERT=${CDN_CERT}" "CDN_KEY=${CDN_KEY}" \
-    "CDN_MODE=${CDN_MODE:-direct}" "CDN_SERVER=${CDN_SERVER:-$CDN_DOMAIN}"
+    "CDN_PATH=${CDN_PATH}" "CDN_CERT=${CDN_CERT}" "CDN_KEY=${CDN_KEY}"
   log "WS+TLS 证书已迁移: $newdir"
 }
 
@@ -1651,7 +1605,7 @@ build_xray_config() {
   xray_discover
   load_state_safe "$REALITY_STATE"
   load_state_safe "$CDN_STATE"
-  migrate_cdn_certs_if_needed
+  migrate_ws_certs_if_needed
 
   [[ -f $REALITY_STATE ]] && want_reality=1
   [[ -f $CDN_STATE ]] && want_cdn=1
@@ -1873,7 +1827,6 @@ install_reality() {
 parse_cdn_args() {
   CDN_PORT="${CDN_PORT:-}"; CDN_DOMAIN="${CDN_DOMAIN:-}"; CDN_PATH="${CDN_PATH:-}"
   CDN_UUID="${CDN_UUID:-}"; CDN_EMAIL="${CDN_EMAIL:-}"
-  CDN_MODE="${CDN_MODE:-}"; CDN_SERVER="${CDN_SERVER:-}"
   CDN_RANDOM_PORT="${CDN_RANDOM_PORT:-0}"
   while [[ $# -gt 0 ]]; do
     case $1 in
@@ -1883,8 +1836,6 @@ parse_cdn_args() {
       --path) require_arg "$1" "${2:-}"; CDN_PATH=$2; shift 2 ;;
       --uuid) require_arg "$1" "${2:-}"; CDN_UUID=$2; shift 2 ;;
       --email) require_arg "$1" "${2:-}"; CDN_EMAIL=$2; shift 2 ;;
-      --mode) require_arg "$1" "${2:-}"; CDN_MODE=$2; shift 2 ;;
-      --server|--address) require_arg "$1" "${2:-}"; CDN_SERVER=$2; shift 2 ;;
       --public-ip) require_arg "$1" "${2:-}"; PUBLIC_IP=$2; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       *) fail "未知 WS+TLS 参数: $1" ;;
@@ -1979,60 +1930,33 @@ issue_cert() {
   ok "证书已就绪: $certdir"
 }
 
-install_cdn() {
+install_ws() {
   parse_cdn_args "$@"
   [[ -n ${CDN_DOMAIN:-} ]] || fail "WS+TLS 需要 --domain"
   prepare_env
 
   local arg_port=$CDN_PORT arg_path=$CDN_PATH arg_uuid=$CDN_UUID
-  local arg_mode=$CDN_MODE arg_server=$CDN_SERVER arg_random=$CDN_RANDOM_PORT
+  local arg_random=$CDN_RANDOM_PORT
   local want_domain=$CDN_DOMAIN
-  local old_domain old_port old_path old_uuid old_mode old_server effective_mode
+  local old_domain old_path old_uuid
   old_domain=$(state_get "$CDN_STATE" CDN_DOMAIN)
-  old_port=$(state_get "$CDN_STATE" CDN_PORT)
   old_path=$(state_get "$CDN_STATE" CDN_PATH)
   old_uuid=$(state_get "$CDN_STATE" CDN_UUID)
-  old_mode=$(state_get "$CDN_STATE" CDN_MODE)
-  old_server=$(state_get "$CDN_STATE" CDN_SERVER)
-  effective_mode=${arg_mode:-$old_mode}
-  effective_mode=${effective_mode:-direct}
   if [[ -n $old_domain && $old_domain == "$want_domain" ]]; then
-    if [[ $arg_random != 1 && $effective_mode != direct ]]; then
-      [[ -n $arg_port ]] || CDN_PORT=$old_port
-    fi
     [[ -n $arg_path ]] || CDN_PATH=$old_path
     [[ -n $arg_uuid ]] || CDN_UUID=$old_uuid
-    [[ -n $arg_mode ]] || CDN_MODE=$old_mode
-    if [[ -n $arg_server ]]; then
-      CDN_SERVER=$arg_server
-    elif [[ $effective_mode == direct ]]; then
-      CDN_SERVER=$want_domain
-    else
-      CDN_SERVER=$old_server
-    fi
     log "复用已有 WS+TLS 节点参数（同域名）"
   fi
 
-  CDN_MODE=${CDN_MODE:-direct}
   if [[ $arg_random == 1 ]]; then
     CDN_PORT=
   fi
   if [[ -z ${CDN_PORT:-} ]]; then
-    CDN_PORT=$(random_ws_port "$CDN_MODE")
+    CDN_PORT=$(random_ws_port)
     log "随机 TCP 端口: $CDN_PORT"
-  fi
-  if [[ -n $arg_server ]]; then
-    CDN_SERVER=$arg_server
-  elif [[ $CDN_MODE == direct ]]; then
-    CDN_SERVER=$CDN_DOMAIN
-  else
-    CDN_SERVER=${CDN_SERVER:-$CDN_DOMAIN}
   fi
   validate_domain "$CDN_DOMAIN"
   validate_port "$CDN_PORT"
-  validate_ws_mode "$CDN_MODE"
-  validate_ws_port_for_mode "$CDN_MODE" "$CDN_PORT"
-  validate_server_host "$CDN_SERVER"
   [[ -z ${CDN_UUID:-} ]] || validate_uuid "$CDN_UUID"
   [[ -n ${CDN_UUID:-} ]] || CDN_UUID=$(random_uuid)
   [[ -n ${CDN_PATH:-} ]] || CDN_PATH=$(random_path)
@@ -2053,8 +1977,7 @@ install_cdn() {
 
   write_kv_file "$CDN_STATE" \
     "CDN_PORT=${CDN_PORT}" "CDN_UUID=${CDN_UUID}" "CDN_DOMAIN=${CDN_DOMAIN}" \
-    "CDN_PATH=${CDN_PATH}" "CDN_CERT=${CDN_CERT}" "CDN_KEY=${CDN_KEY}" \
-    "CDN_MODE=${CDN_MODE}" "CDN_SERVER=${CDN_SERVER}"
+    "CDN_PATH=${CDN_PATH}" "CDN_CERT=${CDN_CERT}" "CDN_KEY=${CDN_KEY}"
 
   build_xray_config
   restart_svc xray "Xray"
@@ -2063,35 +1986,14 @@ install_cdn() {
 
   local link path_enc
   path_enc=$(printf %s "$CDN_PATH" | sed 's|/|%2F|g')
-  local mode_label
-  if [[ $CDN_MODE == cloudflare ]]; then mode_label="Cloudflare"; else mode_label="直连"; fi
-  local mode_note
-  if [[ $CDN_MODE == cloudflare ]]; then
-    mode_note="Cloudflare 模式仅改变分享链接的连接地址；服务端仍监听本机 WS+TLS。"
-  else
-    mode_note="直连模式默认使用域名连接本机 WS+TLS。"
-  fi
-  link="vless://${CDN_UUID}@${CDN_SERVER}:${CDN_PORT}?encryption=none&security=tls&type=ws&host=${CDN_DOMAIN}&sni=${CDN_DOMAIN}&path=${path_enc}#WS-${CDN_DOMAIN}"
+  link="vless://${CDN_UUID}@${CDN_DOMAIN}:${CDN_PORT}?encryption=none&security=tls&type=ws&host=${CDN_DOMAIN}&sni=${CDN_DOMAIN}&path=${path_enc}#WS-${CDN_DOMAIN}"
   save_info "$CDN_INFO" \
-    "Xray VLESS + WS + TLS（${mode_label}）" "" \
-    "连接模式: ${mode_label}" "连接地址: ${CDN_SERVER}" "域名/SNI: ${CDN_DOMAIN}" "端口:   ${CDN_PORT}" "UUID:   ${CDN_UUID}" \
+    "Xray VLESS + WS + TLS（直连）" "" \
+    "连接地址: ${CDN_DOMAIN}" "域名/SNI: ${CDN_DOMAIN}" "端口:   ${CDN_PORT}" "UUID:   ${CDN_UUID}" \
     "传输:   WebSocket" "TLS:    开启" "Host:   ${CDN_DOMAIN}" "SNI:    ${CDN_DOMAIN}" "Path:   ${CDN_PATH}" \
-    "" "分享链接:" "${link}" "" "说明: ${mode_note}"
-  ok "VLESS + WS + TLS 节点安装完成（${mode_label}）"
+    "" "分享链接:" "${link}" "" "说明: 直连模式使用域名连接本机 WS+TLS。"
+  ok "VLESS + WS + TLS 节点安装完成（直连）"
   print_block "节点信息" "$CDN_INFO"
-}
-
-# CLI 兼容入口：ws 默认直连，cdn/cf 默认 Cloudflare；显式 --mode 优先。
-install_ws_mode() {
-  local default_mode=$1 explicit=0 arg
-  shift
-  for arg in "$@"; do
-    [[ $arg == --mode ]] && explicit=1
-  done
-  if (( !explicit )); then
-    CDN_MODE=$default_mode
-  fi
-  install_cdn "$@"
 }
 
 # ---------- Hysteria2 ----------
@@ -2589,7 +2491,7 @@ uninstall_reality() {
   fi
 }
 
-uninstall_cdn() {
+uninstall_ws() {
   require_root
   managed_component_present cdn || { warn "未找到本项目管理的 WS+TLS，未执行卸载"; return 0; }
   xray_discover
@@ -2603,12 +2505,12 @@ uninstall_cdn() {
   state_snap=$(uninstall_snapshot_file "$CDN_STATE") || fail "无法创建临时回滚快照"
   info_snap=$(uninstall_snapshot_file "$CDN_INFO") || { rm -f -- "$state_snap"; fail "无法创建临时回滚快照"; }
   LAST_BACKUP=""; LAST_BACKUP_MISSING=()
-  [[ -f $dest ]] && cp -a "$dest" "$dest.pre-uninstall-cdn" || true
+  [[ -f $dest ]] && cp -a "$dest" "$dest.pre-uninstall-ws" || true
   rm -f "$CDN_STATE" "$CDN_INFO"
   if ! build_xray_config; then
     uninstall_restore_snapshot "$CDN_STATE" "$state_snap"
     uninstall_restore_snapshot "$CDN_INFO" "$info_snap"
-    [[ -f "$dest.pre-uninstall-cdn" ]] && mv -f "$dest.pre-uninstall-cdn" "$dest"
+    [[ -f "$dest.pre-uninstall-ws" ]] && mv -f "$dest.pre-uninstall-ws" "$dest"
     rm -f -- "$state_snap" "$info_snap"
     fail "移除 WS+TLS 配置失败，已回滚"
   fi
@@ -2616,7 +2518,7 @@ uninstall_cdn() {
     if ! restart_svc_or_fail xray "Xray"; then
       uninstall_restore_snapshot "$CDN_STATE" "$state_snap"
       uninstall_restore_snapshot "$CDN_INFO" "$info_snap"
-      [[ -f "$dest.pre-uninstall-cdn" ]] && mv -f "$dest.pre-uninstall-cdn" "$dest"
+      [[ -f "$dest.pre-uninstall-ws" ]] && mv -f "$dest.pre-uninstall-ws" "$dest"
       rm -f -- "$state_snap" "$info_snap"
       systemctl restart xray 2>/dev/null || true
       fail "Xray 重启失败，已回滚配置"
@@ -2625,7 +2527,7 @@ uninstall_cdn() {
   [[ -n $dom && -x $acme ]] &&
     "$acme" --remove -d "$dom" --ecc >/dev/null 2>&1 || true
   [[ -n $certdir ]] && rm -rf -- "$certdir"
-  rm -f "$dest.pre-uninstall-cdn" "$state_snap" "$info_snap"
+  rm -f "$dest.pre-uninstall-ws" "$state_snap" "$info_snap"
   if [[ -f $REALITY_STATE ]] || component_has_config reality; then
     ok "已移除 WS+TLS，保留其他配置"
   else
@@ -2751,39 +2653,23 @@ confirm_yes() {
 }
 
 menu_install_ws() {
-  local mode=$1 domain port path email server old_port old_server old_mode random_port=0
+  local domain port path email random_port=0
   # 域名不从旧配置预填，避免误用旧节点并在提示符中回显域名。
   domain=$(prompt "域名（已解析到本机）" "")
   [[ -n $domain ]] || { warn "域名不能为空"; sleep 1; return; }
-  old_port=$(state_get "$CDN_STATE" CDN_PORT)
-  if [[ $mode == direct ]]; then
-    port=$(prompt "TLS 端口（空=随机；输入 random=随机）" "")
-  else
-    port=$(prompt "TLS 端口（空=保持当前；新节点空=随机；输入 random=随机）" "$old_port")
-  fi
+  port=$(prompt "TLS 端口（空=随机；输入 random=随机）" "")
   if [[ ${port,,} == random ]]; then
     port=
     random_port=1
   fi
   path=$(prompt "WebSocket path（空=保持或随机）" "$(state_get "$CDN_STATE" CDN_PATH)")
   email=$(prompt "证书邮箱" "admin@${domain}")
-  old_mode=$(state_get "$CDN_STATE" CDN_MODE)
-  old_server=$(state_get "$CDN_STATE" CDN_SERVER)
-  server=$domain
-  [[ $old_mode == "$mode" && -n $old_server ]] && server=$old_server
-  if [[ $mode == cloudflare ]]; then
-    server=$(prompt "Cloudflare 连接地址（空=域名）" "$server")
-  else
-    # 直连模式直接使用域名，避免把“分享地址”误解成服务端监听地址。
-    server=$domain
-  fi
-  server=${server:-$domain}
 
-  local args=(--domain "$domain" --email "$email" --mode "$mode" --server "$server")
+  local args=(--domain "$domain" --email "$email")
   (( random_port )) && args+=(--random-port)
   [[ -n $port ]] && args+=(--port "$port")
   [[ -n $path ]] && args+=(--path "$path")
-  install_cdn "${args[@]}"
+  install_ws "${args[@]}"
   pause
 }
 
@@ -2823,7 +2709,7 @@ menu_install() {
         install_hy2 "${args[@]}"
         pause
         ;;
-      3) menu_install_ws direct ;;
+      3) menu_install_ws ;;
       0|"") return ;;
       *) warn "无效选项"; sleep 1 ;;
     esac
@@ -2884,7 +2770,7 @@ menu_uninstall() {
         ;;
       cdn)
         confirm_yes "确定卸载 WS+TLS？" || { warn "已取消"; continue; }
-        uninstall_cdn
+        uninstall_ws
         ;;
       hy2)
         confirm_yes "确定卸载 Hysteria2？" || { warn "已取消"; continue; }
@@ -2963,13 +2849,12 @@ main() {
       require_root
       enable_proxy_auto_update
       ;;
-    cdn|cf) install_ws_mode cloudflare "$@" ;;
-    ws|vless-ws|vless-ws-tls) install_ws_mode direct "$@" ;;
+    ws|vless-ws|vless-ws-tls) install_ws "$@" ;;
     show|status) show_info ;;
     status-debug|--status-debug) PROXY_STATUS_DEBUG=1; show_info ;;
     uninstall-reality) uninstall_reality ;;
     uninstall-xray|uninstall-xray-core) uninstall_xray_core ;;
-    uninstall-cdn|uninstall-cf|uninstall-ws) uninstall_cdn ;;
+    uninstall-ws) uninstall_ws ;;
     uninstall-hy2|uninstall-hysteria2) uninstall_hy2 ;;
     -h|--help|help) usage ;;
     *) fail "未知命令: $cmd" ;;
