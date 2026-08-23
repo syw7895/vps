@@ -1986,15 +1986,17 @@ install_cdn() {
   local arg_port=$CDN_PORT arg_path=$CDN_PATH arg_uuid=$CDN_UUID
   local arg_mode=$CDN_MODE arg_server=$CDN_SERVER arg_random=$CDN_RANDOM_PORT
   local want_domain=$CDN_DOMAIN
-  local old_domain old_port old_path old_uuid old_mode old_server
+  local old_domain old_port old_path old_uuid old_mode old_server effective_mode
   old_domain=$(state_get "$CDN_STATE" CDN_DOMAIN)
   old_port=$(state_get "$CDN_STATE" CDN_PORT)
   old_path=$(state_get "$CDN_STATE" CDN_PATH)
   old_uuid=$(state_get "$CDN_STATE" CDN_UUID)
   old_mode=$(state_get "$CDN_STATE" CDN_MODE)
   old_server=$(state_get "$CDN_STATE" CDN_SERVER)
+  effective_mode=${arg_mode:-$old_mode}
+  effective_mode=${effective_mode:-direct}
   if [[ -n $old_domain && $old_domain == "$want_domain" ]]; then
-    if [[ $arg_random != 1 ]]; then
+    if [[ $arg_random != 1 && $effective_mode != direct ]]; then
       [[ -n $arg_port ]] || CDN_PORT=$old_port
     fi
     [[ -n $arg_path ]] || CDN_PATH=$old_path
@@ -2734,7 +2736,11 @@ menu_install_ws() {
   domain=$(prompt "域名（已解析到本机）" "$(state_get "$CDN_STATE" CDN_DOMAIN)")
   [[ -n $domain ]] || { warn "域名不能为空"; sleep 1; return; }
   old_port=$(state_get "$CDN_STATE" CDN_PORT)
-  port=$(prompt "TLS 端口（空=保持当前；新节点空=随机；输入 random=随机）" "$old_port")
+  if [[ $mode == direct ]]; then
+    port=$(prompt "TLS 端口（空=随机；输入 random=随机）" "")
+  else
+    port=$(prompt "TLS 端口（空=保持当前；新节点空=随机；输入 random=随机）" "$old_port")
+  fi
   if [[ ${port,,} == random ]]; then
     port=
     random_port=1
