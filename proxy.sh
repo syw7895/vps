@@ -2752,7 +2752,8 @@ confirm_yes() {
 
 menu_install_ws() {
   local mode=$1 domain port path email server old_port old_server old_mode random_port=0
-  domain=$(prompt "域名（已解析到本机）" "$(state_get "$CDN_STATE" CDN_DOMAIN)")
+  # 域名不从旧配置预填，避免误用旧节点并在提示符中回显域名。
+  domain=$(prompt "域名（已解析到本机）" "")
   [[ -n $domain ]] || { warn "域名不能为空"; sleep 1; return; }
   old_port=$(state_get "$CDN_STATE" CDN_PORT)
   if [[ $mode == direct ]]; then
@@ -2795,12 +2796,10 @@ menu_install() {
     ui_item 2 "安装 / 更新 Hysteria2"
     ui_item 3 "安装 / 更新 VLESS + WS + TLS（直连）"
     ui_gap
-    ui_item 4 "安装 / 更新 VLESS + WS + TLS（Cloudflare CDN）"
-    ui_gap
     ui_item 0 "返回" muted
     ui_gap
     local c
-    printf '  请选择 [0-4]: '
+    printf '  请选择 [0-3]: '
     read -r c || { warn "读取输入失败"; return 1; }
     c=${c//[[:space:]]/}
     case $c in
@@ -2825,7 +2824,6 @@ menu_install() {
         pause
         ;;
       3) menu_install_ws direct ;;
-      4) menu_install_ws cloudflare ;;
       0|"") return ;;
       *) warn "无效选项"; sleep 1 ;;
     esac

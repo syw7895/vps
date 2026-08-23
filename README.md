@@ -72,7 +72,7 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 - 状态依据：真实服务配置（ExecStart + 协议语义）
 - 正常页不显示 state / 元数据提示（`--status-debug` 可开）
 - 节点标题含端口协议，如 `443/TCP`；分享链接单独成块
-- VLESS + WS + TLS 在菜单中分为 `直连` 与 `Cloudflare` 两项；两者共用同一个 Xray 服务端监听。菜单直连默认使用域名，Cloudflare 模式才提供可选的连接地址。
+- VLESS + WS + TLS 菜单仅提供直连入口；已有 Cloudflare 节点仍可正常管理，兼容命令行入口为 `cdn`/`cf`。
 - 直连模式的 TLS 端口默认随机；Cloudflare 模式同域名更新默认复用原端口。两者都可输入 `random` 或使用 `--random-port` 重新随机。
 - Cloudflare CDN 模式只从其 HTTPS 支持端口（443、2053、2083、2087、2096、8443）中选择，普通随机端口请使用直连模式。
 - 命令示例：`sudo bash /usr/local/lib/syw-vps/proxy.sh ws --domain example.com`（直连）；`cdn`/`cf` 为 Cloudflare 兼容入口，可用 `--server` 指定分享链接的连接域名或 IPv4。
