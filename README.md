@@ -41,7 +41,7 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 ```
 
 ```text
-  代理管理  v1.7.3
+  代理管理  v1.7.4
   ● 2 个节点运行中
 
    1.  安装代理

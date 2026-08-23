@@ -3,17 +3,13 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
-VERSION="1.7.3"
+VERSION="1.7.4"
 CONFIG_DIR="/root/proxy-info"
-BACKUP_DIR="${CONFIG_DIR}/backups"
-BACKUP_KEEP="${BACKUP_KEEP:-15}"
-LAST_BACKUP=""
-LAST_BACKUP_MISSING=()
 REALITY_STATE="${CONFIG_DIR}/reality.conf"
-CDN_STATE="${CONFIG_DIR}/cdn.conf"
+WS_STATE="${CONFIG_DIR}/ws.conf"
 HY2_STATE="${CONFIG_DIR}/hy2.conf"
 XRAY_INFO="${CONFIG_DIR}/xray-reality.txt"
-CDN_INFO="${CONFIG_DIR}/xray-cdn.txt"
+WS_INFO="${CONFIG_DIR}/xray-ws.txt"
 HY2_INFO="${CONFIG_DIR}/hysteria2.txt"
 XRAY_CONFIG="${XRAY_CONFIG:-/usr/local/etc/xray/config.json}"
 # 运行时由 xray_discover 填充：file|dir|unknown
@@ -22,9 +18,9 @@ XRAY_CONFIG_FILE="${XRAY_CONFIG_FILE:-}"
 XRAY_CONF_DIR="${XRAY_CONF_DIR:-}"
 # 本项目管理的 inbound tag / confdir 文件名
 MANAGED_TAG_REALITY="vless-reality"
-MANAGED_TAG_CDN="vless-ws-tls"
+MANAGED_TAG_WS="vless-ws-tls"
 MANAGED_FILE_REALITY="50-vps-reality.json"
-MANAGED_FILE_CDN="51-vps-cdn.json"
+MANAGED_FILE_WS="51-vps-cdn.json"
 WS_IP_CERT_ID="ws-ip"
 HY2_CONFIG="/etc/hysteria/config.yaml"
 HY2_CERT_DIR="/etc/hysteria/certs"
@@ -165,7 +161,7 @@ validate_target() {
   validate_port "$p"
 }
 
-validate_cdn_path() {
+validate_ws_path() {
   [[ $1 =~ ^/[A-Za-z0-9._~/-]{1,128}$ ]] || fail "path 仅允许 / 与字母数字 ._-~，长度 1-128"
   [[ $1 != *..* ]] || fail "path 不能包含 .."
 }
@@ -189,7 +185,7 @@ write_kv_file() {
     k=${line%%=*}
     v=${line#*=}
     [[ $k =~ ^[A-Z][A-Z0-9_]*$ ]] || fail "非法状态键: $k"
-    is_safe_token "$v" || fail "状态值含非法字符 ($k)，已拒绝写入"
+    [[ -z $v ]] || is_safe_token "$v" || fail "状态值含非法字符 ($k)，已拒绝写入"
   done
 
   tmp=$(mktemp "${file}.tmp.XXXXXX") || fail "无法创建状态临时文件: $file"
@@ -207,15 +203,55 @@ state_get() {
   grep -E "^${key}=" "$file" 2>/dev/null | head -n1 | cut -d= -f2- || true
 }
 
+# 旧版状态文件为 cdn.conf / xray-cdn.txt，键为 CDN_*。
+migrate_legacy_cdn_state() {
+  local old_state="${CONFIG_DIR}/cdn.conf" old_info="${CONFIG_DIR}/xray-cdn.txt"
+  local tmp line
+
+  if [[ -f $old_state && ! -f $WS_STATE ]]; then
+    tmp=$(mktemp "${old_state}.tmp.XXXXXX") || return 0
+    while IFS= read -r line || [[ -n $line ]]; do
+      case $line in
+        CDN_*) printf 'WS_%s\n' "${line#CDN_}" ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done <"$old_state" >"$tmp" || { rm -f -- "$tmp"; return 0; }
+    chmod 600 "$tmp" || { rm -f -- "$tmp"; return 0; }
+    mv -f -- "$tmp" "$WS_STATE" || { rm -f -- "$tmp"; return 0; }
+    rm -f -- "$old_state"
+  elif [[ -f $old_state ]]; then
+    rm -f -- "$old_state"
+  fi
+
+  if [[ -f $WS_STATE ]] && grep -qE '^CDN_[A-Z0-9_]+=' "$WS_STATE" 2>/dev/null; then
+    tmp=$(mktemp "${WS_STATE}.tmp.XXXXXX") || return 0
+    while IFS= read -r line || [[ -n $line ]]; do
+      case $line in
+        CDN_*) printf 'WS_%s\n' "${line#CDN_}" ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done <"$WS_STATE" >"$tmp" || { rm -f -- "$tmp"; return 0; }
+    chmod 600 "$tmp" || { rm -f -- "$tmp"; return 0; }
+    mv -f -- "$tmp" "$WS_STATE" || { rm -f -- "$tmp"; return 0; }
+  fi
+
+  if [[ -f $old_info && ! -f $WS_INFO ]]; then
+    mv -f -- "$old_info" "$WS_INFO" || true
+  elif [[ -f $old_info ]]; then
+    rm -f -- "$old_info"
+  fi
+}
+
 load_state_safe() {
   local file=$1 line k v
+  [[ $file == "$WS_STATE" ]] && migrate_legacy_cdn_state
   [[ -f $file ]] || return 0
   while IFS= read -r line || [[ -n $line ]]; do
     [[ -z $line || $line == \#* ]] && continue
     [[ $line == *=* ]] || continue
     k=${line%%=*}; v=${line#*=}
     [[ $k =~ ^[A-Z][A-Z0-9_]*$ ]] || continue
-    is_safe_token "$v" || continue
+    [[ -z $v ]] || is_safe_token "$v" || continue
     printf -v "$k" '%s' "$v"
   done <"$file"
 }
@@ -241,7 +277,10 @@ install_deps() {
 }
 
 ensure_dirs() {
-  install -d -m 700 "$CONFIG_DIR" "$BACKUP_DIR"
+  install -d -m 700 "$CONFIG_DIR"
+  # 搭节点不再做 tar 备份；清掉旧归档目录
+  [[ -e $CONFIG_DIR/backups ]] && rm -rf -- "$CONFIG_DIR/backups"
+  migrate_legacy_cdn_state
 }
 
 prepare_env() {
@@ -252,97 +291,13 @@ prepare_env() {
   ensure_dirs
 }
 
-# 成功备份后只保留最近 BACKUP_KEEP 份（默认 15）
-prune_backups() {
-  local keep=${BACKUP_KEEP:-15} i
-  local -a files=()
-  [[ $keep =~ ^[0-9]+$ ]] && ((keep >= 1)) || keep=15
-  [[ -d $BACKUP_DIR ]] || return 0
-  mapfile -t files < <(ls -1t "$BACKUP_DIR"/*.tar.gz 2>/dev/null || true)
-  for ((i = keep; i < ${#files[@]}; i++)); do
-    rm -f -- "${files[i]}"
-  done
-}
-
 hint_restore() {
   local unit=${1:-} name=${2:-服务}
-  warn "${name} 启动失败。配置可能已写入；可用最近备份手动恢复。"
-  if [[ -n ${LAST_BACKUP:-} && -f $LAST_BACKUP ]]; then
-    warn "最近备份: ${LAST_BACKUP}"
-    warn "恢复示例（确认内容后再执行）:"
-    warn "  tar -tzf ${LAST_BACKUP}"
-    warn "  tar -C / -xzf ${LAST_BACKUP}"
-  else
-    warn "备份目录: ${BACKUP_DIR}"
-    warn "  ls -lt ${BACKUP_DIR}"
-  fi
+  warn "${name} 启动失败。"
   if [[ -n $unit ]]; then
     warn "  systemctl restart ${unit}"
     warn "  journalctl -u ${unit} -n 40 --no-pager"
   fi
-}
-
-backup_paths() {
-  local label=$1 stamp archive
-  shift
-  local -a existing=()
-  local p
-  # 每次操作只允许使用本次备份，避免无备份时误用上一次操作的归档。
-  LAST_BACKUP=""
-  LAST_BACKUP_MISSING=()
-  for p in "$@"; do
-    if [[ -e $p || -L $p ]]; then
-      existing+=("$p")
-    else
-      LAST_BACKUP_MISSING+=("$p")
-    fi
-  done
-  ((${#existing[@]})) || return 0
-  stamp=$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM
-  archive="${BACKUP_DIR}/${label}-${stamp}.tar.gz"
-  if ! (umask 077; tar -C / -czf "$archive" "${existing[@]#/}" 2>/dev/null); then
-    rm -f "$archive"
-    fail "备份失败，已停止覆盖: $label"
-  fi
-  chmod 600 "$archive" || fail "无法收紧备份权限: $archive"
-  LAST_BACKUP=$archive
-  prune_backups
-  ok "已备份: $archive"
-}
-
-# 恢复最近一次操作的备份，并删除本次首次安装新建的目标。
-restore_last_backup() {
-  local restored=0 p
-  if [[ -n ${LAST_BACKUP:-} && -f $LAST_BACKUP ]]; then
-    tar -C / -xzf "$LAST_BACKUP" 2>/dev/null || return 1
-    restored=1
-  fi
-  # 首次安装没有旧文件，回滚时删除本次新建的目标。
-  for p in "${LAST_BACKUP_MISSING[@]}"; do
-    [[ -n $p ]] || continue
-    if [[ -d $p && ! -L $p ]]; then
-      rm -rf -- "$p"
-    else
-      rm -f -- "$p"
-    fi
-    restored=1
-  done
-  ((restored)) || return 1
-  if command -v systemctl >/dev/null 2>&1; then
-    systemctl daemon-reload >/dev/null 2>&1 || true
-  fi
-  return 0
-}
-
-restore_service_backup() {
-  local unit=$1 i
-  restore_last_backup || return 1
-  systemctl restart "$unit" >/dev/null 2>&1 || return 1
-  for ((i = 1; i <= 3; i++)); do
-    systemctl is-active --quiet "$unit" 2>/dev/null && return 0
-    sleep 1
-  done
-  return 1
 }
 
 curl_download() {
@@ -620,7 +575,7 @@ xray_discover() {
 }
 
 # 统一扫描：输出 key=value 行
-# has_reality=0|1  has_cdn=0|1  port_reality=  port_cdn=  source=
+# has_reality=0|1  has_ws=0|1  port_reality=  port_ws=  source=
 # 端口无法可靠解析时留空（禁止用文件中第一个 port 冒充）
 xray_scan() {
   xray_discover
@@ -641,14 +596,14 @@ xray_scan() {
   fi
 
   if ((${#files[@]} == 0)); then
-    printf 'has_reality=0\nhas_cdn=0\nport_reality=\nport_cdn=\nsource=none\n'
+    printf 'has_reality=0\nhas_ws=0\nport_reality=\nport_ws=\nsource=none\n'
     return 0
   fi
 
   if command -v python3 >/dev/null 2>&1; then
     local out prc
     set +e
-    out=$(SRC="$source" FILES="$(printf '%s\n' "${files[@]}")" TAG_R="$MANAGED_TAG_REALITY" TAG_C="$MANAGED_TAG_CDN" python3 - <<'PY'
+    out=$(SRC="$source" FILES="$(printf '%s\n' "${files[@]}")" TAG_R="$MANAGED_TAG_REALITY" TAG_C="$MANAGED_TAG_WS" python3 - <<'PY'
 import json, os, sys
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(newline="\n")
@@ -677,7 +632,7 @@ def is_reality(ib):
     ss = ib.get("streamSettings") or {}
     return ib.get("protocol") == "vless" and ss.get("security") == "reality"
 
-def is_cdn(ib):
+def is_ws(ib):
     if not isinstance(ib, dict):
         return False
     if ib.get("tag") == tag_c:
@@ -698,7 +653,7 @@ for path in files:
             p = ib.get("port")
             if p is not None and str(p).isdigit() and 1 <= int(p) <= 65535:
                 port_r = str(int(p))
-        if is_cdn(ib):
+        if is_ws(ib):
             has_c = True
             p = ib.get("port")
             if p is not None and str(p).isdigit() and 1 <= int(p) <= 65535:
@@ -706,9 +661,9 @@ for path in files:
 if not opened:
     sys.exit(2)
 print(f"has_reality={1 if has_r else 0}")
-print(f"has_cdn={1 if has_c else 0}")
+print(f"has_ws={1 if has_c else 0}")
 print(f"port_reality={port_r}")
-print(f"port_cdn={port_c}")
+print(f"port_ws={port_c}")
 print(f"source={src}")
 PY
 )
@@ -747,22 +702,22 @@ PY
         ' "$f" 2>/dev/null || true)
       fi
     fi
-    if grep -qE "\"tag\"[[:space:]]*:[[:space:]]*\"${MANAGED_TAG_CDN}\"" "$f" 2>/dev/null \
+    if grep -qE "\"tag\"[[:space:]]*:[[:space:]]*\"${MANAGED_TAG_WS}\"" "$f" 2>/dev/null \
       || { grep -qE "\"network\"[[:space:]]*:[[:space:]]*\"ws\"" "$f" 2>/dev/null \
         && grep -qE "\"security\"[[:space:]]*:[[:space:]]*\"tls\"" "$f" 2>/dev/null \
         && grep -qE "\"protocol\"[[:space:]]*:[[:space:]]*\"vless\"" "$f" 2>/dev/null; }; then
       has_c=1
-      port_c=$(_port_for_tag "$f" "$MANAGED_TAG_CDN")
+      port_c=$(_port_for_tag "$f" "$MANAGED_TAG_WS")
     fi
   done
-  printf 'has_reality=%s\nhas_cdn=%s\nport_reality=%s\nport_cdn=%s\nsource=%s\n' \
+  printf 'has_reality=%s\nhas_ws=%s\nport_reality=%s\nport_ws=%s\nsource=%s\n' \
     "$has_r" "$has_c" "$port_r" "$port_c" "$source"
 }
 
 # 解析 xray_scan 输出到变量
 xray_scan_load() {
   local k v
-  HAS_REALITY=0 HAS_CDN=0 PORT_REALITY= PORT_CDN= SCAN_SOURCE=none
+  HAS_REALITY=0 HAS_WS=0 PORT_REALITY= PORT_WS= SCAN_SOURCE=none
   while IFS= read -r line || [[ -n $line ]]; do
     line=${line%$'\r'}
     [[ $line == *=* ]] || continue
@@ -770,9 +725,9 @@ xray_scan_load() {
     v=${v%$'\r'}
     case $k in
       has_reality) HAS_REALITY=$v ;;
-      has_cdn) HAS_CDN=$v ;;
+      has_ws) HAS_WS=$v ;;
       port_reality) PORT_REALITY=$v ;;
-      port_cdn) PORT_CDN=$v ;;
+      port_ws) PORT_WS=$v ;;
       source) SCAN_SOURCE=$v ;;
     esac
   done < <(xray_scan)
@@ -783,7 +738,7 @@ xray_has_component() {
   xray_scan_load
   case $kind in
     reality) [[ ${HAS_REALITY:-0} == 1 ]] ;;
-    cdn) [[ ${HAS_CDN:-0} == 1 ]] ;;
+    ws) [[ ${HAS_WS:-0} == 1 ]] ;;
     *) return 1 ;;
   esac
 }
@@ -793,7 +748,7 @@ xray_inbound_port() {
   xray_scan_load
   case $kind in
     reality) [[ -n ${PORT_REALITY:-} ]] && printf '%s\n' "$PORT_REALITY" ;;
-    cdn) [[ -n ${PORT_CDN:-} ]] && printf '%s\n' "$PORT_CDN" ;;
+    ws) [[ -n ${PORT_WS:-} ]] && printf '%s\n' "$PORT_WS" ;;
   esac
   return 0
 }
@@ -809,13 +764,7 @@ xray_list_config_files() {
   fi
 }
 
-xray_backup_target_list() {
-  if [[ $XRAY_LAYOUT == dir && -n $XRAY_CONF_DIR ]]; then
-    printf '%s\n' "$XRAY_CONF_DIR/$MANAGED_FILE_REALITY" "$XRAY_CONF_DIR/$MANAGED_FILE_CDN"
-  elif [[ -n ${XRAY_CONFIG_FILE:-$XRAY_CONFIG} ]]; then
-    printf '%s\n' "${XRAY_CONFIG_FILE:-$XRAY_CONFIG}"
-  fi
-}
+
 
 hy2_resolve_config_path() {
   local exec_line spec path
@@ -873,7 +822,7 @@ resolve_component_port() {
   p=$(info_get_port "$info_file")
   if port_is_valid "$p"; then printf '%s\n' "$p"; return 0; fi
   case $comp in
-    reality|cdn) p=$(xray_inbound_port "$comp") ;;
+    reality|ws) p=$(xray_inbound_port "$comp") ;;
     hy2) p=$(hy2_config_port) ;;
   esac
   if port_is_valid "$p"; then printf '%s\n' "$p"; return 0; fi
@@ -883,7 +832,7 @@ component_has_config() {
   local comp=$1
   case $comp in
     reality) xray_has_component reality ;;
-    cdn) xray_has_component cdn ;;
+    ws) xray_has_component ws ;;
     hy2) hy2_config_present ;;
     *) return 1 ;;
   esac
@@ -894,7 +843,7 @@ xray_has_managed_tag() {
   local comp=$1 tag f
   case $comp in
     reality) tag=$MANAGED_TAG_REALITY ;;
-    cdn) tag=$MANAGED_TAG_CDN ;;
+    ws) tag=$MANAGED_TAG_WS ;;
     *) return 1 ;;
   esac
   while IFS= read -r f; do
@@ -918,7 +867,7 @@ managed_component_present() {
   local comp=$1
   case $comp in
     reality) [[ -f $REALITY_STATE ]] || xray_has_managed_tag reality ;;
-    cdn) [[ -f $CDN_STATE ]] || xray_has_managed_tag cdn ;;
+    ws) migrate_legacy_cdn_state; [[ -f $WS_STATE ]] || xray_has_managed_tag ws ;;
     hy2) [[ -f $HY2_STATE ]] ||
       { [[ -r $HY2_DROPIN ]] && grep -q '^# syw-vps-managed=vps-proxy$' "$HY2_DROPIN" 2>/dev/null; } ||
       hy2_legacy_layout_present ;;
@@ -935,7 +884,7 @@ proxy_status_line() {
     st=$(svc_state xray xray)
     case $st in running) ((n_run++)) || true ;; stopped) ((n_stop++)) || true ;; *) ((n_bad++)) || true ;; esac
   fi
-  if component_has_config cdn; then
+  if component_has_config ws; then
     ((n_total++)) || true
     st=$(svc_state xray xray)
     case $st in running) ((n_run++)) || true ;; stopped) ((n_stop++)) || true ;; *) ((n_bad++)) || true ;; esac
@@ -947,7 +896,7 @@ proxy_status_line() {
   fi
 
   if (( n_total == 0 )); then
-    if [[ -f $REALITY_STATE || -f $CDN_STATE || -f $HY2_STATE ]]; then
+    if [[ -f $REALITY_STATE || -f $WS_STATE || -f $HY2_STATE ]]; then
       printf '%s×%s  配置异常' "$RED" "$R"
     else
       printf '%s○%s  暂无代理' "$D" "$R"
@@ -970,11 +919,7 @@ restart_svc() {
   local unit=$1 name=$2
   systemctl enable "$unit" >/dev/null 2>&1 || true
   if ! systemctl restart "$unit"; then
-    if restore_service_backup "$unit"; then
-      warn "$name 启动失败，已自动恢复旧配置"
-    else
-      hint_restore "$unit" "$name"
-    fi
+    hint_restore "$unit" "$name"
     fail "$name 启动失败: journalctl -u $unit -n 30 --no-pager"
   fi
   local i
@@ -982,11 +927,7 @@ restart_svc() {
     sleep 1
     systemctl is-active --quiet "$unit" && { ok "$name 运行中"; return; }
   done
-  if restore_service_backup "$unit"; then
-    warn "$name 未保持运行，已自动恢复旧配置"
-  else
-    hint_restore "$unit" "$name"
-  fi
+  hint_restore "$unit" "$name"
   fail "$name 未保持运行: journalctl -u $unit -n 40 --no-pager"
 }
 
@@ -1063,7 +1004,7 @@ print_block() {
   printf '\n'
 }
 
-# 节点页：comp=reality|cdn|hy2
+# 节点页：comp=reality|ws|hy2
 # 返回：0=展示有效/异常组件  1=无此组件  2=仅残留 info
 # 正常模式：真实配置为唯一依据，不向用户暴露 state 概念
 # PROXY_STATUS_DEBUG=1 / --status-debug：才显示「状态元数据缺失」等排障信息
@@ -1480,33 +1421,33 @@ xray_apply_perms() {
   chmod 640 "$path" 2>/dev/null || true
 }
 
-write_cdn_state() {
-  write_kv_file "$CDN_STATE" \
-    "CDN_PORT=${CDN_PORT}" "CDN_UUID=${CDN_UUID}" "CDN_DOMAIN=${CDN_DOMAIN}" \
-    "CDN_PATH=${CDN_PATH}" "CDN_CERT=${CDN_CERT}" "CDN_KEY=${CDN_KEY}" \
-    "CDN_SNI=${CDN_SNI}" "CDN_ADDR=${CDN_ADDR}"
+write_ws_state() {
+  write_kv_file "$WS_STATE" \
+    "WS_PORT=${WS_PORT}" "WS_UUID=${WS_UUID}" "WS_DOMAIN=${WS_DOMAIN}" \
+    "WS_PATH=${WS_PATH}" "WS_CERT=${WS_CERT}" "WS_KEY=${WS_KEY}" \
+    "WS_SNI=${WS_SNI}" "WS_ADDR=${WS_ADDR}"
 }
 
 migrate_ws_certs_if_needed() {
-  [[ -f $CDN_STATE ]] || return 0
-  [[ -n ${CDN_CERT:-} && -f ${CDN_CERT:-} ]] || return 0
-  case $CDN_CERT in
+  [[ -f $WS_STATE ]] || return 0
+  [[ -n ${WS_CERT:-} && -f ${WS_CERT:-} ]] || return 0
+  case $WS_CERT in
     /root/*|"${CONFIG_DIR}"/*) ;;
     *)
-      fix_cert_permissions "$(dirname "$CDN_CERT")" "$CDN_CERT" "${CDN_KEY:-}"
+      fix_cert_permissions "$(dirname "$WS_CERT")" "$WS_CERT" "${WS_KEY:-}"
       return 0
       ;;
   esac
   local newdir cert key id
-  id=${CDN_DOMAIN:-$WS_IP_CERT_ID}
+  id=${WS_DOMAIN:-$WS_IP_CERT_ID}
   newdir=$(xray_cert_dir "$id")
   install -d -m 750 "$newdir"
   cert="$newdir/fullchain.pem"; key="$newdir/privkey.pem"
-  cp -a "$CDN_CERT" "$cert"
-  [[ -f ${CDN_KEY:-} ]] && cp -a "$CDN_KEY" "$key"
+  cp -a "$WS_CERT" "$cert"
+  [[ -f ${WS_KEY:-} ]] && cp -a "$WS_KEY" "$key"
   fix_cert_permissions "$newdir" "$cert" "$key"
-  CDN_CERT=$cert; CDN_KEY=$key
-  write_cdn_state
+  WS_CERT=$cert; WS_KEY=$key
+  write_ws_state
   log "WS+TLS 证书已迁移: $newdir"
 }
 
@@ -1515,19 +1456,19 @@ issue_selfsigned_ws_cert() {
   [[ -n $sni ]] || fail "自签证书需要 SNI"
   certdir=$(xray_cert_dir "$WS_IP_CERT_ID")
   install -d -m 750 "$certdir"
-  CDN_CERT="$certdir/fullchain.pem"
-  CDN_KEY="$certdir/privkey.pem"
-  if [[ -f $CDN_CERT && -f $CDN_KEY ]] &&
-     openssl x509 -in "$CDN_CERT" -checkend 86400 -checkhost "$sni" -noout >/dev/null 2>&1; then
+  WS_CERT="$certdir/fullchain.pem"
+  WS_KEY="$certdir/privkey.pem"
+  if [[ -f $WS_CERT && -f $WS_KEY ]] &&
+     openssl x509 -in "$WS_CERT" -checkend 86400 -checkhost "$sni" -noout >/dev/null 2>&1; then
     log "复用已有自签证书"
   else
     openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
-      -keyout "$CDN_KEY" -out "$CDN_CERT" \
+      -keyout "$WS_KEY" -out "$WS_CERT" \
       -days 3650 -subj "/CN=${sni}" -addext "subjectAltName=DNS:${sni}" >/dev/null 2>&1 ||
       fail "生成自签证书失败"
     log "已生成自签证书: $certdir"
   fi
-  fix_cert_permissions "$certdir" "$CDN_CERT" "$CDN_KEY" || fail "证书权限修复失败: $certdir"
+  fix_cert_permissions "$certdir" "$WS_CERT" "$WS_KEY" || fail "证书权限修复失败: $certdir"
 }
 
 # 生成本管理 inbound JSON 对象（单行/多行均可）
@@ -1546,16 +1487,16 @@ _xray_reality_inbound_json() {
 EOF
 }
 
-_xray_cdn_inbound_json() {
+_xray_ws_inbound_json() {
   cat <<EOF
 {
-  "tag": "${MANAGED_TAG_CDN}", "listen": "0.0.0.0", "port": ${CDN_PORT},
+  "tag": "${MANAGED_TAG_WS}", "listen": "0.0.0.0", "port": ${WS_PORT},
   "protocol": "vless",
-  "settings": { "clients": [{ "id": "${CDN_UUID}", "email": "cdn" }], "decryption": "none" },
+  "settings": { "clients": [{ "id": "${WS_UUID}", "email": "ws" }], "decryption": "none" },
   "streamSettings": {
     "network": "ws", "security": "tls",
-    "tlsSettings": { "certificates": [{ "certificateFile": "${CDN_CERT}", "keyFile": "${CDN_KEY}" }] },
-    "wsSettings": { "path": "${CDN_PATH}" }
+    "tlsSettings": { "certificates": [{ "certificateFile": "${WS_CERT}", "keyFile": "${WS_KEY}" }] },
+    "wsSettings": { "path": "${WS_PATH}" }
   },
   "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"] }
 }
@@ -1564,7 +1505,7 @@ EOF
 
 # 单文件：结构化增删本管理 tag，保留其余 inbound
 _xray_merge_file() {
-  local dest=$1 want_reality=$2 want_cdn=$3
+  local dest=$1 want_reality=$2 want_ws=$3
   local tmp bak rf cf
   command -v python3 >/dev/null 2>&1 || fail "写入 Xray 配置需要 python3"
   [[ -f $dest ]] || printf '%s\n' '{"log":{"loglevel":"warning"},"inbounds":[],"outbounds":[{"protocol":"freedom","tag":"direct"},{"protocol":"blackhole","tag":"block"}]}' >"$dest"
@@ -1574,8 +1515,8 @@ _xray_merge_file() {
   tmp=$(mktemp "${dest}.tmp.XXXXXX.json")
   rf=$(mktemp); cf=$(mktemp)
   [[ $want_reality == 1 ]] && _xray_reality_inbound_json >"$rf" || : >"$rf"
-  [[ $want_cdn == 1 ]] && _xray_cdn_inbound_json >"$cf" || : >"$cf"
-  if ! WANT_R=$want_reality WANT_C=$want_cdn TAG_R=$MANAGED_TAG_REALITY TAG_C=$MANAGED_TAG_CDN \
+  [[ $want_ws == 1 ]] && _xray_ws_inbound_json >"$cf" || : >"$cf"
+  if ! WANT_R=$want_reality WANT_C=$want_ws TAG_R=$MANAGED_TAG_REALITY TAG_C=$MANAGED_TAG_WS \
     DEST="$dest" OUT="$tmp" RF="$rf" CF="$cf" python3 - <<'PY'
 import json, os
 path = os.environ["DEST"]
@@ -1610,14 +1551,12 @@ PY
   then
     rm -f "$tmp" "$rf" "$cf"
     mv -f "$bak" "$dest"
-    restore_last_backup || true
     fail "Xray 配置合并失败，已回滚"
   fi
   rm -f "$rf" "$cf"
   if ! xray_validate_path "$tmp" file; then
     rm -f "$tmp"
     mv -f "$bak" "$dest"
-    restore_last_backup || true
     fail "Xray 配置验证失败，已回滚"
   fi
   xray_apply_perms "$tmp"
@@ -1626,11 +1565,11 @@ PY
 }
 
 _xray_write_confdir() {
-  local dir=$1 want_reality=$2 want_cdn=$3
+  local dir=$1 want_reality=$2 want_ws=$3
   local fr fc bak_r bak_c
   install -d -m 755 "$dir"
   fr="$dir/$MANAGED_FILE_REALITY"
-  fc="$dir/$MANAGED_FILE_CDN"
+  fc="$dir/$MANAGED_FILE_WS"
   bak_r=""; bak_c=""
   [[ -f $fr ]] && { bak_r=$(mktemp); cp -a "$fr" "$bak_r"; }
   [[ -f $fc ]] && { bak_c=$(mktemp); cp -a "$fc" "$bak_c"; }
@@ -1643,7 +1582,7 @@ _xray_write_confdir() {
   if [[ $want_reality == 1 ]]; then
     _xray_reality_inbound_json >"$fr.tmp"
     # confdir 文件通常是完整 config 片段或仅 inbound 数组——使用含 inbounds 的小文件
-    FR_TMP="$fr.tmp" FR="$fr" python3 - <<'PY' || { rollback_confdir; restore_last_backup || true; fail "写入 REALITY confdir 失败"; }
+    FR_TMP="$fr.tmp" FR="$fr" python3 - <<'PY' || { rollback_confdir; fail "写入 REALITY confdir 失败"; }
 import json, os
 with open(os.environ["FR_TMP"], encoding="utf-8") as src:
     ib = json.load(src)
@@ -1657,9 +1596,9 @@ PY
   else
     rm -f "$fr"
   fi
-  if [[ $want_cdn == 1 ]]; then
-    _xray_cdn_inbound_json >"$fc.tmp"
-    FC_TMP="$fc.tmp" FC="$fc" python3 - <<'PY' || { rollback_confdir; restore_last_backup || true; fail "写入 CDN confdir 失败"; }
+  if [[ $want_ws == 1 ]]; then
+    _xray_ws_inbound_json >"$fc.tmp"
+    FC_TMP="$fc.tmp" FC="$fc" python3 - <<'PY' || { rollback_confdir; fail "写入 WS confdir 失败"; }
 import json, os
 with open(os.environ["FC_TMP"], encoding="utf-8") as src:
     ib = json.load(src)
@@ -1675,7 +1614,6 @@ PY
   fi
   if ! xray_validate_path "$dir" dir; then
     rollback_confdir
-    restore_last_backup || true
     fail "Xray confdir 验证失败，已回滚"
   fi
   rm -f "$bak_r" "$bak_c"
@@ -1683,21 +1621,21 @@ PY
 
 # 写入/更新本管理 inbound；意图以 state 文件为准；保留非本项目配置
 build_xray_config() {
-  local want_reality=0 want_cdn=0
+  local want_reality=0 want_ws=0
   xray_discover
   load_state_safe "$REALITY_STATE"
-  load_state_safe "$CDN_STATE"
+  load_state_safe "$WS_STATE"
   migrate_ws_certs_if_needed
 
   [[ -f $REALITY_STATE ]] && want_reality=1
-  [[ -f $CDN_STATE ]] && want_cdn=1
+  [[ -f $WS_STATE ]] && want_ws=1
 
   if [[ $XRAY_LAYOUT == dir && -n $XRAY_CONF_DIR ]]; then
-    _xray_write_confdir "$XRAY_CONF_DIR" "$want_reality" "$want_cdn"
+    _xray_write_confdir "$XRAY_CONF_DIR" "$want_reality" "$want_ws"
   else
     local dest=${XRAY_CONFIG_FILE:-$XRAY_CONFIG}
     install -d -m 755 "$(dirname "$dest")"
-    _xray_merge_file "$dest" "$want_reality" "$want_cdn"
+    _xray_merge_file "$dest" "$want_reality" "$want_ws"
     XRAY_CONFIG=$dest
   fi
 }
@@ -1816,7 +1754,6 @@ install_reality() {
   prepare_env
 
   local priv pub short ip link reused=0
-  local -a xray_targets=()
   local arg_port=$REALITY_PORT arg_sni=$REALITY_SNI arg_target=$REALITY_TARGET arg_uuid=$REALITY_UUID
   local live_exists=0
 
@@ -1864,12 +1801,9 @@ install_reality() {
   [[ -z ${REALITY_UUID:-} ]] || validate_uuid "$REALITY_UUID"
 
   ensure_port_available "$REALITY_PORT" tcp xray "Xray/REALITY" \
-    "$REALITY_STATE" REALITY_PORT "$CDN_STATE" CDN_PORT
+    "$REALITY_STATE" REALITY_PORT "$WS_STATE" WS_PORT
   install_xray_core
   xray_discover
-  mapfile -t xray_targets < <(xray_backup_target_list)
-
-  backup_paths reality "$REALITY_STATE" "$XRAY_INFO" "${xray_targets[@]}"
 
   if ((reused == 0)); then
     local keys
@@ -1906,18 +1840,18 @@ install_reality() {
 }
 
 # ---------- VLESS + WS + TLS ----------
-parse_cdn_args() {
-  CDN_PORT=; CDN_DOMAIN=; CDN_PATH=
-  CDN_UUID=; CDN_EMAIL=; CDN_SNI=; CDN_ADDR=
-  CDN_RANDOM_PORT=0
+parse_ws_args() {
+  WS_PORT=; WS_DOMAIN=; WS_PATH=
+  WS_UUID=; WS_EMAIL=; WS_SNI=; WS_ADDR=
+  WS_RANDOM_PORT=0
   while [[ $# -gt 0 ]]; do
     case $1 in
-      --port) require_arg "$1" "${2:-}"; CDN_PORT=$2; shift 2 ;;
-      --random-port) CDN_RANDOM_PORT=1; CDN_PORT=; shift ;;
-      --domain) require_arg "$1" "${2:-}"; CDN_DOMAIN=$2; shift 2 ;;
-      --path) require_arg "$1" "${2:-}"; CDN_PATH=$2; shift 2 ;;
-      --uuid) require_arg "$1" "${2:-}"; CDN_UUID=$2; shift 2 ;;
-      --email) require_arg "$1" "${2:-}"; CDN_EMAIL=$2; shift 2 ;;
+      --port) require_arg "$1" "${2:-}"; WS_PORT=$2; shift 2 ;;
+      --random-port) WS_RANDOM_PORT=1; WS_PORT=; shift ;;
+      --domain) require_arg "$1" "${2:-}"; WS_DOMAIN=$2; shift 2 ;;
+      --path) require_arg "$1" "${2:-}"; WS_PATH=$2; shift 2 ;;
+      --uuid) require_arg "$1" "${2:-}"; WS_UUID=$2; shift 2 ;;
+      --email) require_arg "$1" "${2:-}"; WS_EMAIL=$2; shift 2 ;;
       --public-ip) require_arg "$1" "${2:-}"; PUBLIC_IP=$2; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       *) fail "未知 WS+TLS 参数: $1" ;;
@@ -1960,8 +1894,8 @@ issue_cert() {
   if [[ -f $certdir/fullchain.pem && -f $certdir/privkey.pem ]]; then
     if openssl x509 -in "$certdir/fullchain.pem" -checkend 604800 -checkhost "$domain" -noout 2>/dev/null; then
       log "使用已有证书: $certdir"
-      CDN_CERT="$certdir/fullchain.pem"; CDN_KEY="$certdir/privkey.pem"
-      if ! fix_cert_permissions "$certdir" "$CDN_CERT" "$CDN_KEY"; then
+      WS_CERT="$certdir/fullchain.pem"; WS_KEY="$certdir/privkey.pem"
+      if ! fix_cert_permissions "$certdir" "$WS_CERT" "$WS_KEY"; then
         fail "已有证书权限修复失败: $certdir"
       fi
       return
@@ -2001,8 +1935,8 @@ issue_cert() {
     if ((restarted_xray)); then systemctl start xray || true; fi
     fail "证书安装失败: $certdir"
   fi
-  CDN_CERT="$certdir/fullchain.pem"; CDN_KEY="$certdir/privkey.pem"
-  if ! fix_cert_permissions "$certdir" "$CDN_CERT" "$CDN_KEY"; then
+  WS_CERT="$certdir/fullchain.pem"; WS_KEY="$certdir/privkey.pem"
+  if ! fix_cert_permissions "$certdir" "$WS_CERT" "$WS_KEY"; then
     if ((restarted_xray)); then systemctl start xray || true; fi
     fail "证书权限修复失败: $certdir"
   fi
@@ -2013,103 +1947,100 @@ issue_cert() {
 }
 
 install_ws() {
-  parse_cdn_args "$@"
+  parse_ws_args "$@"
   prepare_env
 
-  local arg_port=$CDN_PORT arg_path=$CDN_PATH arg_uuid=$CDN_UUID
-  local arg_random=$CDN_RANDOM_PORT
-  local want_domain=$CDN_DOMAIN
+  local arg_port=$WS_PORT arg_path=$WS_PATH arg_uuid=$WS_UUID
+  local arg_random=$WS_RANDOM_PORT
+  local want_domain=$WS_DOMAIN
   local old_domain old_path old_uuid old_port old_sni
   local ip_mode=0 cert_id link path_enc addr
-  old_domain=$(state_get "$CDN_STATE" CDN_DOMAIN)
-  old_path=$(state_get "$CDN_STATE" CDN_PATH)
-  old_uuid=$(state_get "$CDN_STATE" CDN_UUID)
-  old_port=$(state_get "$CDN_STATE" CDN_PORT)
-  old_sni=$(state_get "$CDN_STATE" CDN_SNI)
+  old_domain=$(state_get "$WS_STATE" WS_DOMAIN)
+  old_path=$(state_get "$WS_STATE" WS_PATH)
+  old_uuid=$(state_get "$WS_STATE" WS_UUID)
+  old_port=$(state_get "$WS_STATE" WS_PORT)
+  old_sni=$(state_get "$WS_STATE" WS_SNI)
   [[ -z $want_domain ]] && ip_mode=1
-  if [[ -f $CDN_STATE && $old_domain == "$want_domain" ]]; then
-    [[ -n $arg_path ]] || CDN_PATH=$old_path
-    [[ -n $arg_uuid ]] || CDN_UUID=$old_uuid
+  if [[ -f $WS_STATE && $old_domain == "$want_domain" ]]; then
+    [[ -n $arg_path ]] || WS_PATH=$old_path
+    [[ -n $arg_uuid ]] || WS_UUID=$old_uuid
     if ((ip_mode)); then
-      [[ -n ${CDN_SNI:-} ]] || CDN_SNI=$old_sni
+      [[ -n ${WS_SNI:-} ]] || WS_SNI=$old_sni
       log "复用已有 WS+TLS 节点参数（IP 直连）"
     else
       log "复用已有 WS+TLS 节点参数（同域名）"
     fi
   fi
 
-  CDN_PORT=$(ws_pick_port "$want_domain" "$old_domain" "$old_port" "$arg_port" "$arg_random")
-  if [[ -z ${CDN_PORT:-} ]]; then
-    CDN_PORT=$(random_ws_port)
-    log "随机 TCP 端口: $CDN_PORT"
-  elif [[ -n $old_port && $CDN_PORT == "$old_port" && $arg_random != 1 && -z $arg_port ]]; then
-    log "保持已有 TLS 端口: $CDN_PORT"
+  WS_PORT=$(ws_pick_port "$want_domain" "$old_domain" "$old_port" "$arg_port" "$arg_random")
+  if [[ -z ${WS_PORT:-} ]]; then
+    WS_PORT=$(random_ws_port)
+    log "随机 TCP 端口: $WS_PORT"
+  elif [[ -n $old_port && $WS_PORT == "$old_port" && $arg_random != 1 && -z $arg_port ]]; then
+    log "保持已有 TLS 端口: $WS_PORT"
   fi
-  validate_port "$CDN_PORT"
-  [[ -z ${CDN_UUID:-} ]] || validate_uuid "$CDN_UUID"
-  [[ -n ${CDN_UUID:-} ]] || CDN_UUID=$(random_uuid)
-  [[ -n ${CDN_PATH:-} ]] || CDN_PATH=$(random_path)
-  [[ $CDN_PATH == /* ]] || CDN_PATH="/$CDN_PATH"
-  validate_cdn_path "$CDN_PATH"
+  validate_port "$WS_PORT"
+  [[ -z ${WS_UUID:-} ]] || validate_uuid "$WS_UUID"
+  [[ -n ${WS_UUID:-} ]] || WS_UUID=$(random_uuid)
+  [[ -n ${WS_PATH:-} ]] || WS_PATH=$(random_path)
+  [[ $WS_PATH == /* ]] || WS_PATH="/$WS_PATH"
+  validate_ws_path "$WS_PATH"
 
   if ((ip_mode)); then
-    [[ -n ${CDN_SNI:-} ]] || CDN_SNI=${SNI_PRESETS[RANDOM % ${#SNI_PRESETS[@]}]}
-    validate_domain "$CDN_SNI"
-    CDN_ADDR=$(resolve_public_ip)
+    [[ -n ${WS_SNI:-} ]] || WS_SNI=${SNI_PRESETS[RANDOM % ${#SNI_PRESETS[@]}]}
+    validate_domain "$WS_SNI"
+    WS_ADDR=$(resolve_public_ip)
     cert_id=$WS_IP_CERT_ID
     log "未指定域名，使用公网 IP 直连 + 自签 TLS"
   else
-    validate_domain "$CDN_DOMAIN"
-    CDN_SNI=$CDN_DOMAIN
-    CDN_ADDR=$CDN_DOMAIN
-    cert_id=$CDN_DOMAIN
-    [[ -n ${CDN_EMAIL:-} ]] || CDN_EMAIL="admin@${CDN_DOMAIN}"
-    is_safe_token "$CDN_EMAIL" || fail "邮箱含非法字符"
+    validate_domain "$WS_DOMAIN"
+    WS_SNI=$WS_DOMAIN
+    WS_ADDR=$WS_DOMAIN
+    cert_id=$WS_DOMAIN
+    [[ -n ${WS_EMAIL:-} ]] || WS_EMAIL="admin@${WS_DOMAIN}"
+    is_safe_token "$WS_EMAIL" || fail "邮箱含非法字符"
   fi
 
-  ensure_port_available "$CDN_PORT" tcp xray "Xray/WS+TLS" \
-    "$CDN_STATE" CDN_PORT "$REALITY_STATE" REALITY_PORT
+  ensure_port_available "$WS_PORT" tcp xray "Xray/WS+TLS" \
+    "$WS_STATE" WS_PORT "$REALITY_STATE" REALITY_PORT
   install_xray_core
   xray_discover
-  local -a xray_targets=()
-  mapfile -t xray_targets < <(xray_backup_target_list)
-  backup_paths cdn "$CDN_STATE" "$CDN_INFO" "${xray_targets[@]}" "$(xray_cert_dir "$cert_id")"
 
   if ((ip_mode)); then
-    issue_selfsigned_ws_cert "$CDN_SNI"
+    issue_selfsigned_ws_cert "$WS_SNI"
   else
-    issue_cert "$CDN_DOMAIN" "$CDN_EMAIL"
+    issue_cert "$WS_DOMAIN" "$WS_EMAIL"
   fi
 
-  write_cdn_state
+  write_ws_state
 
   build_xray_config
   restart_svc xray "Xray"
   enable_proxy_auto_update
-  open_port "$CDN_PORT" tcp
+  open_port "$WS_PORT" tcp
 
-  path_enc=$(printf %s "$CDN_PATH" | sed 's|/|%2F|g')
-  addr=$CDN_ADDR
+  path_enc=$(printf %s "$WS_PATH" | sed 's|/|%2F|g')
+  addr=$WS_ADDR
   if ((ip_mode)); then
-    link="vless://${CDN_UUID}@${addr}:${CDN_PORT}?encryption=none&security=tls&type=ws&host=${CDN_SNI}&sni=${CDN_SNI}&allowInsecure=1&fp=chrome&path=${path_enc}#WS-IP"
-    save_info "$CDN_INFO" \
+    link="vless://${WS_UUID}@${addr}:${WS_PORT}?encryption=none&security=tls&type=ws&host=${WS_SNI}&sni=${WS_SNI}&allowInsecure=1&fp=chrome&path=${path_enc}#WS-IP"
+    save_info "$WS_INFO" \
       "Xray VLESS + WS + TLS（IP 直连）" "" \
-      "连接地址: ${addr}" "端口:   ${CDN_PORT}" "UUID:   ${CDN_UUID}" \
+      "连接地址: ${addr}" "端口:   ${WS_PORT}" "UUID:   ${WS_UUID}" \
       "传输:   WebSocket" "TLS:    自签（需允许不安全证书）" \
-      "Host/SNI: ${CDN_SNI}" "Path:   ${CDN_PATH}" \
+      "Host/SNI: ${WS_SNI}" "Path:   ${WS_PATH}" \
       "" "分享链接:" "${link}" "" \
       "说明: 不用自己的域名；客户端填写 VPS IP，并开启允许不安全证书。"
     ok "VLESS + WS + TLS 节点安装完成（IP 直连）"
   else
-    link="vless://${CDN_UUID}@${CDN_DOMAIN}:${CDN_PORT}?encryption=none&security=tls&type=ws&host=${CDN_DOMAIN}&sni=${CDN_DOMAIN}&path=${path_enc}#WS-${CDN_DOMAIN}"
-    save_info "$CDN_INFO" \
+    link="vless://${WS_UUID}@${WS_DOMAIN}:${WS_PORT}?encryption=none&security=tls&type=ws&host=${WS_DOMAIN}&sni=${WS_DOMAIN}&path=${path_enc}#WS-${WS_DOMAIN}"
+    save_info "$WS_INFO" \
       "Xray VLESS + WS + TLS（直连）" "" \
-      "连接地址: ${CDN_DOMAIN}" "域名/SNI: ${CDN_DOMAIN}" "端口:   ${CDN_PORT}" "UUID:   ${CDN_UUID}" \
-      "传输:   WebSocket" "TLS:    开启" "Host:   ${CDN_DOMAIN}" "SNI:    ${CDN_DOMAIN}" "Path:   ${CDN_PATH}" \
+      "连接地址: ${WS_DOMAIN}" "域名/SNI: ${WS_DOMAIN}" "端口:   ${WS_PORT}" "UUID:   ${WS_UUID}" \
+      "传输:   WebSocket" "TLS:    开启" "Host:   ${WS_DOMAIN}" "SNI:    ${WS_DOMAIN}" "Path:   ${WS_PATH}" \
       "" "分享链接:" "${link}" "" "说明: 直连模式使用域名连接本机 WS+TLS。"
     ok "VLESS + WS + TLS 节点安装完成（直连）"
   fi
-  print_block "节点信息" "$CDN_INFO"
+  print_block "节点信息" "$WS_INFO"
 }
 
 # ---------- Hysteria2 ----------
@@ -2406,7 +2337,6 @@ install_hy2() {
 
   ensure_hy2_account
   install_hy2_core
-  backup_paths hy2 "$HY2_STATE" "$HY2_INFO" "$HY2_CONFIG" "$HY2_CERT_DIR" "$HY2_DROPIN"
 
   install -d -o root -g "$HY2_USER" -m 750 "$HY2_CERT_DIR" /etc/hysteria
   if ((reuse_cert == 0)); then
@@ -2481,9 +2411,10 @@ show_info() {
   printf '\n  %s节点与状态%s\n' "$B$CYN" "$R"
 
   # 用 if/else 接返回码，避免 set -e / ERR trap 把 rc=1（无组件）当致命错误
-  # 从而在「有 REALITY、无 CDN」时仍能继续展示 Hysteria2
+  # 从而在「有 REALITY、无 WS+TLS」时仍能继续展示 Hysteria2
+  migrate_legacy_cdn_state
   _show_info_handle_component "REALITY" "$REALITY_STATE" "$XRAY_INFO" xray xray REALITY_PORT reality
-  _show_info_handle_component "VLESS / WS+TLS" "$CDN_STATE" "$CDN_INFO" xray xray CDN_PORT cdn
+  _show_info_handle_component "VLESS / WS+TLS" "$WS_STATE" "$WS_INFO" xray xray WS_PORT ws
   _show_info_handle_component "Hysteria2" "$HY2_STATE" "$HY2_INFO" hysteria-server hysteria HY2_PORT hy2
 
   # 有真实节点/异常组件时不显示「暂无」；仅残留时也不追加「暂无」
@@ -2536,11 +2467,7 @@ restart_svc_or_fail() {
   local unit=$1 name=$2
   systemctl enable "$unit" >/dev/null 2>&1 || true
   if ! systemctl restart "$unit"; then
-    if restore_service_backup "$unit"; then
-      warn "$name 启动失败，已自动恢复旧配置"
-    else
-      hint_restore "$unit" "$name"
-    fi
+    hint_restore "$unit" "$name"
     return 1
   fi
   local i
@@ -2548,15 +2475,11 @@ restart_svc_or_fail() {
     sleep 1
     systemctl is-active --quiet "$unit" && { ok "$name 运行中"; return 0; }
   done
-  if restore_service_backup "$unit"; then
-    warn "$name 未保持运行，已自动恢复旧配置"
-  else
-    hint_restore "$unit" "$name"
-  fi
+  hint_restore "$unit" "$name"
   return 1
 }
 
-# 卸载期间仅保留同目录临时快照，成功后立即删除，不进入备份归档。
+# 卸载期间仅保留同目录临时快照，成功后立即删除。
 uninstall_snapshot_file() {
   local src=$1 snap
   [[ -f $src ]] || return 0
@@ -2578,7 +2501,6 @@ uninstall_reality() {
   local dest=${XRAY_CONFIG_FILE:-$XRAY_CONFIG} state_snap="" info_snap=""
   state_snap=$(uninstall_snapshot_file "$REALITY_STATE") || fail "无法创建临时回滚快照"
   info_snap=$(uninstall_snapshot_file "$XRAY_INFO") || { rm -f -- "$state_snap"; fail "无法创建临时回滚快照"; }
-  LAST_BACKUP=""; LAST_BACKUP_MISSING=()
   [[ -f $dest ]] && cp -a "$dest" "$dest.pre-uninstall-reality" || true
   rm -f "$REALITY_STATE" "$XRAY_INFO"
   # 按剩余 state 重建，精确去掉本管理 REALITY inbound，保留 WS+TLS/第三方
@@ -2600,7 +2522,7 @@ uninstall_reality() {
     fi
   fi
   rm -f "$dest.pre-uninstall-reality" "$state_snap" "$info_snap"
-  if [[ -f $CDN_STATE ]] || component_has_config cdn; then
+  if [[ -f $WS_STATE ]] || component_has_config ws; then
     ok "已移除 REALITY，保留其他配置"
   else
     ok "已移除 REALITY"
@@ -2609,33 +2531,32 @@ uninstall_reality() {
 
 uninstall_ws() {
   require_root
-  managed_component_present cdn || { warn "未找到本项目管理的 WS+TLS，未执行卸载"; return 0; }
+  managed_component_present ws || { warn "未找到本项目管理的 WS+TLS，未执行卸载"; return 0; }
   xray_discover
   local dest=${XRAY_CONFIG_FILE:-$XRAY_CONFIG}
   local dom certdir="" acme="/root/.acme.sh/acme.sh" state_snap="" info_snap=""
-  dom=$(state_get "$CDN_STATE" CDN_DOMAIN)
+  dom=$(state_get "$WS_STATE" WS_DOMAIN)
   if [[ -n $dom ]]; then
     validate_domain "$dom"
     certdir=$(xray_cert_dir "$dom")
   else
     certdir=$(xray_cert_dir "$WS_IP_CERT_ID")
   fi
-  state_snap=$(uninstall_snapshot_file "$CDN_STATE") || fail "无法创建临时回滚快照"
-  info_snap=$(uninstall_snapshot_file "$CDN_INFO") || { rm -f -- "$state_snap"; fail "无法创建临时回滚快照"; }
-  LAST_BACKUP=""; LAST_BACKUP_MISSING=()
+  state_snap=$(uninstall_snapshot_file "$WS_STATE") || fail "无法创建临时回滚快照"
+  info_snap=$(uninstall_snapshot_file "$WS_INFO") || { rm -f -- "$state_snap"; fail "无法创建临时回滚快照"; }
   [[ -f $dest ]] && cp -a "$dest" "$dest.pre-uninstall-ws" || true
-  rm -f "$CDN_STATE" "$CDN_INFO"
+  rm -f "$WS_STATE" "$WS_INFO"
   if ! build_xray_config; then
-    uninstall_restore_snapshot "$CDN_STATE" "$state_snap"
-    uninstall_restore_snapshot "$CDN_INFO" "$info_snap"
+    uninstall_restore_snapshot "$WS_STATE" "$state_snap"
+    uninstall_restore_snapshot "$WS_INFO" "$info_snap"
     [[ -f "$dest.pre-uninstall-ws" ]] && mv -f "$dest.pre-uninstall-ws" "$dest"
     rm -f -- "$state_snap" "$info_snap"
     fail "移除 WS+TLS 配置失败，已回滚"
   fi
   if systemctl is-enabled xray >/dev/null 2>&1 || systemctl is-active xray >/dev/null 2>&1; then
     if ! restart_svc_or_fail xray "Xray"; then
-      uninstall_restore_snapshot "$CDN_STATE" "$state_snap"
-      uninstall_restore_snapshot "$CDN_INFO" "$info_snap"
+      uninstall_restore_snapshot "$WS_STATE" "$state_snap"
+      uninstall_restore_snapshot "$WS_INFO" "$info_snap"
       [[ -f "$dest.pre-uninstall-ws" ]] && mv -f "$dest.pre-uninstall-ws" "$dest"
       rm -f -- "$state_snap" "$info_snap"
       systemctl restart xray 2>/dev/null || true
@@ -2656,7 +2577,6 @@ uninstall_ws() {
 uninstall_hy2() {
   require_root
   managed_component_present hy2 || { warn "未找到本项目管理的 Hysteria2，未执行卸载"; return 0; }
-  LAST_BACKUP=""; LAST_BACKUP_MISSING=()
   if command -v hysteria >/dev/null || systemctl cat hysteria-server >/dev/null 2>&1; then
     run_verified_script "$HY2_INSTALLER_URL" "$HY2_INSTALLER_SHA256" --remove ||
       fail "Hysteria2 卸载器执行失败"
@@ -2735,15 +2655,15 @@ menu_install_ws() {
   local domain port path email random_port=0 cur_port=""
   # 域名不从旧配置预填，避免误用旧节点并在提示符中回显域名。
   domain=$(prompt "域名（空=IP 直连，自签证书）" "")
-  if [[ $domain == "$(state_get "$CDN_STATE" CDN_DOMAIN)" ]]; then
-    cur_port=$(state_get "$CDN_STATE" CDN_PORT)
+  if [[ $domain == "$(state_get "$WS_STATE" WS_DOMAIN)" ]]; then
+    cur_port=$(state_get "$WS_STATE" WS_PORT)
   fi
   port=$(prompt "TLS 端口（空=保持或随机；输入 random=随机）" "$cur_port")
   if [[ ${port,,} == random ]]; then
     port=
     random_port=1
   fi
-  path=$(prompt "WebSocket path（空=保持或随机）" "$(state_get "$CDN_STATE" CDN_PATH)")
+  path=$(prompt "WebSocket path（空=保持或随机）" "$(state_get "$WS_STATE" WS_PATH)")
 
   local args=()
   if [[ -n $domain ]]; then
@@ -2809,8 +2729,8 @@ menu_uninstall() {
       actions+=(reality)
       labels+=("卸载 REALITY")
     fi
-    if managed_component_present cdn; then
-      actions+=(cdn)
+    if managed_component_present ws; then
+      actions+=(ws)
       labels+=("卸载 WS+TLS")
     fi
     if managed_component_present hy2; then
@@ -2852,7 +2772,7 @@ menu_uninstall() {
         confirm_yes "确定卸载 REALITY？" || { warn "已取消"; continue; }
         uninstall_reality
         ;;
-      cdn)
+      ws)
         confirm_yes "确定卸载 WS+TLS？" || { warn "已取消"; continue; }
         uninstall_ws
         ;;

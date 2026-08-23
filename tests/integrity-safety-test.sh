@@ -85,19 +85,38 @@ XRAY_LAYOUT=file
 CONFIG_DIR="$TMP/proxy-info"
 mkdir -p "$CONFIG_DIR"
 REALITY_STATE="$CONFIG_DIR/reality.conf"
-CDN_STATE="$CONFIG_DIR/cdn.conf"
+WS_STATE="$CONFIG_DIR/ws.conf"
 HY2_STATE="$CONFIG_DIR/hy2.conf"
 XRAY_INFO="$CONFIG_DIR/xray-reality.txt"
-CDN_INFO="$CONFIG_DIR/xray-cdn.txt"
+WS_INFO="$CONFIG_DIR/xray-ws.txt"
 
 # 合法伪装 URL 的查询参数应能安全保存，且不截断旧状态。
 SPECIAL_STATE="$CONFIG_DIR/special.conf"
 write_kv_file "$SPECIAL_STATE" "HY2_MASQUERADE=https://example.com/a?x=1&y=2"
 assert "masquerade query chars survive state write" 'grep -q "HY2_MASQUERADE=https://example.com/a?x=1&y=2" "$SPECIAL_STATE"'
+EMPTY_STATE="$CONFIG_DIR/empty.conf"
+write_kv_file "$EMPTY_STATE" "WS_DOMAIN=" "WS_PORT=8443"
+assert "empty WS_DOMAIN allowed" 'grep -q "^WS_DOMAIN=$" "$EMPTY_STATE"'
+WS_DOMAIN=leftover WS_PORT=
+load_state_safe "$EMPTY_STATE"
+assert "empty WS_DOMAIN loads" '[[ -z $WS_DOMAIN && $WS_PORT == 8443 ]]'
+
+# 旧 cdn.conf / CDN_* 迁移到 ws.conf / WS_*。
+printf 'CDN_PORT=8443\nCDN_UUID=22222222-2222-2222-2222-222222222222\nCDN_DOMAIN=\nCDN_PATH=/p\n' \
+  >"$CONFIG_DIR/cdn.conf"
+printf '域名: 1.2.3.4\n' >"$CONFIG_DIR/xray-cdn.txt"
+migrate_legacy_cdn_state
+assert "migrate creates ws.conf" '[[ -f $WS_STATE && ! -f $CONFIG_DIR/cdn.conf ]]'
+assert "migrate rewrites keys" 'grep -q "^WS_PORT=8443$" "$WS_STATE" && grep -q "^WS_DOMAIN=$" "$WS_STATE" && ! grep -q "^CDN_" "$WS_STATE"'
+assert "migrate moves info" '[[ -f $WS_INFO && ! -f $CONFIG_DIR/xray-cdn.txt ]]'
+WS_DOMAIN=leftover WS_PORT=
+load_state_safe "$WS_STATE"
+assert "migrate empty domain loads" '[[ -z $WS_DOMAIN && $WS_PORT == 8443 ]]'
+rm -f "$WS_STATE" "$WS_INFO"
 
 # WS+TLS 仅保留直连参数。
-parse_cdn_args --domain example.com --port 8443
-assert "ws direct parser" '[[ $CDN_DOMAIN == example.com && $CDN_PORT == 8443 ]]'
+parse_ws_args --domain example.com --port 8443
+assert "ws direct parser" '[[ $WS_DOMAIN == example.com && $WS_PORT == 8443 ]]'
 assert "ws update keeps port" '[[ $(ws_pick_port example.com example.com 8443 "" 0) == 8443 ]]'
 assert "ws random-port clears" '[[ -z $(ws_pick_port example.com example.com 8443 "" 1) ]]'
 assert "ws explicit port wins" '[[ $(ws_pick_port example.com example.com 8443 9443 0) == 9443 ]]'
@@ -151,8 +170,8 @@ printf '%s\n' '{"inbounds":[{"tag":"vless-ws-tls","port":9443,"protocol":"vless"
 XRAY_LAYOUT=dir
 XRAY_CONF_DIR=$CONFDIR
 xray_scan_load
-assert "confdir detects cdn" '[[ $HAS_CDN == 1 ]]'
-assert "confdir port 9443" '[[ $PORT_CDN == 9443 ]]'
+assert "confdir detects ws" '[[ $HAS_WS == 1 ]]'
+assert "confdir port 9443" '[[ $PORT_WS == 9443 ]]'
 
 # ExecStart 解析（不依赖 systemctl）
 specs=$(parse_execstart_config_specs 'path=/usr/local/bin/xray run -config /etc/xray/a.json')
@@ -185,25 +204,25 @@ EOF
   assert "merge adds reality tag" 'grep -q vless-reality "$XRAY_CONFIG_FILE"'
 
   rm -f "$REALITY_STATE"
-  CDN_PORT=8443 CDN_UUID=22222222-2222-2222-2222-222222222222
-  CDN_DOMAIN=ex.com CDN_PATH=/p CDN_CERT=/tmp/c.pem CDN_KEY=/tmp/k.pem
-  printf 'CDN_PORT=8443\nCDN_UUID=%s\nCDN_DOMAIN=ex.com\nCDN_PATH=/p\nCDN_CERT=/tmp/c.pem\nCDN_KEY=/tmp/k.pem\n' \
-    "$CDN_UUID" >"$CDN_STATE"
+  WS_PORT=8443 WS_UUID=22222222-2222-2222-2222-222222222222
+  WS_DOMAIN=ex.com WS_PATH=/p WS_CERT=/tmp/c.pem WS_KEY=/tmp/k.pem
+  printf 'WS_PORT=8443\nWS_UUID=%s\nWS_DOMAIN=ex.com\nWS_PATH=/p\nWS_CERT=/tmp/c.pem\nWS_KEY=/tmp/k.pem\n' \
+    "$WS_UUID" >"$WS_STATE"
   build_xray_config
   assert "after reality gone still keep-me" 'grep -q keep-me "$XRAY_CONFIG_FILE"'
-  assert "after reality gone has cdn" 'grep -q vless-ws-tls "$XRAY_CONFIG_FILE"'
+  assert "after reality gone has ws" 'grep -q vless-ws-tls "$XRAY_CONFIG_FILE"'
   assert "after reality gone no reality tag" '! grep -q vless-reality "$XRAY_CONFIG_FILE"'
 
-  rm -f "$CDN_STATE"
+  rm -f "$WS_STATE"
   build_xray_config
-  assert "cdn removed keeps keep-me" 'grep -q keep-me "$XRAY_CONFIG_FILE"'
-  assert "cdn removed no cdn tag" '! grep -q vless-ws-tls "$XRAY_CONFIG_FILE"'
+  assert "ws removed keeps keep-me" 'grep -q keep-me "$XRAY_CONFIG_FILE"'
+  assert "ws removed no ws tag" '! grep -q vless-ws-tls "$XRAY_CONFIG_FILE"'
 
   XRAY_LAYOUT=dir
   XRAY_CONF_DIR=$CONFDIR
   printf 'REALITY_PORT=443\nREALITY_UUID=%s\nREALITY_SNI=s.com\nREALITY_TARGET=s.com:443\nREALITY_PRIV=p\nREALITY_SHORT=s\nREALITY_PUB=u\n' \
     "$REALITY_UUID" >"$REALITY_STATE"
-  rm -f "$CDN_STATE"
+  rm -f "$WS_STATE"
   build_xray_config
   assert "confdir reality file" '[[ -f $XRAY_CONF_DIR/$MANAGED_FILE_REALITY ]]'
   assert "confdir other untouched" '[[ -f $XRAY_CONF_DIR/other.json ]]'

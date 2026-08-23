@@ -43,10 +43,10 @@ write_xray_cfg() {
         # 旧节点：无固定 tag，仅协议语义
         parts+=('{ "listen": "0.0.0.0", "port": 443, "protocol": "vless", "streamSettings": { "network": "tcp", "security": "reality" } }')
         ;;
-      cdn)
+      ws)
         parts+=('{ "tag": "vless-ws-tls", "listen": "0.0.0.0", "port": 8443, "protocol": "vless", "streamSettings": { "network": "ws", "security": "tls" } }')
         ;;
-      cdn_notag)
+      ws_notag)
         parts+=('{ "listen": "0.0.0.0", "port": 8443, "protocol": "vless", "streamSettings": { "network": "ws", "security": "tls" } }')
         ;;
     esac
@@ -112,10 +112,10 @@ source "$ROOT/proxy.sh"
 CONFIG_DIR="$TMP/proxy-cfg"
 mkdir -p "$CONFIG_DIR" "$TMP/xray" "$TMP/hy2"
 REALITY_STATE="$CONFIG_DIR/reality.conf"
-CDN_STATE="$CONFIG_DIR/cdn.conf"
+WS_STATE="$CONFIG_DIR/ws.conf"
 HY2_STATE="$CONFIG_DIR/hy2.conf"
 XRAY_INFO="$CONFIG_DIR/xray-reality.txt"
-CDN_INFO="$CONFIG_DIR/xray-cdn.txt"
+WS_INFO="$CONFIG_DIR/xray-ws.txt"
 HY2_INFO="$CONFIG_DIR/hysteria2.txt"
 XRAY_CONFIG="$TMP/xray/config.json"
 HY2_CONFIG="$TMP/hy2/config.yaml"
@@ -130,7 +130,7 @@ svc_state() {
 declare -A MOCK_SVC=()
 
 clear_proxy() {
-  rm -f "$REALITY_STATE" "$CDN_STATE" "$HY2_STATE" "$XRAY_INFO" "$CDN_INFO" "$HY2_INFO" \
+  rm -f "$REALITY_STATE" "$WS_STATE" "$HY2_STATE" "$XRAY_INFO" "$WS_INFO" "$HY2_INFO" \
     "$XRAY_CONFIG" "$HY2_CONFIG"
   MOCK_SVC=()
 }
@@ -229,16 +229,16 @@ MOCK_SVC[xray]=missing
 out=$(show_info 2>&1)
 assert "missing bin 异常" '[[ "$out" == *"异常"* ]]'
 
-# 8) REALITY + CDN 共用 xray
+# 8) REALITY + WS+TLS 共用 xray
 clear_proxy
-write_xray_cfg "$XRAY_CONFIG" reality cdn
+write_xray_cfg "$XRAY_CONFIG" reality ws
 printf 'REALITY_PORT=443\n' >"$REALITY_STATE"
-printf 'CDN_PORT=8443\n' >"$CDN_STATE"
+printf 'WS_PORT=8443\n' >"$WS_STATE"
 printf '地址: 1.2.3.4\n' >"$XRAY_INFO"
-printf '域名: example.com\n' >"$CDN_INFO"
+printf '域名: example.com\n' >"$WS_INFO"
 MOCK_SVC[xray]=running
 line=$(proxy_status_line)
-assert "reality+cdn one xray" '[[ "$line" == *"节点运行中"* || "$line" == *"代理运行中"* ]]'
+assert "reality+ws one xray" '[[ "$line" == *"节点运行中"* || "$line" == *"代理运行中"* ]]'
 assert "not partial single xray" '[[ "$line" != *"部分服务停止"* ]]'
 out=$(show_info 2>&1)
 assert "both components" '[[ "$out" == *"REALITY"* && "$out" == *"WS+TLS"* ]]'
@@ -260,14 +260,14 @@ line=$(proxy_status_line)
 assert "all stopped" '[[ "$line" == *"代理已停止"* ]]'
 assert "stopped not 暂无" '[[ "$line" != *"暂无代理"* ]]'
 
-# 只有 CDN 配置
+# 只有 WS+TLS 配置
 clear_proxy
-write_xray_cfg "$XRAY_CONFIG" cdn
-printf 'CDN_PORT=8443\n' >"$CDN_STATE"
-printf '域名: d.com\n' >"$CDN_INFO"
+write_xray_cfg "$XRAY_CONFIG" ws
+printf 'WS_PORT=8443\n' >"$WS_STATE"
+printf '域名: d.com\n' >"$WS_INFO"
 MOCK_SVC[xray]=running
 out=$(show_info 2>&1)
-assert "only cdn" '[[ "$out" == *"WS+TLS"* && "$out" != *"REALITY"* && "$out" != *"Hysteria2"* ]]'
+assert "only ws" '[[ "$out" == *"WS+TLS"* && "$out" != *"REALITY"* && "$out" != *"Hysteria2"* ]]'
 
 # 有真实配置时绝不暂无（即使无 state）
 clear_proxy
@@ -285,14 +285,14 @@ out=$(show_info 2>&1)
 assert "semantic reality no tag" '[[ "$out" == *"REALITY"* && "$out" == *"运行中"* && "$out" != *"残留"* && "$out" != *"暂无代理"* ]]'
 assert "semantic reality port" '[[ "$out" == *"443/TCP"* || "$out" == *":443"* ]]'
 
-# 无固定 tag 的 CDN 语义
+# 无固定 tag 的 WS+TLS 语义
 clear_proxy
-write_xray_cfg "$XRAY_CONFIG" cdn_notag
-printf '域名: d.com\n端口: 8443\n' >"$CDN_INFO"
+write_xray_cfg "$XRAY_CONFIG" ws_notag
+printf '域名: d.com\n端口: 8443\n' >"$WS_INFO"
 MOCK_SVC[xray]=running
 out=$(show_info 2>&1)
-assert "semantic cdn no tag" '[[ "$out" == *"WS+TLS"* && "$out" == *"运行中"* && "$out" != *"REALITY"* ]]'
-assert "semantic cdn not 暂无" '[[ "$out" != *"暂无代理"* ]]'
+assert "semantic ws no tag" '[[ "$out" == *"WS+TLS"* && "$out" == *"运行中"* && "$out" != *"REALITY"* ]]'
+assert "semantic ws not 暂无" '[[ "$out" != *"暂无代理"* ]]'
 
 # 仅 Xray 运行但无匹配 inbound → 不因 systemd 判为有节点
 clear_proxy
@@ -312,7 +312,7 @@ run_show_info_with_err_trap() {
   ) 2>&1
 }
 
-# 只有 REALITY、没有 CDN
+# 只有 REALITY、没有 WS+TLS
 clear_proxy
 write_xray_cfg "$XRAY_CONFIG" reality
 printf '地址: 1.1.1.1\n端口: 443\n' >"$XRAY_INFO"
@@ -320,11 +320,11 @@ MOCK_SVC[xray]=running
 out=$(run_show_info_with_err_trap) || true
 assert "only reality no ERR" '[[ "$out" != *"[ERR]"* ]]'
 assert "only reality shown" '[[ "$out" == *"REALITY"* && "$out" == *"运行中"* ]]'
-assert "only reality no CDN" '[[ "$out" != *"WS+TLS"* ]]'
+assert "only reality no WS" '[[ "$out" != *"WS+TLS"* ]]'
 assert "only reality no HY2" '[[ "$out" != *"Hysteria2"* ]]'
 assert "only reality not 暂无" '[[ "$out" != *"暂无代理"* ]]'
 
-# REALITY + Hysteria2，没有 CDN（关键：CDN 缺失不得跳过 HY2）
+# REALITY + Hysteria2，没有 WS+TLS（关键：WS 缺失不得跳过 HY2）
 clear_proxy
 write_xray_cfg "$XRAY_CONFIG" reality
 write_hy2_cfg "$HY2_CONFIG" 55479
@@ -335,7 +335,7 @@ MOCK_SVC[hysteria-server]=running
 out=$(run_show_info_with_err_trap) || true
 assert "reality+hy2 no ERR" '[[ "$out" != *"[ERR]"* ]]'
 assert "reality+hy2 both" '[[ "$out" == *"REALITY"* && "$out" == *"Hysteria2"* ]]'
-assert "reality+hy2 no CDN block" '[[ "$out" != *"WS+TLS"* && "$out" != *"未安装"* ]]'
+assert "reality+hy2 no WS block" '[[ "$out" != *"WS+TLS"* && "$out" != *"未安装"* ]]'
 assert "reality+hy2 not 暂无" '[[ "$out" != *"暂无代理"* ]]'
 assert "reality+hy2 hy2 not skipped" '[[ "$out" == *"Hysteria2"* && "$out" == *"运行中"* ]]'
 
@@ -348,14 +348,14 @@ out=$(run_show_info_with_err_trap) || true
 assert "only hy2 no ERR" '[[ "$out" != *"[ERR]"* ]]'
 assert "only hy2 shown" '[[ "$out" == *"Hysteria2"* && "$out" != *"REALITY"* && "$out" != *"WS+TLS"* ]]'
 
-# 只有 CDN（已有 only cdn，再加 ERR trap）
+# 只有 WS+TLS（已有 only ws，再加 ERR trap）
 clear_proxy
-write_xray_cfg "$XRAY_CONFIG" cdn
-printf '域名: d.com\n端口: 8443\n' >"$CDN_INFO"
+write_xray_cfg "$XRAY_CONFIG" ws
+printf '域名: d.com\n端口: 8443\n' >"$WS_INFO"
 MOCK_SVC[xray]=running
 out=$(run_show_info_with_err_trap) || true
-assert "only cdn no ERR" '[[ "$out" != *"[ERR]"* ]]'
-assert "only cdn trap ok" '[[ "$out" == *"WS+TLS"* && "$out" != *"REALITY"* && "$out" != *"Hysteria2"* ]]'
+assert "only ws no ERR" '[[ "$out" != *"[ERR]"* ]]'
+assert "only ws trap ok" '[[ "$out" == *"WS+TLS"* && "$out" != *"REALITY"* && "$out" != *"Hysteria2"* ]]'
 
 # 三个组件都不存在
 clear_proxy
