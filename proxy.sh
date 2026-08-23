@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
-VERSION="1.6.1"
+VERSION="1.7.0"
 CONFIG_DIR="/root/proxy-info"
 BACKUP_DIR="${CONFIG_DIR}/backups"
 BACKUP_KEEP="${BACKUP_KEEP:-15}"
@@ -104,7 +104,8 @@ usage() {
   bash proxy.sh hy2  [参数]     安装/更新 Hysteria2（默认复用）
   bash proxy.sh update-hy2      立即检查/更新 Hysteria2 核心
   bash proxy.sh update-cores    检查/更新 Xray 与 Hysteria2 核心
-  bash proxy.sh ws   [参数]     安装/更新 VLESS+WS+TLS（cdn/cf 为兼容别名）
+  bash proxy.sh ws   [参数]     安装/更新 VLESS+WS+TLS（直连）
+  bash proxy.sh cdn  [参数]     安装/更新 VLESS+WS+TLS（Cloudflare；cf 为别名）
   bash proxy.sh show
   bash proxy.sh show --status-debug   排障：显示内部元数据提示
   bash proxy.sh uninstall-reality | uninstall-xray-core | uninstall-hy2 | uninstall-cdn
@@ -114,7 +115,8 @@ usage() {
 
 REALITY:  --port --sni --target --uuid
 Hysteria2: --port --password --domain --masquerade
-WS+TLS:   --domain --port --path --uuid --email --mode direct|cloudflare --server host/IP
+WS+TLS:   --domain [--port|--random-port] --path --uuid --email --mode direct|cloudflare --server host/IP
+          未指定 --port 时，新节点随机选择空闲 TCP 端口；同域名更新默认复用原端口。
 
 环境变量可覆盖安装器 pin（见 README）。
 EOF
@@ -464,6 +466,38 @@ random_free_port() {
     return
   done
   fail "找不到空闲 ${proto} 端口，请 --port 指定"
+}
+
+is_cloudflare_ws_port() {
+  case $1 in
+    443|2053|2083|2087|2096|8443) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_ws_port_for_mode() {
+  [[ $1 != cloudflare ]] || is_cloudflare_ws_port "$2" ||
+    fail "Cloudflare CDN 的 HTTPS 端口仅支持 443、2053、2083、2087、2096、8443；如需随机端口请选择直连"
+}
+
+random_ws_port() {
+  local mode=$1 p i idx start
+  if [[ $mode != cloudflare ]]; then
+    random_free_port tcp
+    return
+  fi
+  # Cloudflare 代理只接受固定 HTTPS 端口，不能使用普通随机端口。
+  local -a ports=(443 2053 2083 2087 2096 8443)
+  start=$((RANDOM % ${#ports[@]}))
+  for ((i = 0; i < ${#ports[@]}; i++)); do
+    idx=$(((start + i) % ${#ports[@]}))
+    p=${ports[idx]}
+    listener_uses_port "$p" tcp && continue
+    port_forwarded "$p" tcp && continue
+    printf %s "$p"
+    return
+  done
+  fail "Cloudflare 支持的 HTTPS 端口均已占用，请 --port 指定"
 }
 
 resolve_public_ip() {
@@ -1377,7 +1411,7 @@ fix_cert_permissions() {
 
 # 校验配置；测试环境可设置 VPS_PROXY_SKIP_XRAY_TEST=1，仅跳过 Xray 语义校验。
 xray_validate_path() {
-  local path=$1 mode=${2:-file}
+  local path=$1 mode=${2:-file} bin output
   local skip_test=${VPS_PROXY_SKIP_XRAY_TEST:-0}
   # 跳过语义校验只接受测试标记，避免生产环境误继承该环境变量。
   if [[ $skip_test == 1 && ${VPS_PROXY_TEST_MODE:-0} != 1 ]]; then
@@ -1397,10 +1431,18 @@ for file in files:
 PY
     return 0
   fi
+  bin=$(xray_binary_path 2>/dev/null || command -v xray 2>/dev/null || true)
+  [[ -x $bin ]] || return 1
   if [[ $mode == dir ]]; then
-    xray run -test -confdir "$path" >/dev/null 2>&1
+    output=$("$bin" run -test -confdir="$path" 2>&1) || {
+      printf '  Xray 配置校验输出: %s\n' "${output:-无输出}" >&2
+      return 1
+    }
   else
-    xray run -test -config "$path" >/dev/null 2>&1
+    output=$("$bin" run -test -config="$path" 2>&1) || {
+      printf '  Xray 配置校验输出: %s\n' "${output:-无输出}" >&2
+      return 1
+    }
   fi
 }
 
@@ -1820,9 +1862,11 @@ parse_cdn_args() {
   CDN_PORT="${CDN_PORT:-}"; CDN_DOMAIN="${CDN_DOMAIN:-}"; CDN_PATH="${CDN_PATH:-}"
   CDN_UUID="${CDN_UUID:-}"; CDN_EMAIL="${CDN_EMAIL:-}"
   CDN_MODE="${CDN_MODE:-}"; CDN_SERVER="${CDN_SERVER:-}"
+  CDN_RANDOM_PORT="${CDN_RANDOM_PORT:-0}"
   while [[ $# -gt 0 ]]; do
     case $1 in
       --port) require_arg "$1" "${2:-}"; CDN_PORT=$2; shift 2 ;;
+      --random-port) CDN_RANDOM_PORT=1; CDN_PORT=; shift ;;
       --domain) require_arg "$1" "${2:-}"; CDN_DOMAIN=$2; shift 2 ;;
       --path) require_arg "$1" "${2:-}"; CDN_PATH=$2; shift 2 ;;
       --uuid) require_arg "$1" "${2:-}"; CDN_UUID=$2; shift 2 ;;
@@ -1929,7 +1973,7 @@ install_cdn() {
   prepare_env
 
   local arg_port=$CDN_PORT arg_path=$CDN_PATH arg_uuid=$CDN_UUID
-  local arg_mode=$CDN_MODE arg_server=$CDN_SERVER
+  local arg_mode=$CDN_MODE arg_server=$CDN_SERVER arg_random=$CDN_RANDOM_PORT
   local want_domain=$CDN_DOMAIN
   local old_domain old_port old_path old_uuid old_mode old_server
   old_domain=$(state_get "$CDN_STATE" CDN_DOMAIN)
@@ -1939,7 +1983,9 @@ install_cdn() {
   old_mode=$(state_get "$CDN_STATE" CDN_MODE)
   old_server=$(state_get "$CDN_STATE" CDN_SERVER)
   if [[ -n $old_domain && $old_domain == "$want_domain" ]]; then
-    [[ -n $arg_port ]] || CDN_PORT=$old_port
+    if [[ $arg_random != 1 ]]; then
+      [[ -n $arg_port ]] || CDN_PORT=$old_port
+    fi
     [[ -n $arg_path ]] || CDN_PATH=$old_path
     [[ -n $arg_uuid ]] || CDN_UUID=$old_uuid
     [[ -n $arg_mode ]] || CDN_MODE=$old_mode
@@ -1947,12 +1993,19 @@ install_cdn() {
     log "复用已有 WS+TLS 节点参数（同域名）"
   fi
 
-  CDN_PORT=${CDN_PORT:-8443}
   CDN_MODE=${CDN_MODE:-direct}
+  if [[ $arg_random == 1 ]]; then
+    CDN_PORT=
+  fi
+  if [[ -z ${CDN_PORT:-} ]]; then
+    CDN_PORT=$(random_ws_port "$CDN_MODE")
+    log "随机 TCP 端口: $CDN_PORT"
+  fi
   CDN_SERVER=${CDN_SERVER:-$CDN_DOMAIN}
   validate_domain "$CDN_DOMAIN"
   validate_port "$CDN_PORT"
   validate_ws_mode "$CDN_MODE"
+  validate_ws_port_for_mode "$CDN_MODE" "$CDN_PORT"
   validate_server_host "$CDN_SERVER"
   [[ -z ${CDN_UUID:-} ]] || validate_uuid "$CDN_UUID"
   [[ -n ${CDN_UUID:-} ]] || CDN_UUID=$(random_uuid)
@@ -1994,6 +2047,19 @@ install_cdn() {
     "" "分享链接:" "${link}" "" "说明: ${mode_label} 只影响连接地址；服务端仍监听本机 WS+TLS。"
   ok "VLESS + WS + TLS 节点安装完成（${mode_label}）"
   print_block "节点信息" "$CDN_INFO"
+}
+
+# CLI 兼容入口：ws 默认直连，cdn/cf 默认 Cloudflare；显式 --mode 优先。
+install_ws_mode() {
+  local default_mode=$1 explicit=0 arg
+  shift
+  for arg in "$@"; do
+    [[ $arg == --mode ]] && explicit=1
+  done
+  if (( !explicit )); then
+    CDN_MODE=$default_mode
+  fi
+  install_cdn "$@"
 }
 
 # ---------- Hysteria2 ----------
@@ -2627,6 +2693,37 @@ confirm_yes() {
   [[ $ans == y || $ans == Y ]]
 }
 
+menu_install_ws() {
+  local mode=$1 domain port path email server old_port old_server old_mode random_port=0
+  domain=$(prompt "域名（已解析到本机）" "$(state_get "$CDN_STATE" CDN_DOMAIN)")
+  [[ -n $domain ]] || { warn "域名不能为空"; sleep 1; return; }
+  old_port=$(state_get "$CDN_STATE" CDN_PORT)
+  port=$(prompt "TLS 端口（空=保持当前；新节点空=随机；输入 random=随机）" "$old_port")
+  if [[ ${port,,} == random ]]; then
+    port=
+    random_port=1
+  fi
+  path=$(prompt "WebSocket path（空=保持或随机）" "$(state_get "$CDN_STATE" CDN_PATH)")
+  email=$(prompt "证书邮箱" "admin@${domain}")
+  old_mode=$(state_get "$CDN_STATE" CDN_MODE)
+  old_server=$(state_get "$CDN_STATE" CDN_SERVER)
+  server=$domain
+  [[ $old_mode == "$mode" && -n $old_server ]] && server=$old_server
+  if [[ $mode == cloudflare ]]; then
+    server=$(prompt "Cloudflare 连接地址（空=域名）" "$server")
+  else
+    server=$(prompt "直连地址（空=域名）" "$server")
+  fi
+  server=${server:-$domain}
+
+  local args=(--domain "$domain" --email "$email" --mode "$mode" --server "$server")
+  (( random_port )) && args+=(--random-port)
+  [[ -n $port ]] && args+=(--port "$port")
+  [[ -n $path ]] && args+=(--path "$path")
+  install_cdn "${args[@]}"
+  pause
+}
+
 menu_install() {
   while true; do
     clear 2>/dev/null || true
@@ -2634,12 +2731,14 @@ menu_install() {
     ui_gap
     ui_item 1 "安装 / 更新 REALITY"
     ui_item 2 "安装 / 更新 Hysteria2"
-    ui_item 3 "安装 / 更新 VLESS + WS + TLS"
+    ui_item 3 "安装 / 更新 VLESS + WS + TLS（直连）"
+    ui_gap
+    ui_item 4 "安装 / 更新 VLESS + WS + TLS（Cloudflare CDN）"
     ui_gap
     ui_item 0 "返回" muted
     ui_gap
     local c
-    printf '  请选择 [0-3]: '
+    printf '  请选择 [0-4]: '
     read -r c || { warn "读取输入失败"; return 1; }
     c=${c//[[:space:]]/}
     case $c in
@@ -2663,31 +2762,8 @@ menu_install() {
         install_hy2 "${args[@]}"
         pause
         ;;
-      3)
-        local domain port path email mode server old_mode old_server
-        domain=$(prompt "域名（已解析到本机）" "$(state_get "$CDN_STATE" CDN_DOMAIN)")
-        [[ -n $domain ]] || { warn "域名不能为空"; sleep 1; continue; }
-        port=$(prompt "TLS 端口" "$(state_get "$CDN_STATE" CDN_PORT)")
-        port=${port:-8443}
-        path=$(prompt "WebSocket path（空=保持或随机）" "$(state_get "$CDN_STATE" CDN_PATH)")
-        email=$(prompt "证书邮箱" "admin@${domain}")
-        old_mode=$(state_get "$CDN_STATE" CDN_MODE)
-        old_server=$(state_get "$CDN_STATE" CDN_SERVER)
-        mode=$(prompt "连接模式（direct/cloudflare）" "${old_mode:-direct}")
-        server=$old_server
-        [[ -n $server ]] || server=$domain
-        if [[ $mode == cloudflare ]]; then
-          server=$(prompt "Cloudflare 连接地址（空=域名）" "$server")
-          server=${server:-$domain}
-        elif [[ $mode == direct ]]; then
-          server=$(prompt "直连地址（空=域名）" "$server")
-          server=${server:-$domain}
-        fi
-        local args=(--domain "$domain" --port "$port" --email "$email" --mode "$mode" --server "$server")
-        [[ -n $path ]] && args+=(--path "$path")
-        install_cdn "${args[@]}"
-        pause
-        ;;
+      3) menu_install_ws direct ;;
+      4) menu_install_ws cloudflare ;;
       0|"") return ;;
       *) warn "无效选项"; sleep 1 ;;
     esac
@@ -2827,7 +2903,8 @@ main() {
       require_root
       enable_proxy_auto_update
       ;;
-    cdn|cf|ws|vless-ws|vless-ws-tls) install_cdn "$@" ;;
+    cdn|cf) install_ws_mode cloudflare "$@" ;;
+    ws|vless-ws|vless-ws-tls) install_ws_mode direct "$@" ;;
     show|status) show_info ;;
     status-debug|--status-debug) PROXY_STATUS_DEBUG=1; show_info ;;
     uninstall-reality) uninstall_reality ;;
