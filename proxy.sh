@@ -1534,7 +1534,8 @@ _xray_merge_file() {
   [[ -f $dest ]] || printf '%s\n' '{"log":{"loglevel":"warning"},"inbounds":[],"outbounds":[{"protocol":"freedom","tag":"direct"},{"protocol":"blackhole","tag":"block"}]}' >"$dest"
   bak=$(mktemp "${dest}.bak.XXXXXX")
   cp -a "$dest" "$bak"
-  tmp=$(mktemp "${dest}.XXXXXX")
+  # Xray 根据文件扩展名判断配置格式；临时文件也必须保留 .json 后缀。
+  tmp=$(mktemp "${dest}.tmp.XXXXXX.json")
   rf=$(mktemp); cf=$(mktemp)
   [[ $want_reality == 1 ]] && _xray_reality_inbound_json >"$rf" || : >"$rf"
   [[ $want_cdn == 1 ]] && _xray_cdn_inbound_json >"$cf" || : >"$cf"
@@ -2002,7 +2003,13 @@ install_cdn() {
     [[ -n $arg_path ]] || CDN_PATH=$old_path
     [[ -n $arg_uuid ]] || CDN_UUID=$old_uuid
     [[ -n $arg_mode ]] || CDN_MODE=$old_mode
-    [[ -n $arg_server ]] || CDN_SERVER=$old_server
+    if [[ -n $arg_server ]]; then
+      CDN_SERVER=$arg_server
+    elif [[ $effective_mode == direct ]]; then
+      CDN_SERVER=$want_domain
+    else
+      CDN_SERVER=$old_server
+    fi
     log "复用已有 WS+TLS 节点参数（同域名）"
   fi
 
@@ -2014,7 +2021,13 @@ install_cdn() {
     CDN_PORT=$(random_ws_port "$CDN_MODE")
     log "随机 TCP 端口: $CDN_PORT"
   fi
-  CDN_SERVER=${CDN_SERVER:-$CDN_DOMAIN}
+  if [[ -n $arg_server ]]; then
+    CDN_SERVER=$arg_server
+  elif [[ $CDN_MODE == direct ]]; then
+    CDN_SERVER=$CDN_DOMAIN
+  else
+    CDN_SERVER=${CDN_SERVER:-$CDN_DOMAIN}
+  fi
   validate_domain "$CDN_DOMAIN"
   validate_port "$CDN_PORT"
   validate_ws_mode "$CDN_MODE"
@@ -2052,12 +2065,18 @@ install_cdn() {
   path_enc=$(printf %s "$CDN_PATH" | sed 's|/|%2F|g')
   local mode_label
   if [[ $CDN_MODE == cloudflare ]]; then mode_label="Cloudflare"; else mode_label="直连"; fi
+  local mode_note
+  if [[ $CDN_MODE == cloudflare ]]; then
+    mode_note="Cloudflare 模式仅改变分享链接的连接地址；服务端仍监听本机 WS+TLS。"
+  else
+    mode_note="直连模式默认使用域名连接本机 WS+TLS。"
+  fi
   link="vless://${CDN_UUID}@${CDN_SERVER}:${CDN_PORT}?encryption=none&security=tls&type=ws&host=${CDN_DOMAIN}&sni=${CDN_DOMAIN}&path=${path_enc}#WS-${CDN_DOMAIN}"
   save_info "$CDN_INFO" \
     "Xray VLESS + WS + TLS（${mode_label}）" "" \
     "连接模式: ${mode_label}" "连接地址: ${CDN_SERVER}" "域名/SNI: ${CDN_DOMAIN}" "端口:   ${CDN_PORT}" "UUID:   ${CDN_UUID}" \
     "传输:   WebSocket" "TLS:    开启" "Host:   ${CDN_DOMAIN}" "SNI:    ${CDN_DOMAIN}" "Path:   ${CDN_PATH}" \
-    "" "分享链接:" "${link}" "" "说明: ${mode_label} 只影响连接地址；服务端仍监听本机 WS+TLS。"
+    "" "分享链接:" "${link}" "" "说明: ${mode_note}"
   ok "VLESS + WS + TLS 节点安装完成（${mode_label}）"
   print_block "节点信息" "$CDN_INFO"
 }
@@ -2754,7 +2773,8 @@ menu_install_ws() {
   if [[ $mode == cloudflare ]]; then
     server=$(prompt "Cloudflare 连接地址（空=域名）" "$server")
   else
-    server=$(prompt "直连地址（空=域名）" "$server")
+    # 直连模式直接使用域名，避免把“分享地址”误解成服务端监听地址。
+    server=$domain
   fi
   server=${server:-$domain}
 
