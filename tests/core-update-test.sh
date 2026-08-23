@@ -64,17 +64,21 @@ xray_validate_candidate() {
 }
 MOCK_ACTIVE=0
 MOCK_ACTIVE_CALLS=0
+MOCK_STARTED=0
 systemctl() {
   case ${1:-} in
     is-active)
       if ((MOCK_ACTIVE)); then
         MOCK_ACTIVE_CALLS=$((MOCK_ACTIVE_CALLS + 1))
         ((MOCK_ACTIVE_CALLS == 1))
+      elif ((MOCK_STARTED)); then
+        return 0
       else
         return 1
       fi
       ;;
-    restart|enable|daemon-reload) return 0 ;;
+    start) MOCK_STARTED=1; return 0 ;;
+    stop|restart|enable|daemon-reload|cat) return 0 ;;
     *) return 0 ;;
   esac
 }

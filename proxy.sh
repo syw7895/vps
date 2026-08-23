@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# VPS 代理一键脚本：Xray REALITY / Hysteria2 / VLESS-WS-TLS(可走 CF)
+# VPS 代理一键脚本：Xray REALITY / Hysteria2 / VLESS-WS-TLS（直连）
 set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
-VERSION="1.7.1"
+VERSION="1.7.2"
 CONFIG_DIR="/root/proxy-info"
 BACKUP_DIR="${CONFIG_DIR}/backups"
 BACKUP_KEEP="${BACKUP_KEEP:-15}"
@@ -43,10 +43,6 @@ XRAY_UPDATE_STATE="${CONFIG_DIR}/xray-update.conf"
 XRAY_UPDATE_LOCK="/run/lock/syw-xray-update.lock"
 PUBLIC_IP=""
 DEPS_INSTALLED=0
-# 旧版 v2 快捷命令路径（仅用于安全清理，不再安装）
-_LEGACY_V2_DIR="/usr/local/lib/vps-proxy"
-_LEGACY_V2_BIN="/usr/local/bin/v2"
-_LEGACY_V2_CLEANED=0
 
 # 固定提交 + SHA256（可用环境变量覆盖）。勿使用未校验的浮动 main。
 XRAY_INSTALLER_URL="${XRAY_INSTALLER_URL:-https://raw.githubusercontent.com/XTLS/Xray-install/e741a4f56d368afbb9e5be3361b40c4552d3710d/install-release.sh}"
@@ -646,15 +642,19 @@ xray_scan() {
   fi
 
   if command -v python3 >/dev/null 2>&1; then
-    local out
+    local out prc
+    set +e
     out=$(SRC="$source" FILES="$(printf '%s\n' "${files[@]}")" TAG_R="$MANAGED_TAG_REALITY" TAG_C="$MANAGED_TAG_CDN" python3 - <<'PY'
-import json, os
+import json, os, sys
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(newline="\n")
 files = [x for x in os.environ.get("FILES", "").splitlines() if x]
 tag_r = os.environ.get("TAG_R", "vless-reality")
 tag_c = os.environ.get("TAG_C", "vless-ws-tls")
 src = os.environ.get("SRC", "none")
 has_r = has_c = False
 port_r = port_c = ""
+opened = 0
 
 def inbounds_of(data):
     if isinstance(data, dict):
@@ -685,6 +685,7 @@ for path in files:
     try:
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
+        opened += 1
     except Exception:
         continue
     for ib in inbounds_of(data):
@@ -698,6 +699,8 @@ for path in files:
             p = ib.get("port")
             if p is not None and str(p).isdigit() and 1 <= int(p) <= 65535:
                 port_c = str(int(p))
+if not opened:
+    sys.exit(2)
 print(f"has_reality={1 if has_r else 0}")
 print(f"has_cdn={1 if has_c else 0}")
 print(f"port_reality={port_r}")
@@ -705,8 +708,12 @@ print(f"port_cdn={port_c}")
 print(f"source={src}")
 PY
 )
-    printf '%s\n' "$out"
-    return 0
+    prc=$?
+    set -e
+    if [[ $prc -eq 0 ]]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
   fi
 
   # bash 回退：tag/语义确认后，仅从匹配 inbound 块取 port（不取文件首个无关 port）
@@ -752,9 +759,11 @@ PY
 xray_scan_load() {
   local k v
   HAS_REALITY=0 HAS_CDN=0 PORT_REALITY= PORT_CDN= SCAN_SOURCE=none
-  while IFS= read -r line; do
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=${line%$'\r'}
     [[ $line == *=* ]] || continue
     k=${line%%=*}; v=${line#*=}
+    v=${v%$'\r'}
     case $k in
       has_reality) HAS_REALITY=$v ;;
       has_cdn) HAS_CDN=$v ;;
@@ -1346,6 +1355,29 @@ update_xray_core() {
     rm -f -- "$backup"
     xray_record_update rolled-back "$current" "$latest"
     fail "新版 Xray 启动失败，已恢复 ${current}"
+  elif [[ $mode != install ]] && systemctl cat xray >/dev/null 2>&1; then
+    if ! systemctl start xray; then
+      install -m 755 "$backup" "$bin"
+      rm -f -- "$backup"
+      xray_record_update rolled-back "$current" "$latest"
+      fail "新版 Xray 启动验证失败，已恢复 ${current}"
+    fi
+    local i
+    for ((i = 1; i <= 8; i++)); do
+      sleep 1
+      if systemctl is-active --quiet xray; then
+        systemctl stop xray 2>/dev/null || true
+        rm -f -- "$backup"
+        xray_record_update updated "$current" "$latest"
+        [[ $mode == auto ]] || ok "Xray 已更新: ${current} → ${latest}"
+        return 0
+      fi
+    done
+    systemctl stop xray 2>/dev/null || true
+    install -m 755 "$backup" "$bin"
+    rm -f -- "$backup"
+    xray_record_update rolled-back "$current" "$latest"
+    fail "新版 Xray 启动验证失败，已恢复 ${current}"
   fi
   rm -f -- "$backup"
   xray_record_update updated "$current" "$latest"
@@ -1374,7 +1406,9 @@ xray_run_user() {
   local xu
   xu=$(systemctl show -p User --value xray 2>/dev/null || true)
   [[ -z $xu || $xu == - ]] && xu=nobody
-  getent passwd "$xu" >/dev/null || xu=nobody
+  if command -v getent >/dev/null 2>&1; then
+    getent passwd "$xu" >/dev/null 2>&1 || xu=nobody
+  fi
   printf %s "$xu"
 }
 xray_run_group() { id -gn "$(xray_run_user)" 2>/dev/null || echo nogroup; }
@@ -1437,7 +1471,7 @@ xray_apply_perms() {
     install -d -o root -g "$xg" -m 750 "$(dirname "$path")"
     chown "root:$xg" "$path" 2>/dev/null || true
   else
-    install -d -m 750 "$(dirname "$path")"
+    install -d -m 750 "$(dirname "$path")" 2>/dev/null || mkdir -p "$(dirname "$path")"
   fi
   chmod 640 "$path" 2>/dev/null || true
 }
@@ -2578,45 +2612,6 @@ uninstall_hy2() {
   ok "已卸载 Hysteria2"
 }
 
-# 安全清理旧版 v2 快捷命令（仅本项目文件；全程只提示一次）
-# 计划：v1.6+ 移除本函数与 _LEGACY_V2_* 变量
-cleanup_legacy_v2() {
-  (( _LEGACY_V2_CLEANED )) && return 0
-  _LEGACY_V2_CLEANED=1
-  [[ $EUID -eq 0 ]] || return 0
-
-  local bin=${_LEGACY_V2_BIN} dir=${_LEGACY_V2_DIR} script="${_LEGACY_V2_DIR}/proxy.sh"
-  local target="" did=0 own=0
-
-  if [[ -L $bin ]]; then
-    target=$(readlink -f "$bin" 2>/dev/null || true)
-    if [[ -n $target && $target == ${dir}/* ]]; then
-      own=1
-    fi
-  elif [[ -f $bin ]]; then
-    if grep -q '^APP_NAME="vps-proxy"$' "$bin" 2>/dev/null; then
-      own=1
-    fi
-  fi
-  if [[ -f $script ]] && grep -q '^APP_NAME="vps-proxy"$' "$script" 2>/dev/null; then
-    own=1
-  fi
-
-  if (( own )); then
-    if [[ -e $bin || -L $bin ]]; then
-      rm -f "$bin" && did=1
-    fi
-    if [[ -f $script ]]; then
-      rm -f "$script" && did=1
-    fi
-    rmdir "$dir" 2>/dev/null || true
-  fi
-
-  if (( did )); then
-    ok "已清理旧版 v2 快捷命令"
-  fi
-}
-
 # ---------- 菜单 ----------
 prompt() {
   local label=$1 default=$2 val
@@ -2845,7 +2840,6 @@ elevate_if_needed() {
 main() {
   local cmd=${1:-menu}
   [[ $# -gt 0 ]] && shift
-  cleanup_legacy_v2 2>/dev/null || true
   # show --status-debug / status-debug
   if [[ $cmd == show || $cmd == status ]]; then
     if [[ ${1:-} == --status-debug || ${1:-} == status-debug ]]; then

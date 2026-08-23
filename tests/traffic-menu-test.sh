@@ -148,6 +148,8 @@ outu=$(printf '5\n2\n' | main_menu 2>&1) || true
 assert "more uninstall" '[[ "$outu" == *"__CALL_cmd_uninstall__"* ]]'
 outup=$(printf '5\n1\n\n0\n0\n' | main_menu 2>&1) || true
 assert "more update" '[[ "$outup" == *"__CALL_cmd_update_module__"* ]]'
+assert "update delegates to vps" 'grep -q "bash \"\$entry\" update" "$ROOT/traffic.sh"'
+assert "no floating traffic self curl" '! grep -q "RAW_BASE}/traffic.sh" "$ROOT/traffic.sh"'
 
 # 暂停状态：第 4 项恢复
 cat >"$TMP/etc/config" <<EOF

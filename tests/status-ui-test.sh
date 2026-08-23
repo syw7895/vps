@@ -241,7 +241,7 @@ line=$(proxy_status_line)
 assert "reality+cdn one xray" '[[ "$line" == *"节点运行中"* || "$line" == *"代理运行中"* ]]'
 assert "not partial single xray" '[[ "$line" != *"部分服务停止"* ]]'
 out=$(show_info 2>&1)
-assert "both components" '[[ "$out" == *"REALITY"* && "$out" == *"CDN"* ]]'
+assert "both components" '[[ "$out" == *"REALITY"* && "$out" == *"WS+TLS"* ]]'
 assert "no 未安装 list" '[[ "$out" != *"未安装"* ]]'
 assert "no 服务状态 section" '[[ "$out" != *"服务状态"* ]]'
 
@@ -267,7 +267,7 @@ printf 'CDN_PORT=8443\n' >"$CDN_STATE"
 printf '域名: d.com\n' >"$CDN_INFO"
 MOCK_SVC[xray]=running
 out=$(show_info 2>&1)
-assert "only cdn" '[[ "$out" == *"CDN"* && "$out" != *"REALITY"* && "$out" != *"Hysteria2"* ]]'
+assert "only cdn" '[[ "$out" == *"WS+TLS"* && "$out" != *"REALITY"* && "$out" != *"Hysteria2"* ]]'
 
 # 有真实配置时绝不暂无（即使无 state）
 clear_proxy
@@ -291,7 +291,7 @@ write_xray_cfg "$XRAY_CONFIG" cdn_notag
 printf '域名: d.com\n端口: 8443\n' >"$CDN_INFO"
 MOCK_SVC[xray]=running
 out=$(show_info 2>&1)
-assert "semantic cdn no tag" '[[ "$out" == *"CDN"* && "$out" == *"运行中"* && "$out" != *"REALITY"* ]]'
+assert "semantic cdn no tag" '[[ "$out" == *"WS+TLS"* && "$out" == *"运行中"* && "$out" != *"REALITY"* ]]'
 assert "semantic cdn not 暂无" '[[ "$out" != *"暂无代理"* ]]'
 
 # 仅 Xray 运行但无匹配 inbound → 不因 systemd 判为有节点
@@ -320,7 +320,7 @@ MOCK_SVC[xray]=running
 out=$(run_show_info_with_err_trap) || true
 assert "only reality no ERR" '[[ "$out" != *"[ERR]"* ]]'
 assert "only reality shown" '[[ "$out" == *"REALITY"* && "$out" == *"运行中"* ]]'
-assert "only reality no CDN" '[[ "$out" != *"CDN"* ]]'
+assert "only reality no CDN" '[[ "$out" != *"WS+TLS"* ]]'
 assert "only reality no HY2" '[[ "$out" != *"Hysteria2"* ]]'
 assert "only reality not 暂无" '[[ "$out" != *"暂无代理"* ]]'
 
@@ -335,7 +335,7 @@ MOCK_SVC[hysteria-server]=running
 out=$(run_show_info_with_err_trap) || true
 assert "reality+hy2 no ERR" '[[ "$out" != *"[ERR]"* ]]'
 assert "reality+hy2 both" '[[ "$out" == *"REALITY"* && "$out" == *"Hysteria2"* ]]'
-assert "reality+hy2 no CDN block" '[[ "$out" != *"CDN / WS"* && "$out" != *"未安装"* ]]'
+assert "reality+hy2 no CDN block" '[[ "$out" != *"WS+TLS"* && "$out" != *"未安装"* ]]'
 assert "reality+hy2 not 暂无" '[[ "$out" != *"暂无代理"* ]]'
 assert "reality+hy2 hy2 not skipped" '[[ "$out" == *"Hysteria2"* && "$out" == *"运行中"* ]]'
 
@@ -346,7 +346,7 @@ printf '地址: 2.2.2.2\n端口: 40000\n' >"$HY2_INFO"
 MOCK_SVC[hysteria-server]=running
 out=$(run_show_info_with_err_trap) || true
 assert "only hy2 no ERR" '[[ "$out" != *"[ERR]"* ]]'
-assert "only hy2 shown" '[[ "$out" == *"Hysteria2"* && "$out" != *"REALITY"* && "$out" != *"CDN"* ]]'
+assert "only hy2 shown" '[[ "$out" == *"Hysteria2"* && "$out" != *"REALITY"* && "$out" != *"WS+TLS"* ]]'
 
 # 只有 CDN（已有 only cdn，再加 ERR trap）
 clear_proxy
@@ -355,7 +355,7 @@ printf '域名: d.com\n端口: 8443\n' >"$CDN_INFO"
 MOCK_SVC[xray]=running
 out=$(run_show_info_with_err_trap) || true
 assert "only cdn no ERR" '[[ "$out" != *"[ERR]"* ]]'
-assert "only cdn trap ok" '[[ "$out" == *"CDN"* && "$out" != *"REALITY"* && "$out" != *"Hysteria2"* ]]'
+assert "only cdn trap ok" '[[ "$out" == *"WS+TLS"* && "$out" != *"REALITY"* && "$out" != *"Hysteria2"* ]]'
 
 # 三个组件都不存在
 clear_proxy

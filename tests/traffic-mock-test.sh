@@ -179,6 +179,39 @@ assert "nic switch over: old eth0 cleared" '[[ -z "$(qdisc_file eth0 | tr -d "[:
 assert "nic switch over: eth1 limited" '[[ "$(qdisc_file eth1)" == *"1abc:"* ]]'
 assert "nic switch over: LIMIT_IFACE=eth1" '[[ "${LIMIT_IFACE}" == "eth1" && "${LIMIT_ACTIVE}" == "true" ]]'
 
+# 10) 新月：上月已限速，本月 vnStat 尚无数据 → 解除并恢复原队列
+export MOCK_IFACE=eth0
+cat >"$TMP/etc/config" <<EOF
+MONTHLY_QUOTA_GB=100
+THRESHOLD_PERCENT=90
+LIMIT_RATE=1mbit
+IFACE=eth0
+PAUSED=false
+EOF
+printf 'qdisc tbf 1abc: root refcnt 2 rate 1mbit\n' >"$TMP/mock_tc/eth0"
+cat >"$TMP/var/state" <<EOF
+LIMIT_ACTIVE=true
+LIMIT_IFACE=eth0
+LIMIT_HANDLE=1abc:
+LAST_REASON=applied_limit
+LAST_CHECK_TS=
+LAST_TX_BYTES=
+LAST_MONTH=1999-01
+LAST_RATIO=
+OWNED_BY_TOOL=true
+ORIG_QDISC_KIND=fq_codel
+EOF
+unset MOCK_VNSTAT_FAIL
+export MOCK_VNSTAT_FAIL=1
+run_check
+# shellcheck disable=SC1091
+source "$TMP/var/state"
+assert "new month no data lifts limit" '[[ "${LIMIT_ACTIVE}" == "false" && "${OWNED_BY_TOOL}" == "false" ]]'
+assert "new month restores orig qdisc" '[[ "$(qdisc_file eth0)" == *"qdisc fq_codel"* ]]'
+assert "new month records current month" '[[ "${LAST_MONTH}" == "$(date +%Y-%m)" ]]'
+assert "new month reason" '[[ "${LAST_REASON}" == "new_month_no_data" ]]'
+unset MOCK_VNSTAT_FAIL
+
 echo ""
 echo "PASS=$pass FAIL=$fail"
 [[ $fail -eq 0 ]]

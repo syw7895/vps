@@ -4,11 +4,9 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-traffic"
-VERSION="1.4.2"
+VERSION="1.4.3"
 LIB_DIR="/usr/local/lib/syw-vps"
 SELF_LOCAL="${LIB_DIR}/traffic.sh"
-SYW_VPS_REF="${SYW_VPS_REF:-main}"
-RAW_BASE="${SYW_VPS_RAW_BASE:-https://raw.githubusercontent.com/syw7895/vps/${SYW_VPS_REF}}"
 
 VNSTAT_BIN="${VNSTAT_BIN:-vnstat}"
 TC_BIN="${TC_BIN:-tc}"
@@ -582,8 +580,25 @@ run_check() {
   local trc=$?
   set -e
   if [[ $trc -ne 0 || -z $tx || ! $tx =~ ^[0-9]+$ ]]; then
-    LAST_REASON=vnstat_unavailable_or_bad_month
     LAST_CHECK_TS=$now_ts
+    if [[ -n ${LAST_MONTH:-} && $LAST_MONTH != "$month_key" ]]; then
+      if [[ $LIMIT_ACTIVE == true || $OWNED_BY_TOOL == true ]] || has_our_qdisc "$iface"; then
+        log "已进入新月且暂无用量数据，解除上月限速"
+        if remove_limit "$iface"; then
+          LAST_REASON=new_month_no_data
+          LAST_MONTH=$month_key
+          LAST_CHECK_TS=$now_ts
+          write_state
+          ok "已解除上月限速"
+          return 0
+        fi
+        LAST_REASON=remove_failed
+        write_state
+        return 1
+      fi
+      LAST_MONTH=$month_key
+    fi
+    LAST_REASON=vnstat_unavailable_or_bad_month
     write_state
     warn "vnStat 无数据/解析失败 (rc=$trc)，不修改 tc"
     return 0
@@ -1173,21 +1188,13 @@ cmd_resume() {
 
 cmd_update_module() {
   require_root
-  local url="${RAW_BASE}/traffic.sh" tmp bak
-  tmp=$(mktemp)
-  bak="${SELF_LOCAL}.bak.$(date +%s)"
-  curl -fsSL --connect-timeout 20 --max-time 120 "$url" -o "$tmp" || {
-    rm -f "$tmp"
-    fail "下载失败: $url"
-  }
-  [[ -s $tmp ]] || { rm -f "$tmp"; fail "下载为空"; }
-  bash -n "$tmp" || { rm -f "$tmp"; fail "bash -n 失败，保留旧版"; }
-  mkdir -p "$LIB_DIR"
-  [[ -f $SELF_LOCAL ]] && cp -a "$SELF_LOCAL" "$bak"
-  install -m 0755 "$tmp" "$SELF_LOCAL"
-  rm -f "$tmp"
-  write_systemd_units
-  ok "流量模块已更新"
+  local entry
+  entry="$(cd "$(dirname "${SELF_LOCAL}")" 2>/dev/null && pwd)/vps.sh"
+  if [[ ! -f $entry ]]; then
+    entry="/usr/local/lib/syw-vps/vps.sh"
+  fi
+  [[ -f $entry ]] || fail "未找到入口脚本，请运行: sudo vps update"
+  bash "$entry" update
 }
 
 cmd_uninstall() {
@@ -1235,7 +1242,7 @@ menu_more() {
       styles+=("")
     fi
     actions+=(update)
-    labels+=("更新流量模块")
+    labels+=("更新管理脚本")
     styles+=("")
     actions+=(uninstall)
     labels+=("卸载流量模块")

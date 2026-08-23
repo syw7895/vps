@@ -28,8 +28,6 @@ pause() { :; }
 menu_uninstall() { echo "__CALL_menu_uninstall__"; }
 menu_install() { echo "__CALL_menu_install__"; }
 update_proxy_cores() { echo "__CALL_update_proxy_cores__"; }
-cleanup_legacy_v2() { :; }
-
 out=$(printf '0\n' | main_menu 2>&1) || true
 assert "has 安装代理" '[[ "$out" == *"安装代理"* ]]'
 assert "has 节点与状态" '[[ "$out" == *"节点与状态"* ]]'
@@ -74,7 +72,8 @@ assert "invalid keeps running" '[[ "$outb" == *"安装代理"* ]]'
 # 无 v2 CLI 路由
 assert "no install-shortcut route" '! grep -qE "install-shortcut|uninstall-v2|install_v2|auto_v2" "$PROXY" || ! grep -qE "^\s*(install-shortcut|uninstall-v2)\|" "$PROXY"'
 assert "no V2_ vars" '! grep -qE "^V2_(DIR|SCRIPT|BIN|SCRIPT_URL|SCRIPT_SHA256)=" "$PROXY"'
-assert "has cleanup_legacy_v2" 'grep -q "cleanup_legacy_v2" "$PROXY"'
+assert "no cleanup_legacy_v2" '! grep -q "cleanup_legacy_v2" "$PROXY"'
+assert "no legacy v2 paths" '! grep -q "_LEGACY_V2_" "$PROXY"'
 
 echo ""
 echo "PASS=$pass FAIL=$fail"

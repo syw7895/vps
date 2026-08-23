@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="syw-vps"
-VERSION="1.3.0"
+VERSION="1.3.1"
 LIB_DIR="/usr/local/lib/syw-vps"
 BIN_VPS="/usr/local/bin/vps"
 MARKER="syw-vps-entrypoint"
@@ -266,7 +266,9 @@ update_modules() (
   }
   if [[ $ref == "$current" ]]; then
     write_update_state "$ref" current
-    refresh_proxy_auto_update || fail "代理核心更新定时器刷新失败"
+    if ! refresh_proxy_auto_update; then
+      warn "代理核心更新定时器刷新失败（脚本已是最新）"
+    fi
     [[ $mode == auto ]] || ok "syw-vps 脚本已是最新: $ref"
     return 0
   fi
@@ -306,8 +308,7 @@ update_modules() (
     fail "syw-vps 脚本替换失败，已恢复旧版"
   fi
   if ! refresh_proxy_auto_update; then
-    restore_module_backup "$backup"
-    fail "代理核心更新定时器刷新失败，已恢复旧版"
+    warn "代理核心更新定时器刷新失败（脚本已更新）"
   fi
   keep_backup=1
   write_update_state "$ref" updated

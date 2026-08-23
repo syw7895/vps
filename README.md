@@ -15,9 +15,9 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 | `/usr/local/lib/syw-vps/traffic.sh` | 流量 |
 | `/usr/local/bin/vps` | 日常命令 |
 
-安装会重新下载覆盖模块脚本（不动节点配置与证书）。旧版 `v2` 会在确认归属后清理。
+安装会重新下载覆盖模块脚本（不动节点配置与证书）。
 
-安装后会创建两个独立的 systemd timer：每周更新管理脚本；每周检查 Xray / Hysteria2 稳定版核心。更新使用不可变 Git 提交或发布资产，先校验、再替换；服务启动失败会回滚。
+安装后会创建两个独立的 systemd timer：每周更新管理脚本；每周检查 Xray / Hysteria2 稳定版核心。更新使用不可变 Git 提交或发布资产，先校验、再替换；服务启动失败会回滚。管理脚本更新后若核心定时器刷新失败，只告警、不回滚已替换的脚本。
 
 ## 界面原则
 
@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 ## 菜单示例
 
 ```text
-  VPS  v1.3.0
+  VPS  v1.3.1
 
    1.  代理管理
    2.  流量管理
@@ -41,7 +41,7 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 ```
 
 ```text
-  代理管理  v1.6.1
+  代理管理  v1.7.2
   ● 2 个节点运行中
 
    1.  安装代理
@@ -55,7 +55,7 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 ```
 
 ```text
-  流量管理  v1.4.1
+  流量管理  v1.4.3
   ● 正常  38.2 / 100 GB
 
    1.  查看状态
@@ -72,7 +72,7 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 - 状态依据：真实服务配置（ExecStart + 协议语义）
 - 正常页不显示 state / 元数据提示（`--status-debug` 可开）
 - 节点标题含端口协议，如 `443/TCP`；分享链接单独成块
-- VLESS + WS + TLS 仅提供直连模式，TLS 端口默认随机；也可输入 `random` 或使用 `--random-port` 重新随机。
+- VLESS + WS + TLS 仅提供直连模式。同域名更新会保持已有 TLS 端口、path 和 UUID；重装（无状态）或输入 `random` / `--random-port` 才会换端口。
 - 命令示例：`sudo bash /usr/local/lib/syw-vps/proxy.sh ws --domain example.com`。
 - Xray / Hysteria2 每周检查稳定版更新；发布资产校验 SHA256，配置检查和服务启动失败自动回滚
 - 可在代理菜单立即更新，或运行 `sudo bash /usr/local/lib/syw-vps/proxy.sh update-cores`
@@ -86,6 +86,8 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 - 状态页含进度条；qdisc/handle 仅 debug
 - 「修改流量设置」一次改额度 / 比例 / 速度
 - 达到设定额度/阈值后，会在当前默认出口网卡启用本工具的限速规则；这会影响该网卡上的所有出口服务，是预期的自动保护行为。
+- 次月用量低于阈值时解除限速，并恢复该网卡原来的队列（如 fq_codel）。新月若 vnStat 尚无数据，也会先解除上月限速。
+- 流量菜单「更新管理脚本」走入口 `vps update`，与代理模块同一套提交校验。
 
 ## 测试
 
