@@ -41,7 +41,7 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 ```
 
 ```text
-  代理管理  v1.7.5
+  代理管理  v1.7.6
   ● 2 个节点运行中
 
    1.  安装代理
@@ -72,7 +72,7 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 - 状态依据：真实服务配置（ExecStart + 协议语义）
 - 正常页不显示 state / 元数据提示（`--status-debug` 可开）
 - 节点标题含端口协议，如 `443/TCP`；分享链接单独成块
-- VLESS + WS + TLS 直连：填域名则申请 Let's Encrypt 证书并用域名连接；域名留空则用公网 IP + 自签证书（客户端需允许不安全证书）。同身份更新会保持已有 TLS 端口、path 和 UUID；重装（无状态）或输入 `random` / `--random-port` 才会换端口。
+- VLESS + WS + TLS 直连：填域名则申请 Let's Encrypt 证书并用域名连接；域名留空则用公网 IP + 自签证书（分享链接已带证书 SHA-256 指纹，新版客户端无需手动开启“允许不安全证书”）。同身份更新会保持已有 TLS 端口、path 和 UUID；重装（无状态）或输入 `random` / `--random-port` 才会换端口。
 - 命令示例：`sudo bash /usr/local/lib/syw-vps/proxy.sh ws --domain example.com`，或 `sudo bash /usr/local/lib/syw-vps/proxy.sh ws`（IP 直连）。
 - Xray / Hysteria2 每周检查稳定版更新；发布资产校验 SHA256，配置检查和服务启动失败自动回滚
 - 可在代理菜单立即更新，或运行 `sudo bash /usr/local/lib/syw-vps/proxy.sh update-cores`

@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
-VERSION="1.7.5"
+VERSION="1.7.6"
 CONFIG_DIR="/root/proxy-info"
 REALITY_STATE="${CONFIG_DIR}/reality.conf"
 WS_STATE="${CONFIG_DIR}/ws.conf"
@@ -109,7 +109,7 @@ REALITY:  --port --sni --target --uuid
 Hysteria2: --port --password --domain --masquerade
 WS+TLS:   [--domain] [--port|--random-port] --path --uuid --email
           有 --domain：Let's Encrypt 证书，用域名连接。
-          无 --domain：自签证书，分享链接用公网 IP（客户端需允许不安全证书）。
+          无 --domain：自签证书，分享链接用公网 IP（已固定证书指纹，客户端需新版支持）。
           更新同一身份（同域名，或同为 IP 直连）且未指定 --port 时保持原端口。
           --random-port 强制换端口。
 
@@ -1425,7 +1425,7 @@ write_ws_state() {
   write_kv_file "$WS_STATE" \
     "WS_PORT=${WS_PORT}" "WS_UUID=${WS_UUID}" "WS_DOMAIN=${WS_DOMAIN}" \
     "WS_PATH=${WS_PATH}" "WS_CERT=${WS_CERT}" "WS_KEY=${WS_KEY}" \
-    "WS_SNI=${WS_SNI}" "WS_ADDR=${WS_ADDR}"
+    "WS_SNI=${WS_SNI}" "WS_ADDR=${WS_ADDR}" "WS_PIN=${WS_PIN}"
 }
 
 migrate_ws_certs_if_needed() {
@@ -1449,6 +1449,11 @@ migrate_ws_certs_if_needed() {
   WS_CERT=$cert; WS_KEY=$key
   write_ws_state
   log "WS+TLS 证书已迁移: $newdir"
+}
+
+# 证书 SHA-256 指纹（十六进制，小写，无冒号）；新版 Xray 用它替代 allowInsecure
+ws_cert_sha256() {
+  openssl x509 -in "$1" -outform der 2>/dev/null | sha256sum | awk '{print $1}'
 }
 
 issue_selfsigned_ws_cert() {
@@ -2006,8 +2011,11 @@ install_ws() {
 
   if ((ip_mode)); then
     issue_selfsigned_ws_cert "$WS_ADDR"
+    WS_PIN=$(ws_cert_sha256 "$WS_CERT")
+    [[ $WS_PIN =~ ^[A-Fa-f0-9]{64}$ ]] || fail "无法计算自签证书指纹"
   else
     issue_cert "$WS_DOMAIN" "$WS_EMAIL"
+    WS_PIN=
   fi
 
   write_ws_state
@@ -2020,14 +2028,14 @@ install_ws() {
   path_enc=$(printf %s "$WS_PATH" | sed 's|/|%2F|g')
   addr=$WS_ADDR
   if ((ip_mode)); then
-    link="vless://${WS_UUID}@${addr}:${WS_PORT}?encryption=none&security=tls&type=ws&allowInsecure=1&fp=chrome&path=${path_enc}#WS-IP"
+    link="vless://${WS_UUID}@${addr}:${WS_PORT}?encryption=none&security=tls&type=ws&pinnedPeerCertSha256=${WS_PIN}&path=${path_enc}#WS-IP"
     save_info "$WS_INFO" \
       "Xray VLESS + WS + TLS（IP 直连）" "" \
       "连接地址: ${addr}" "端口:   ${WS_PORT}" "UUID:   ${WS_UUID}" \
-      "传输:   WebSocket" "TLS:    自签（需允许不安全证书）" \
-      "Path:   ${WS_PATH}" \
+      "传输:   WebSocket" "TLS:    自签（证书已固定）" \
+      "证书指纹: ${WS_PIN}" "Path:   ${WS_PATH}" \
       "" "分享链接:" "${link}" "" \
-      "说明: 不用自己的域名；客户端填写 VPS IP，并开启允许不安全证书。"
+      "说明: 不用自己的域名；客户端填写 VPS IP。链接已带证书指纹，新版客户端自动信任该证书。"
     ok "VLESS + WS + TLS 节点安装完成（IP 直连）"
   else
     link="vless://${WS_UUID}@${WS_DOMAIN}:${WS_PORT}?encryption=none&security=tls&type=ws&host=${WS_DOMAIN}&sni=${WS_DOMAIN}&path=${path_enc}#WS-${WS_DOMAIN}"
