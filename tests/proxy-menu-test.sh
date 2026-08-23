@@ -36,6 +36,8 @@ assert "has 节点与状态" '[[ "$out" == *"节点与状态"* ]]'
 assert "item3 is proxy core update" '[[ "$out" == *"更新代理核心"* ]]'
 assert "item4 is 卸载" '[[ "$out" == *"卸载"* ]]'
 assert "no v2 menu" '[[ "$out" != *"安装 / 更新 v2"* && "$out" != *"更新 v2"* ]]'
+assert "ws tls menu label" 'grep -q "VLESS + WS + TLS" "$PROXY"'
+assert "ws mode choices" 'grep -q "direct|cloudflare" "$PROXY"'
 assert "no group 管理" '! grep -qE "^[[:space:]]*管理[[:space:]]*$" <<<"$out"'
 assert "no group 系统" '! grep -qE "^[[:space:]]*系统[[:space:]]*$" <<<"$out"'
 has_box=0

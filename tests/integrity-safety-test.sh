@@ -72,6 +72,7 @@ assert "timer ok no warn" '[[ "$line" != *"定时器"* ]]'
 
 # ---------- proxy scan / merge ----------
 export VPS_PROXY_SKIP_XRAY_TEST=1
+export VPS_PROXY_TEST_MODE=1
 export VPS_PROXY_LOCK_LAYOUT=1
 # shellcheck source=../proxy.sh
 source "$ROOT/proxy.sh"
@@ -88,6 +89,17 @@ CDN_STATE="$CONFIG_DIR/cdn.conf"
 HY2_STATE="$CONFIG_DIR/hy2.conf"
 XRAY_INFO="$CONFIG_DIR/xray-reality.txt"
 CDN_INFO="$CONFIG_DIR/xray-cdn.txt"
+
+# 合法伪装 URL 的查询参数应能安全保存，且不截断旧状态。
+SPECIAL_STATE="$CONFIG_DIR/special.conf"
+write_kv_file "$SPECIAL_STATE" "HY2_MASQUERADE=https://example.com/a?x=1&y=2"
+assert "masquerade query chars survive state write" 'grep -q "HY2_MASQUERADE=https://example.com/a?x=1&y=2" "$SPECIAL_STATE"'
+
+# WS+TLS 可在直连与 Cloudflare 之间选择，并支持单独指定分享链接地址。
+parse_cdn_args --mode cloudflare --server 203.0.113.10
+assert "ws mode parser" '[[ $CDN_MODE == cloudflare && $CDN_SERVER == 203.0.113.10 ]]'
+validate_ws_mode direct
+validate_server_host example.com
 
 # 多 inbound：目标不是第一个
 cat >"$XRAY_CONFIG" <<'EOF'

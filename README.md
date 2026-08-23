@@ -41,7 +41,7 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 ```
 
 ```text
-  代理管理  v1.6.0
+  代理管理  v1.6.1
   ● 2 个节点运行中
 
    1.  安装代理
@@ -72,8 +72,12 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 - 状态依据：真实服务配置（ExecStart + 协议语义）
 - 正常页不显示 state / 元数据提示（`--status-debug` 可开）
 - 节点标题含端口协议，如 `443/TCP`；分享链接单独成块
+- VLESS + WS + TLS 支持 `direct`（直连）和 `cloudflare`（Cloudflare）两种连接模式；两者共用同一个 Xray 服务端监听，模式只决定分享链接的连接地址和提示。
+- 命令示例：`sudo bash /usr/local/lib/syw-vps/proxy.sh ws --domain example.com --mode direct`；Cloudflare 可再加 `--server` 指定连接域名或 IPv4。
+- 旧命令 `cdn`、`cf` 继续兼容已有节点。
 - Xray / Hysteria2 每周检查稳定版更新；发布资产校验 SHA256，配置检查和服务启动失败自动回滚
 - 可在代理菜单立即更新，或运行 `sudo bash /usr/local/lib/syw-vps/proxy.sh update-cores`
+- 卸载命令：`uninstall-reality`、`uninstall-cdn`、`uninstall-hy2`、`uninstall-xray-core`
 - 管理脚本每周从 GitHub 当前分支对应的不可变提交更新；可运行 `sudo vps update`
 - 修复 Xray `ExecStart` 配置路径解析，并兼容非 root 的只读测试环境
 

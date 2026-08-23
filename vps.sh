@@ -109,10 +109,11 @@ owns_vps_bin() {
 
 http_get() {
   local url=$1 dest=$2
+  [[ $url == https://* ]] || fail "拒绝使用非 HTTPS 更新地址: $url"
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --connect-timeout 20 --max-time 120 "$url" -o "$dest"
+    curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 20 --max-time 120 "$url" -o "$dest"
   elif command -v wget >/dev/null 2>&1; then
-    wget -q -O "$dest" "$url"
+    wget --https-only -q -O "$dest" "$url"
   else
     fail "需要 curl 或 wget"
   fi
@@ -121,7 +122,8 @@ http_get() {
 github_api_get() {
   local url=$1 dest=$2
   command -v curl >/dev/null 2>&1 || fail "自动更新需要 curl"
-  curl -fsSL --retry 3 --connect-timeout 20 --max-time 120 \
+  [[ $url == https://* ]] || fail "拒绝使用非 HTTPS 更新地址: $url"
+  curl --proto '=https' --proto-redir '=https' -fsSL --retry 3 --connect-timeout 20 --max-time 120 \
     -H 'Accept: application/vnd.github+json' \
     -H 'User-Agent: syw-vps-updater' "$url" -o "$dest"
 }
