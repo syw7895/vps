@@ -133,6 +133,17 @@ run_check
 source "$TMP/var/state"
 assert "harmless fq_codel allows limit" '[[ "${OWNED_BY_TOOL}" == "true" ]]'
 assert "replaced with our handle" '[[ "$(qdisc_file eth0)" == *"1abc:"* ]]'
+assert "orig qdisc saved" '[[ "${ORIG_QDISC_KIND}" == "fq_codel" ]]'
+
+# 7b) 次月：vnStat 本月 TX 回落（新月从低用量开始），解除限速并恢复原队列
+export MOCK_TX_BYTES=$((1 * 1000000000))
+run_check
+# shellcheck disable=SC1091
+source "$TMP/var/state"
+assert "next month lifts limit" '[[ "${LIMIT_ACTIVE}" == "false" && "${OWNED_BY_TOOL}" == "false" ]]'
+assert "next month restores fq_codel" '[[ "$(qdisc_file eth0)" == *"qdisc fq_codel"* ]]'
+assert "next month not empty default" '[[ "$(qdisc_file eth0)" != *"1abc:"* ]]'
+assert "next month keeps orig kind" '[[ "${ORIG_QDISC_KIND}" == "fq_codel" ]]'
 
 # 8) 网卡变更 + 低于阈值：清理旧网卡规则，不在新网卡限速
 cat >"$TMP/etc/config" <<EOF

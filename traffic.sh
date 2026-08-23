@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-traffic"
-VERSION="1.4.1"
+VERSION="1.4.2"
 LIB_DIR="/usr/local/lib/syw-vps"
 SELF_LOCAL="${LIB_DIR}/traffic.sh"
 SYW_VPS_REF="${SYW_VPS_REF:-main}"
@@ -98,6 +98,11 @@ load_kv_file() {
       LAST_MONTH|LAST_RATIO|OWNED_BY_TOOL)
         printf -v "$k" '%s' "$v"
         ;;
+      ORIG_QDISC_KIND)
+        case $v in
+          fq_codel|fq|noqueue|pfifo_fast|cake|mq) printf -v "$k" '%s' "$v" ;;
+        esac
+        ;;
     esac
   done <"$file"
 }
@@ -145,6 +150,7 @@ LAST_TX_BYTES=${LAST_TX_BYTES:-}
 LAST_MONTH=${LAST_MONTH:-}
 LAST_RATIO=${LAST_RATIO:-}
 OWNED_BY_TOOL=${OWNED_BY_TOOL:-false}
+ORIG_QDISC_KIND=${ORIG_QDISC_KIND:-}
 EOF
 }
 
@@ -172,6 +178,7 @@ init_state_if_missing() {
     LAST_MONTH=
     LAST_RATIO=
     OWNED_BY_TOOL=false
+    ORIG_QDISC_KIND=
     write_state
   fi
 }
@@ -203,6 +210,7 @@ load_state() {
   LAST_MONTH=
   LAST_RATIO=
   OWNED_BY_TOOL=false
+  ORIG_QDISC_KIND=
   load_kv_file "$STATE_FILE"
   LIMIT_ACTIVE="${LIMIT_ACTIVE:-false}"
   OWNED_BY_TOOL="${OWNED_BY_TOOL:-false}"
@@ -373,6 +381,46 @@ has_blocking_qdisc() {
   return 1
 }
 
+is_saved_qdisc_kind() {
+  case ${1:-} in
+    fq_codel|fq|noqueue|pfifo_fast|cake|mq) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+root_qdisc_kind() {
+  local iface=$1 show
+  show=$(tc_qdisc_show "$iface")
+  sed -nE 's/^qdisc[[:space:]]+([A-Za-z0-9_]+)[[:space:]]+[^[:space:]]+[[:space:]]+root.*/\1/p' <<<"$show" | head -n1
+}
+
+capture_orig_qdisc() {
+  local iface=$1 kind
+  kind=$(root_qdisc_kind "$iface")
+  [[ $kind != tbf ]] || kind=
+  if is_saved_qdisc_kind "$kind"; then
+    ORIG_QDISC_KIND=$kind
+  else
+    ORIG_QDISC_KIND=
+  fi
+}
+
+# 限速解除后恢复挂限速前的 root 队列（fq/cake/mq 等）。失败只告警，不把 tbf 装回去。
+restore_saved_qdisc() {
+  local iface=$1 kind=${ORIG_QDISC_KIND:-}
+  is_saved_qdisc_kind "$kind" || return 0
+  if [[ $VPS_TRAFFIC_MOCK == 1 ]]; then
+    printf 'qdisc %s 0: root\n' "$kind" >"$(mock_tc_path "$iface")"
+    return 0
+  fi
+  if $TC_BIN qdisc replace dev "$iface" root "$kind" 2>/tmp/vps-traffic-tc.err; then
+    log "已恢复原队列: $kind"
+    return 0
+  fi
+  warn "限速已解除，但恢复原队列 ${kind} 失败: $(cat /tmp/vps-traffic-tc.err 2>/dev/null || true)"
+  return 0
+}
+
 # 0 成功；3 冲突；1 失败
 apply_limit() {
   local iface=$1 rate=${2:-1mbit}
@@ -386,6 +434,8 @@ apply_limit() {
     LAST_REASON="conflict_foreign_qdisc"
     return 3
   fi
+
+  capture_orig_qdisc "$iface"
 
   if [[ $VPS_TRAFFIC_MOCK == 1 ]]; then
     # mock：若存在非无害 root 已在 has_blocking 处理；此处可替换默认 qdisc
@@ -424,7 +474,11 @@ remove_limit() {
   fi
 
   if [[ $VPS_TRAFFIC_MOCK == 1 ]]; then
-    : >"$(mock_tc_path "$iface")"
+    if is_saved_qdisc_kind "${ORIG_QDISC_KIND:-}"; then
+      restore_saved_qdisc "$iface"
+    else
+      : >"$(mock_tc_path "$iface")"
+    fi
     LIMIT_ACTIVE=false
     OWNED_BY_TOOL=false
     LIMIT_HANDLE=
@@ -442,6 +496,7 @@ remove_limit() {
     err "删除后仍检测到本工具规则"
     return 1
   fi
+  restore_saved_qdisc "$iface"
   LIMIT_ACTIVE=false
   OWNED_BY_TOOL=false
   LIMIT_HANDLE=

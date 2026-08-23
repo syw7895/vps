@@ -98,6 +98,11 @@ assert "masquerade query chars survive state write" 'grep -q "HY2_MASQUERADE=htt
 # WS+TLS 仅保留直连参数。
 parse_cdn_args --domain example.com --port 8443
 assert "ws direct parser" '[[ $CDN_DOMAIN == example.com && $CDN_PORT == 8443 ]]'
+assert "ws update keeps port" '[[ $(ws_pick_port example.com example.com 8443 "" 0) == 8443 ]]'
+assert "ws random-port clears" '[[ -z $(ws_pick_port example.com example.com 8443 "" 1) ]]'
+assert "ws explicit port wins" '[[ $(ws_pick_port example.com example.com 8443 9443 0) == 9443 ]]'
+assert "ws new install empty" '[[ -z $(ws_pick_port example.com "" "" "" 0) ]]'
+assert "ws reinstall other domain empty" '[[ -z $(ws_pick_port other.com example.com 8443 "" 0) ]]'
 
 # 旧版 Hysteria2 没有 state/drop-in 标记时，专用配置 + 信息文件仍可安全识别。
 HY2_CONFIG="$CONFIG_DIR/hysteria.yaml"

@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
-VERSION="1.7.0"
+VERSION="1.7.1"
 CONFIG_DIR="/root/proxy-info"
 BACKUP_DIR="${CONFIG_DIR}/backups"
 BACKUP_KEEP="${BACKUP_KEEP:-15}"
@@ -115,7 +115,8 @@ usage() {
 REALITY:  --port --sni --target --uuid
 Hysteria2: --port --password --domain --masquerade
 WS+TLS:   --domain [--port|--random-port] --path --uuid --email
-          未指定 --port 时，随机选择空闲 TCP 端口。
+          更新同域名且未指定 --port 时保持原端口；新装/重装未指定则随机。
+          --random-port 强制换端口。
 
 环境变量可覆盖安装器 pin（见 README）。
 EOF
@@ -453,6 +454,23 @@ random_free_port() {
 
 random_ws_port() {
   random_free_port tcp
+}
+
+# 更新同域名：保持原端口。新装/重装（无旧节点）或 --random-port：由调用方随机。
+ws_pick_port() {
+  local want_domain=$1 old_domain=$2 old_port=$3 arg_port=$4 arg_random=$5
+  if [[ $arg_random == 1 ]]; then
+    return 0
+  fi
+  if [[ -n $arg_port ]]; then
+    printf '%s' "$arg_port"
+    return 0
+  fi
+  if [[ -n $old_domain && $old_domain == "$want_domain" && -n $old_port ]]; then
+    printf '%s' "$old_port"
+    return 0
+  fi
+  return 0
 }
 
 resolve_public_ip() {
@@ -1938,22 +1956,23 @@ install_ws() {
   local arg_port=$CDN_PORT arg_path=$CDN_PATH arg_uuid=$CDN_UUID
   local arg_random=$CDN_RANDOM_PORT
   local want_domain=$CDN_DOMAIN
-  local old_domain old_path old_uuid
+  local old_domain old_path old_uuid old_port
   old_domain=$(state_get "$CDN_STATE" CDN_DOMAIN)
   old_path=$(state_get "$CDN_STATE" CDN_PATH)
   old_uuid=$(state_get "$CDN_STATE" CDN_UUID)
+  old_port=$(state_get "$CDN_STATE" CDN_PORT)
   if [[ -n $old_domain && $old_domain == "$want_domain" ]]; then
     [[ -n $arg_path ]] || CDN_PATH=$old_path
     [[ -n $arg_uuid ]] || CDN_UUID=$old_uuid
     log "复用已有 WS+TLS 节点参数（同域名）"
   fi
 
-  if [[ $arg_random == 1 ]]; then
-    CDN_PORT=
-  fi
+  CDN_PORT=$(ws_pick_port "$want_domain" "$old_domain" "$old_port" "$arg_port" "$arg_random")
   if [[ -z ${CDN_PORT:-} ]]; then
     CDN_PORT=$(random_ws_port)
     log "随机 TCP 端口: $CDN_PORT"
+  elif [[ -n $old_port && $CDN_PORT == "$old_port" && $arg_random != 1 && -z $arg_port ]]; then
+    log "保持已有 TLS 端口: $CDN_PORT"
   fi
   validate_domain "$CDN_DOMAIN"
   validate_port "$CDN_PORT"
@@ -2653,11 +2672,14 @@ confirm_yes() {
 }
 
 menu_install_ws() {
-  local domain port path email random_port=0
+  local domain port path email random_port=0 cur_port=""
   # 域名不从旧配置预填，避免误用旧节点并在提示符中回显域名。
   domain=$(prompt "域名（已解析到本机）" "")
   [[ -n $domain ]] || { warn "域名不能为空"; sleep 1; return; }
-  port=$(prompt "TLS 端口（空=随机；输入 random=随机）" "")
+  if [[ $domain == "$(state_get "$CDN_STATE" CDN_DOMAIN)" ]]; then
+    cur_port=$(state_get "$CDN_STATE" CDN_PORT)
+  fi
+  port=$(prompt "TLS 端口（空=保持或随机；输入 random=随机）" "$cur_port")
   if [[ ${port,,} == random ]]; then
     port=
     random_port=1
