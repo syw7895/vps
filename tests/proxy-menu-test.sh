@@ -27,13 +27,13 @@ show_info() { :; }
 pause() { :; }
 menu_uninstall() { echo "__CALL_menu_uninstall__"; }
 menu_install() { echo "__CALL_menu_install__"; }
-update_hy2_manual() { echo "__CALL_update_hy2_manual__"; }
+update_proxy_cores() { echo "__CALL_update_proxy_cores__"; }
 cleanup_legacy_v2() { :; }
 
 out=$(printf '0\n' | main_menu 2>&1) || true
 assert "has 安装代理" '[[ "$out" == *"安装代理"* ]]'
 assert "has 节点与状态" '[[ "$out" == *"节点与状态"* ]]'
-assert "item3 is hy2 update" '[[ "$out" == *"更新 Hysteria2 核心"* ]]'
+assert "item3 is proxy core update" '[[ "$out" == *"更新代理核心"* ]]'
 assert "item4 is 卸载" '[[ "$out" == *"卸载"* ]]'
 assert "no v2 menu" '[[ "$out" != *"安装 / 更新 v2"* && "$out" != *"更新 v2"* ]]'
 assert "no group 管理" '! grep -qE "^[[:space:]]*管理[[:space:]]*$" <<<"$out"'
@@ -46,7 +46,7 @@ assert "no box chars" '[[ $has_box -eq 0 ]]'
 assert "prompt present" '[[ "$out" == *"请选择 [0-4]"* ]]'
 
 out3=$(printf '3\n0\n' | main_menu 2>&1) || true
-assert "case 3 update hy2" '[[ "$out3" == *"__CALL_update_hy2_manual__"* ]]'
+assert "case 3 update proxy cores" '[[ "$out3" == *"__CALL_update_proxy_cores__"* ]]'
 
 out4=$(printf '4\n0\n' | main_menu 2>&1) || true
 assert "case 4 menu_uninstall" '[[ "$out4" == *"__CALL_menu_uninstall__"* ]]'

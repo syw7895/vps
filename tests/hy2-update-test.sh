@@ -65,7 +65,7 @@ systemctl() {
 
 update_hy2_core manual >/dev/null
 assert "update installs latest" '[[ $(hy2_version_of "$HY2_BIN") == v2.12.1 ]]'
-assert "update records success" '[[ "$recorded" == "updated v2.12.1 v2.12.1" ]]'
+assert "update records success" '[[ "$recorded" == "updated v2.10.0 v2.12.1" ]]'
 
 downloaded=0
 recorded=""
@@ -96,7 +96,7 @@ HY2_UPDATE_TIMER="$TMP/syw-hy2-update.timer"
 systemctl() { :; }
 enable_hy2_auto_update
 assert "timer is weekly and persistent" 'grep -q "OnCalendar=Mon" "$HY2_UPDATE_TIMER" && grep -q "Persistent=true" "$HY2_UPDATE_TIMER"'
-assert "service invokes auto update" 'grep -q "proxy.sh update-hy2 --auto" "$HY2_UPDATE_SERVICE"'
+assert "service invokes proxy core auto update" 'grep -q "proxy.sh update-cores --auto" "$HY2_UPDATE_SERVICE"'
 
 manual_updated=0
 timer_enabled=0

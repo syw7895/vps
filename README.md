@@ -17,6 +17,8 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 
 安装会重新下载覆盖模块脚本（不动节点配置与证书）。旧版 `v2` 会在确认归属后清理。
 
+安装后会创建两个独立的 systemd timer：每周更新管理脚本；每周检查 Xray / Hysteria2 稳定版核心。更新使用不可变 Git 提交或发布资产，先校验、再替换；服务启动失败会回滚。
+
 ## 界面原则
 
 - 正常安静，异常才醒目；每事实只显示一次
@@ -28,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 ## 菜单示例
 
 ```text
-  VPS  v1.2.1
+  VPS  v1.3.0
 
    1.  代理管理
    2.  流量管理
@@ -44,7 +46,7 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 
    1.  安装代理
    2.  节点与状态
-   3.  更新 Hysteria2 核心
+   3.  更新代理核心
    4.  卸载
 
    0.  返回
@@ -70,8 +72,9 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 - 状态依据：真实服务配置（ExecStart + 协议语义）
 - 正常页不显示 state / 元数据提示（`--status-debug` 可开）
 - 节点标题含端口协议，如 `443/TCP`；分享链接单独成块
-- Hysteria2 每周检查稳定版更新；下载后核对官方 SHA256，启动失败自动回滚
-- 可在代理菜单立即更新，或运行 `sudo bash /usr/local/lib/syw-vps/proxy.sh update-hy2`
+- Xray / Hysteria2 每周检查稳定版更新；发布资产校验 SHA256，配置检查和服务启动失败自动回滚
+- 可在代理菜单立即更新，或运行 `sudo bash /usr/local/lib/syw-vps/proxy.sh update-cores`
+- 管理脚本每周从 GitHub 当前分支对应的不可变提交更新；可运行 `sudo vps update`
 - 修复 Xray `ExecStart` 配置路径解析，并兼容非 root 的只读测试环境
 
 ## 流量
@@ -79,6 +82,7 @@ curl -fsSL https://raw.githubusercontent.com/syw7895/vps/main/vps.sh | sudo bash
 - vnStat 出站 TX；systemd timer + flock
 - 状态页含进度条；qdisc/handle 仅 debug
 - 「修改流量设置」一次改额度 / 比例 / 速度
+- 达到设定额度/阈值后，会在当前默认出口网卡启用本工具的限速规则；这会影响该网卡上的所有出口服务，是预期的自动保护行为。
 
 ## 测试
 
@@ -93,4 +97,6 @@ bash tests/menu-ui-test.sh
 bash tests/status-ui-test.sh
 bash tests/integrity-safety-test.sh
 bash tests/hy2-update-test.sh
+bash tests/core-update-test.sh
+bash tests/entrypoint-update-test.sh
 ```

@@ -4,13 +4,22 @@
 set -Eeuo pipefail
 
 APP_NAME="syw-vps"
-VERSION="1.2.1"
+VERSION="1.3.0"
 LIB_DIR="/usr/local/lib/syw-vps"
 BIN_VPS="/usr/local/bin/vps"
 MARKER="syw-vps-entrypoint"
 # 可选固定提交: export SYW_VPS_REF=<commit-sha>
 SYW_VPS_REF="${SYW_VPS_REF:-main}"
-RAW_BASE="${SYW_VPS_RAW_BASE:-https://raw.githubusercontent.com/syw7895/vps/${SYW_VPS_REF}}"
+SYW_VPS_REPO="${SYW_VPS_REPO:-syw7895/vps}"
+SYW_VPS_BRANCH="${SYW_VPS_BRANCH:-main}"
+SYW_VPS_UPDATE_API="${SYW_VPS_UPDATE_API:-https://api.github.com/repos/${SYW_VPS_REPO}/commits/${SYW_VPS_BRANCH}}"
+SYW_VPS_UPDATE_STATE="${SYW_VPS_UPDATE_STATE:-${LIB_DIR}/update-state}"
+SYW_VPS_UPDATE_SERVICE="${SYW_VPS_UPDATE_SERVICE:-/etc/systemd/system/syw-vps-update.service}"
+SYW_VPS_UPDATE_TIMER="${SYW_VPS_UPDATE_TIMER:-/etc/systemd/system/syw-vps-update.timer}"
+SYW_VPS_UPDATE_LOCK="${SYW_VPS_UPDATE_LOCK:-/run/lock/syw-vps-update.lock}"
+SYW_VPS_BACKUP_DIR="${SYW_VPS_BACKUP_DIR:-${LIB_DIR}/backups}"
+SYW_VPS_BACKUP_KEEP="${SYW_VPS_BACKUP_KEEP:-3}"
+RAW_BASE="${SYW_VPS_RAW_BASE:-https://raw.githubusercontent.com/${SYW_VPS_REPO}/${SYW_VPS_REF}}"
 
 VPS_SH_LOCAL="${LIB_DIR}/vps.sh"
 PROXY_SH_LOCAL="${LIB_DIR}/proxy.sh"
@@ -109,6 +118,14 @@ http_get() {
   fi
 }
 
+github_api_get() {
+  local url=$1 dest=$2
+  command -v curl >/dev/null 2>&1 || fail "自动更新需要 curl"
+  curl -fsSL --retry 3 --connect-timeout 20 --max-time 120 \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'User-Agent: syw-vps-updater' "$url" -o "$dest"
+}
+
 # 下载：仅 bash -n
 download_to() {
   local url=$1 dest=$2 tmp
@@ -149,6 +166,204 @@ ensure_module() {
   download_to "$url" "$dest"
 }
 
+read_update_ref() {
+  [[ -r $SYW_VPS_UPDATE_STATE ]] || return 0
+  sed -nE 's/^REF=([0-9a-fA-F]{40})$/\1/p' "$SYW_VPS_UPDATE_STATE" | head -n1
+}
+
+write_update_state() {
+  local ref=$1 result=${2:-ok} tmp
+  mkdir -p "$(dirname "$SYW_VPS_UPDATE_STATE")"
+  tmp=$(mktemp "${SYW_VPS_UPDATE_STATE}.XXXXXX")
+  printf 'REF=%s\nLAST_CHECK=%s\nRESULT=%s\n' \
+    "$ref" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$result" >"$tmp"
+  chmod 644 "$tmp"
+  mv -f "$tmp" "$SYW_VPS_UPDATE_STATE"
+}
+
+resolve_latest_ref() {
+  local data ref tmp
+  tmp=$(mktemp)
+  if ! github_api_get "$SYW_VPS_UPDATE_API" "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  data=$(cat "$tmp")
+  rm -f "$tmp"
+  ref=$(sed -nE 's/.*"sha"[[:space:]]*:[[:space:]]*"([0-9a-fA-F]{40})".*/\1/p' <<<"$data" | head -n1)
+  [[ $ref =~ ^[0-9a-fA-F]{40}$ ]] || return 1
+  printf '%s\n' "${ref,,}"
+}
+
+module_marker_ok() {
+  local name=$1 file=$2
+  case $name in
+    vps.sh) grep -q '^APP_NAME="syw-vps"$' "$file" ;;
+    proxy.sh) grep -q '^APP_NAME="vps-proxy"$' "$file" ;;
+    traffic.sh) grep -q '^APP_NAME="vps-traffic"$' "$file" ;;
+    *) return 1 ;;
+  esac
+}
+
+download_module_candidate() {
+  local name=$1 ref=$2 dest=$3 url
+  url="https://raw.githubusercontent.com/${SYW_VPS_REPO}/${ref}/${name}"
+  http_get "$url" "$dest" || fail "自动更新下载失败: $url"
+  [[ -s $dest ]] || fail "自动更新脚本为空: $name"
+  bash -n "$dest" 2>/dev/null || fail "自动更新脚本语法错误: $name"
+  module_marker_ok "$name" "$dest" || fail "自动更新脚本标识不匹配: $name"
+}
+
+restore_module_backup() {
+  local backup=$1 name dest
+  for name in vps.sh proxy.sh traffic.sh; do
+    case $name in
+      vps.sh) dest=$VPS_SH_LOCAL ;;
+      proxy.sh) dest=$PROXY_SH_LOCAL ;;
+      traffic.sh) dest=$TRAFFIC_SH_LOCAL ;;
+    esac
+    if [[ -f ${backup}/${name} ]]; then
+      install -m 0755 "${backup}/${name}" "$dest"
+    else
+      rm -f -- "$dest"
+    fi
+  done
+}
+
+prune_module_backups() {
+  local keep=${SYW_VPS_BACKUP_KEEP:-3} i
+  local -a dirs=()
+  [[ $keep =~ ^[0-9]+$ ]] && ((keep >= 1)) || keep=3
+  [[ -d $SYW_VPS_BACKUP_DIR ]] || return 0
+  mapfile -t dirs < <(ls -1dt "$SYW_VPS_BACKUP_DIR"/modules.* 2>/dev/null || true)
+  for ((i = keep; i < ${#dirs[@]}; i++)); do
+    [[ -d ${dirs[i]} ]] && rm -rf -- "${dirs[i]}"
+  done
+}
+
+refresh_proxy_auto_update() {
+  if { [[ -f /etc/systemd/system/syw-hy2-update.timer ]] ||
+       command -v xray >/dev/null 2>&1 ||
+       [[ -x /usr/local/bin/hysteria ]]; }; then
+    bash "$PROXY_SH_LOCAL" configure-auto-update >/dev/null 2>&1
+  fi
+}
+
+update_modules() (
+  local mode=${1:-manual} ref current tmp backup name dest new rc keep_backup=0
+  mode=${mode#--}
+  tmp=""
+  backup=""
+  trap '[[ -n "${tmp:-}" ]] && rm -rf -- "$tmp"; [[ -n "${backup:-}" && ${keep_backup:-0} -eq 0 ]] && rm -rf -- "$backup"' EXIT
+  require_root
+  mkdir -p "$LIB_DIR"
+  current=$(read_update_ref || true)
+  ref=$(resolve_latest_ref) || {
+    write_update_state "${current:-unknown}" check-failed
+    fail "无法获取 syw-vps 最新提交"
+  }
+  if [[ $ref == "$current" ]]; then
+    write_update_state "$ref" current
+    refresh_proxy_auto_update || fail "代理核心更新定时器刷新失败"
+    [[ $mode == auto ]] || ok "syw-vps 脚本已是最新: $ref"
+    return 0
+  fi
+
+  tmp=$(mktemp -d /tmp/${APP_NAME}.modules.XXXXXX)
+  for name in vps.sh proxy.sh traffic.sh; do
+    download_module_candidate "$name" "$ref" "$tmp/$name"
+  done
+
+  mkdir -p "$SYW_VPS_BACKUP_DIR"
+  chmod 700 "$SYW_VPS_BACKUP_DIR" 2>/dev/null || true
+  backup=$(mktemp -d "${SYW_VPS_BACKUP_DIR}/modules.XXXXXX")
+  for name in vps.sh proxy.sh traffic.sh; do
+    case $name in
+      vps.sh) dest=$VPS_SH_LOCAL ;;
+      proxy.sh) dest=$PROXY_SH_LOCAL ;;
+      traffic.sh) dest=$TRAFFIC_SH_LOCAL ;;
+    esac
+    [[ -f $dest ]] && cp -p "$dest" "$backup/$name"
+  done
+
+  set +e
+  for name in vps.sh proxy.sh traffic.sh; do
+    case $name in
+      vps.sh) dest=$VPS_SH_LOCAL ;;
+      proxy.sh) dest=$PROXY_SH_LOCAL ;;
+      traffic.sh) dest=$TRAFFIC_SH_LOCAL ;;
+    esac
+    new=$(mktemp "${dest}.new.XXXXXX")
+    install -m 0755 "$tmp/$name" "$new" && mv -f "$new" "$dest"
+    rc=$?
+    ((rc == 0)) || break
+  done
+  set -e
+  if ((rc != 0)); then
+    restore_module_backup "$backup"
+    fail "syw-vps 脚本替换失败，已恢复旧版"
+  fi
+  if ! refresh_proxy_auto_update; then
+    restore_module_backup "$backup"
+    fail "代理核心更新定时器刷新失败，已恢复旧版"
+  fi
+  keep_backup=1
+  write_update_state "$ref" updated
+  prune_module_backups
+  [[ $mode == auto ]] || ok "syw-vps 脚本已更新: ${current:-unknown} → $ref"
+)
+
+enable_script_auto_update() {
+  command -v systemctl >/dev/null 2>&1 || {
+    warn "未检测到 systemd，跳过 syw-vps 自动更新定时器"
+    return 0
+  }
+  install -d -m 755 "$(dirname "$SYW_VPS_UPDATE_LOCK")"
+  cat >"$SYW_VPS_UPDATE_SERVICE" <<EOF
+[Unit]
+Description=syw-vps management scripts update
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=${VPS_SH_LOCAL}
+
+[Service]
+Type=oneshot
+TimeoutStartSec=15min
+ExecStart=/bin/bash ${VPS_SH_LOCAL} --update-all --auto
+EOF
+  cat >"$SYW_VPS_UPDATE_TIMER" <<'EOF'
+[Unit]
+Description=Weekly syw-vps management scripts update
+
+[Timer]
+OnCalendar=Sun *-*-* 03:00:00
+RandomizedDelaySec=6h
+Persistent=true
+Unit=syw-vps-update.service
+
+[Install]
+WantedBy=timers.target
+EOF
+  chmod 644 "$SYW_VPS_UPDATE_SERVICE" "$SYW_VPS_UPDATE_TIMER"
+  systemctl daemon-reload
+  systemctl enable --now syw-vps-update.timer >/dev/null
+}
+
+update_all() {
+  local mode=${1:-manual}
+  mode=${mode#--}
+  require_root
+  command -v flock >/dev/null 2>&1 || fail "自动更新需要 flock（util-linux）"
+  install -d -m 755 "$(dirname "$SYW_VPS_UPDATE_LOCK")"
+  exec 9>"$SYW_VPS_UPDATE_LOCK"
+  if ! flock -n 9 2>/dev/null; then
+    [[ $mode == auto ]] || warn "已有 syw-vps 更新任务运行中"
+    return 0
+  fi
+  update_modules "$mode"
+  enable_script_auto_update
+}
+
 install_bin_vps() {
   if [[ -e $BIN_VPS ]] && ! owns_vps_bin "$BIN_VPS"; then
     fail "已存在 $BIN_VPS 且不属于本工具，拒绝覆盖"
@@ -168,6 +383,7 @@ do_install() {
   ensure_module "$PROXY_SH_LOCAL" "${RAW_BASE}/proxy.sh"
   ensure_module "$TRAFFIC_SH_LOCAL" "${RAW_BASE}/traffic.sh"
   install_bin_vps
+  enable_script_auto_update
 }
 
 run_module() {
@@ -248,6 +464,7 @@ usage() {
 ${APP_NAME} v${VERSION}
   curl -fsSL ${RAW_BASE}/vps.sh | sudo bash
   sudo vps
+  sudo vps update                 检查并更新管理脚本
 EOF
 }
 
@@ -256,6 +473,10 @@ main() {
     -h|--help|help) usage; exit 0 ;;
     --menu-only|menu) require_root; enter_menu ;;
     --install|install) do_install; enter_menu ;;
+    --update-all|update|update-all)
+      shift || true
+      update_all "${1:-manual}"
+      ;;
     *) do_install; enter_menu ;;
   esac
 }

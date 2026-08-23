@@ -40,6 +40,12 @@ jobs:
       - name: Hysteria2 update tests
         run: bash tests/hy2-update-test.sh
 
+      - name: Xray core update tests
+        run: bash tests/core-update-test.sh
+
+      - name: Entrypoint update tests
+        run: bash tests/entrypoint-update-test.sh
+
       - name: ShellCheck (advisory)
         continue-on-error: true
         run: |

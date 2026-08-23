@@ -33,8 +33,13 @@ HY2_UPDATE_STATE="${CONFIG_DIR}/hy2-update.conf"
 HY2_UPDATE_SERVICE="/etc/systemd/system/syw-hy2-update.service"
 HY2_UPDATE_TIMER="/etc/systemd/system/syw-hy2-update.timer"
 HY2_UPDATE_LOCK="/run/lock/syw-hy2-update.lock"
-HY2_UPDATE_API="${HY2_UPDATE_API:-https://api.hy2.io/v1/update?cver=installscript&plat=linux&arch=amd64&chan=release&side=server}"
+HY2_UPDATE_API="${HY2_UPDATE_API:-https://api.hy2.io/v1/update?cver=installscript&plat=linux&chan=release&side=server}"
 HY2_RELEASE_BASE="${HY2_RELEASE_BASE:-https://github.com/HyNetworks/hysteria/releases/download/app}"
+XRAY_CORE_BIN="${XRAY_CORE_BIN:-/usr/local/bin/xray}"
+XRAY_UPDATE_API="${XRAY_UPDATE_API:-https://api.github.com/repos/XTLS/Xray-core/releases/latest}"
+XRAY_RELEASE_BASE="${XRAY_RELEASE_BASE:-https://github.com/XTLS/Xray-core/releases/download}"
+XRAY_UPDATE_STATE="${CONFIG_DIR}/xray-update.conf"
+XRAY_UPDATE_LOCK="/run/lock/syw-xray-update.lock"
 PUBLIC_IP=""
 DEPS_INSTALLED=0
 # 旧版 v2 快捷命令路径（仅用于安全清理，不再安装）
@@ -97,6 +102,7 @@ usage() {
   bash proxy.sh xray [参数]     安装/更新 REALITY（默认复用已有节点参数）
   bash proxy.sh hy2  [参数]     安装/更新 Hysteria2（默认复用）
   bash proxy.sh update-hy2      立即检查/更新 Hysteria2 核心
+  bash proxy.sh update-cores    检查/更新 Xray 与 Hysteria2 核心
   bash proxy.sh cdn  [参数]     安装/更新 VLESS+WS+TLS
   bash proxy.sh show
   bash proxy.sh show --status-debug   排障：显示内部元数据提示
@@ -220,7 +226,7 @@ install_deps() {
   log "安装依赖..."
   apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    curl ca-certificates openssl coreutils iproute2 >/dev/null
+    curl ca-certificates openssl coreutils iproute2 python3 util-linux unzip >/dev/null
   DEPS_INSTALLED=1
 }
 
@@ -991,6 +997,218 @@ install_xray_core() {
   command -v xray >/dev/null || fail "Xray 安装失败"
 }
 
+xray_binary_path() {
+  if [[ -x $XRAY_CORE_BIN ]]; then
+    printf '%s\n' "$XRAY_CORE_BIN"
+  elif command -v xray >/dev/null 2>&1; then
+    command -v xray
+  else
+    return 1
+  fi
+}
+
+xray_arch() {
+  case $(uname -m) in
+    x86_64|amd64) echo 64 ;;
+    i386|i486|i586|i686) echo 32 ;;
+    aarch64|arm64) echo arm64-v8a ;;
+    armv7l|armv7) echo arm32-v7a ;;
+    armv6l|armv6) echo arm32-v6 ;;
+    armv5*|armv5) echo arm32-v5 ;;
+    loongarch64) echo loong64 ;;
+    ppc64le) echo ppc64le ;;
+    ppc64) echo ppc64 ;;
+    riscv64) echo riscv64 ;;
+    s390x) echo s390x ;;
+    mips64) echo mips64 ;;
+    mips64el|mips64le) echo mips64le ;;
+    mips) echo mips32 ;;
+    mipsel) echo mips32le ;;
+    *) return 1 ;;
+  esac
+}
+
+xray_version_of() {
+  local bin=${1:-}
+  [[ -n $bin ]] || bin=$(xray_binary_path) || return 1
+  "$bin" version 2>/dev/null |
+    grep -Eo 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -n1
+}
+
+xray_latest_version() {
+  local data version
+  data=$(curl -fsSL --retry 3 --connect-timeout 10 --max-time 60 \
+    -H 'Accept: application/vnd.github+json' -H 'User-Agent: syw-vps-updater' \
+    "$XRAY_UPDATE_API") || return 1
+  version=$(sed -nE 's/.*"tag_name"[[:space:]]*:[[:space:]]*"(v[0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' <<<"$data" | head -n1)
+  [[ $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  printf '%s\n' "$version"
+}
+
+xray_release_asset() {
+  local arch
+  arch=$(xray_arch) || return 1
+  printf 'Xray-linux-%s.zip\n' "$arch"
+}
+
+xray_download_verified() {
+  local version=$1 dest=$2 asset work zip dgst expected actual
+  asset=$(xray_release_asset) || return 1
+  work=$(mktemp -d /tmp/${APP_NAME}.xray.XXXXXX)
+  zip="$work/$asset"
+  dgst="$work/$asset.dgst"
+  if ! curl_download "${XRAY_RELEASE_BASE}/${version}/${asset}" "$zip" ||
+     ! curl_download "${XRAY_RELEASE_BASE}/${version}/${asset}.dgst" "$dgst"; then
+    rm -rf -- "$work"
+    return 1
+  fi
+  expected=$(sed -nE 's/^SHA2-256=[[:space:]]*([A-Fa-f0-9]{64})$/\1/p' "$dgst" | head -n1)
+  actual=$(sha256_file "$zip")
+  if ! is_valid_sha256 "$expected" || [[ ${actual,,} != "${expected,,}" ]]; then
+    rm -rf -- "$work"
+    return 2
+  fi
+  command -v unzip >/dev/null 2>&1 || {
+    rm -rf -- "$work"
+    return 3
+  }
+  if ! unzip -p "$zip" xray >"$dest" 2>/dev/null || [[ ! -s $dest ]]; then
+    rm -rf -- "$work"
+    return 1
+  fi
+  chmod 755 "$dest"
+  rm -rf -- "$work"
+}
+
+xray_validate_candidate() {
+  local bin=$1 cfg
+  "$bin" version >/dev/null 2>&1 || return 1
+  xray_discover
+  if [[ $XRAY_LAYOUT == dir && -n $XRAY_CONF_DIR && -d $XRAY_CONF_DIR ]]; then
+    "$bin" run -test -confdir "$XRAY_CONF_DIR" >/dev/null 2>&1
+  else
+    cfg=${XRAY_CONFIG_FILE:-$XRAY_CONFIG}
+    [[ -r $cfg ]] || return 0
+    "$bin" run -test -config "$cfg" >/dev/null 2>&1
+  fi
+}
+
+hy2_validate_candidate() {
+  local bin=$1
+  "$bin" version >/dev/null 2>&1
+}
+
+xray_record_update() {
+  local result=$1 current=${2:-unknown} latest=${3:-unknown}
+  ensure_dirs
+  write_kv_file "$XRAY_UPDATE_STATE" \
+    "LAST_CHECK=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "RESULT=${result}" "CURRENT=${current}" "LATEST=${latest}"
+}
+
+update_xray_core() {
+  local mode=${1:-manual} current latest candidate backup candidate_version was_active=0 bin
+  mode=${mode#--}
+  require_root
+  require_systemd
+  command -v curl >/dev/null 2>&1 || fail "更新 Xray 缺少命令: curl"
+  command -v sha256sum >/dev/null 2>&1 || fail "更新 Xray 缺少命令: sha256sum"
+  command -v sort >/dev/null 2>&1 || fail "更新 Xray 缺少命令: sort"
+  command -v flock >/dev/null 2>&1 || fail "更新 Xray 缺少命令: flock"
+  bin=$(xray_binary_path) || { [[ $mode == auto ]] || warn "Xray 尚未安装，跳过更新"; return 0; }
+  install -d -m 755 "$(dirname "$XRAY_UPDATE_LOCK")"
+  exec 8>"$XRAY_UPDATE_LOCK"
+  if ! flock -n 8; then
+    [[ $mode == auto ]] || warn "已有 Xray 更新任务运行中"
+    return 0
+  fi
+  current=$(xray_version_of "$bin") || true
+  [[ -n $current ]] || { xray_record_update invalid-version; fail "无法识别当前 Xray 版本"; }
+  [[ $current == v* ]] || current="v${current}"
+  latest=$(xray_latest_version) || { xray_record_update check-failed "$current"; fail "无法获取 Xray 最新稳定版"; }
+  if ! hy2_version_lt "$current" "$latest"; then
+    xray_record_update current "$current" "$latest"
+    [[ $mode == auto ]] || ok "Xray 已是最新稳定版: $current"
+    return 0
+  fi
+  if ! command -v unzip >/dev/null 2>&1; then
+    command -v apt-get >/dev/null 2>&1 || fail "更新 Xray 需要 unzip"
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unzip >/dev/null
+  fi
+  candidate=$(mktemp /tmp/${APP_NAME}.xray-bin.XXXXXX)
+  backup=$(mktemp /tmp/${APP_NAME}.xray-old.XXXXXX)
+  if ! xray_download_verified "$latest" "$candidate"; then
+    rm -f -- "$candidate" "$backup"
+    xray_record_update verify-failed "$current" "$latest"
+    fail "Xray 下载或 SHA256 校验失败"
+  fi
+  candidate_version=$(xray_version_of "$candidate") || true
+  [[ -n $candidate_version ]] || {
+    rm -f -- "$candidate" "$backup"
+    xray_record_update invalid-candidate "$current" "$latest"
+    fail "Xray 新版二进制无法运行，保留旧版"
+  }
+  candidate_version=${candidate_version#v}
+  [[ $candidate_version == ${latest#v} ]] || {
+    rm -f -- "$candidate" "$backup"
+    xray_record_update version-mismatch "$current" "$latest"
+    fail "Xray 下载版本与发布版本不一致，保留旧版"
+  }
+  if ! xray_validate_candidate "$candidate"; then
+    rm -f -- "$candidate" "$backup"
+    xray_record_update config-failed "$current" "$latest"
+    fail "新版 Xray 配置验证失败，保留旧版"
+  fi
+  cp -p "$bin" "$backup"
+  systemctl is-active --quiet xray 2>/dev/null && was_active=1
+  if ! install -m 755 "$candidate" "${bin}.new" || ! mv -f "${bin}.new" "$bin"; then
+    rm -f -- "$candidate" "${bin}.new" "$backup"
+    xray_record_update replace-failed "$current" "$latest"
+    fail "Xray 替换失败，保留旧版"
+  fi
+  rm -f -- "$candidate"
+  if ((was_active)); then
+    systemctl restart xray || true
+    local i
+    for ((i = 1; i <= 8; i++)); do
+      sleep 1
+      if systemctl is-active --quiet xray; then
+        rm -f -- "$backup"
+        xray_record_update updated "$current" "$latest"
+        [[ $mode == auto ]] || ok "Xray 已更新: ${current} → ${latest}"
+        return 0
+      fi
+    done
+    install -m 755 "$backup" "$bin"
+    systemctl restart xray || true
+    rm -f -- "$backup"
+    xray_record_update rolled-back "$current" "$latest"
+    fail "新版 Xray 启动失败，已恢复 ${current}"
+  fi
+  rm -f -- "$backup"
+  xray_record_update updated "$current" "$latest"
+  [[ $mode == auto ]] || ok "Xray 已更新: ${current} → ${latest}"
+}
+
+update_proxy_cores() {
+  local mode=${1:-manual} found=0
+  mode=${mode#--}
+  if xray_binary_path >/dev/null 2>&1; then
+    update_xray_core "$mode"
+    found=1
+  fi
+  if [[ -x $HY2_BIN ]]; then
+    update_hy2_core "$mode"
+    found=1
+  fi
+  if ((found)) && [[ $mode == manual ]]; then
+    enable_proxy_auto_update
+    ok "代理核心每周自动更新已启用"
+  fi
+  ((found)) || { [[ $mode == auto ]] || warn "未找到可更新的 Xray/Hysteria2 核心"; }
+}
+
 xray_run_user() {
   local xu
   xu=$(systemctl show -p User --value xray 2>/dev/null || true)
@@ -1421,6 +1639,7 @@ install_reality() {
 
   build_xray_config
   restart_svc xray "Xray"
+  enable_proxy_auto_update
   open_port "$REALITY_PORT" tcp
 
   link="vless://${REALITY_UUID}@${ip}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${pub}&sid=${short}&type=tcp&headerType=none#Reality-${ip}"
@@ -1570,6 +1789,7 @@ install_cdn() {
 
   build_xray_config
   restart_svc xray "Xray"
+  enable_proxy_auto_update
   open_port "$CDN_PORT" tcp
 
   local link path_enc
@@ -1601,8 +1821,15 @@ hy2_version_of() {
 }
 
 hy2_latest_version() {
-  local data version
-  data=$(curl -fsSL --retry 3 --connect-timeout 10 --max-time 60 "$HY2_UPDATE_API") || return 1
+  local data version api=$HY2_UPDATE_API
+  if [[ $api != *'arch='* ]]; then
+    if [[ $api == *'?'* ]]; then
+      api="${api}&arch=$(hy2_arch)" || return 1
+    else
+      api="${api}?arch=$(hy2_arch)" || return 1
+    fi
+  fi
+  data=$(curl -fsSL --retry 3 --connect-timeout 10 --max-time 60 "$api") || return 1
   version=$(sed -nE 's/.*"lver"[[:space:]]*:[[:space:]]*"(v[0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' <<<"$data" | head -n1)
   [[ $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
   printf '%s\n' "$version"
@@ -1674,9 +1901,17 @@ update_hy2_core() {
     hy2_record_update verify-failed "$current" "$latest"
     fail "Hysteria2 下载或 SHA256 校验失败"
   fi
+  if ! hy2_validate_candidate "$candidate"; then
+    rm -f -- "$candidate" "$backup"
+    hy2_record_update invalid-candidate "$current" "$latest"
+    fail "Hysteria2 新版二进制无法运行，保留旧版"
+  fi
   systemctl is-active --quiet hysteria-server 2>/dev/null && was_active=1
-  install -m 755 "$candidate" "${HY2_BIN}.new"
-  mv -f "${HY2_BIN}.new" "$HY2_BIN"
+  if ! install -m 755 "$candidate" "${HY2_BIN}.new" || ! mv -f "${HY2_BIN}.new" "$HY2_BIN"; then
+    rm -f -- "$candidate" "${HY2_BIN}.new" "$backup"
+    hy2_record_update replace-failed "$current" "$latest"
+    fail "Hysteria2 替换失败，保留旧版"
+  fi
   rm -f -- "$candidate"
   if ((was_active)); then
     systemctl restart hysteria-server || true
@@ -1690,24 +1925,25 @@ update_hy2_core() {
     fi
   fi
   rm -f -- "$backup"
-  hy2_record_update updated "$latest" "$latest"
+  hy2_record_update updated "$current" "$latest"
   ok "Hysteria2 已更新: ${current} → ${latest}"
 }
 
 enable_hy2_auto_update() {
   cat >"$HY2_UPDATE_SERVICE" <<EOF
 [Unit]
-Description=syw-vps Hysteria2 stable update
+Description=syw-vps proxy core stable update
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash /usr/local/lib/syw-vps/proxy.sh update-hy2 --auto
+TimeoutStartSec=15min
+ExecStart=/bin/bash /usr/local/lib/syw-vps/proxy.sh update-cores --auto
 EOF
   cat >"$HY2_UPDATE_TIMER" <<'EOF'
 [Unit]
-Description=Weekly Hysteria2 stable update check
+Description=Weekly Xray and Hysteria2 stable update check
 
 [Timer]
 OnCalendar=Mon *-*-* 04:00:00
@@ -1721,6 +1957,10 @@ EOF
   chmod 644 "$HY2_UPDATE_SERVICE" "$HY2_UPDATE_TIMER"
   systemctl daemon-reload
   systemctl enable --now syw-hy2-update.timer >/dev/null
+}
+
+enable_proxy_auto_update() {
+  enable_hy2_auto_update
 }
 
 update_hy2_manual() {
@@ -2029,8 +2269,13 @@ uninstall_hy2() {
     run_verified_script "$HY2_INSTALLER_URL" "$HY2_INSTALLER_SHA256" --remove ||
       fail "Hysteria2 卸载器执行失败"
   fi
-  systemctl disable --now syw-hy2-update.timer 2>/dev/null || true
-  rm -f "$HY2_UPDATE_SERVICE" "$HY2_UPDATE_TIMER" "$HY2_UPDATE_STATE"
+  if xray_binary_path >/dev/null 2>&1; then
+    enable_proxy_auto_update
+  else
+    systemctl disable --now syw-hy2-update.timer 2>/dev/null || true
+    rm -f "$HY2_UPDATE_SERVICE" "$HY2_UPDATE_TIMER"
+  fi
+  rm -f "$HY2_UPDATE_STATE"
   systemctl disable hysteria-server 2>/dev/null || true
   rm -f "$HY2_INFO" "$HY2_CONFIG" "$HY2_STATE" "$HY2_DROPIN"
   rm -rf "$HY2_CERT_DIR"
@@ -2258,7 +2503,7 @@ main_menu() {
     print_banner
     ui_item 1 "安装代理"
     ui_item 2 "节点与状态"
-    ui_item 3 "更新 Hysteria2 核心"
+    ui_item 3 "更新代理核心"
     ui_item 4 "卸载" danger
     ui_gap
     ui_item 0 "返回" muted
@@ -2272,7 +2517,7 @@ main_menu() {
     case $c in
       1) menu_install ;;
       2) show_info; pause ;;
-      3) update_hy2_manual; pause ;;
+      3) update_proxy_cores manual; pause ;;
       4) menu_uninstall ;;
       0) return 0 ;;
       "") continue ;;
@@ -2311,6 +2556,15 @@ main() {
       if [[ ${1:-} == --auto ]]; then update_hy2_core --auto
       else update_hy2_manual
       fi
+      ;;
+    update-cores|update-proxy|update-all)
+      if [[ ${1:-} == --auto ]]; then update_proxy_cores --auto
+      else update_proxy_cores manual
+      fi
+      ;;
+    enable-auto-update|configure-auto-update)
+      require_root
+      enable_proxy_auto_update
       ;;
     cdn|cf|ws) install_cdn "$@" ;;
     show|status) show_info ;;
