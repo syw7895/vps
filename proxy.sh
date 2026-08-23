@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="vps-proxy"
-VERSION="1.7.2"
+VERSION="1.7.3"
 CONFIG_DIR="/root/proxy-info"
 BACKUP_DIR="${CONFIG_DIR}/backups"
 BACKUP_KEEP="${BACKUP_KEEP:-15}"
@@ -25,6 +25,7 @@ MANAGED_TAG_REALITY="vless-reality"
 MANAGED_TAG_CDN="vless-ws-tls"
 MANAGED_FILE_REALITY="50-vps-reality.json"
 MANAGED_FILE_CDN="51-vps-cdn.json"
+WS_IP_CERT_ID="ws-ip"
 HY2_CONFIG="/etc/hysteria/config.yaml"
 HY2_CERT_DIR="/etc/hysteria/certs"
 HY2_DROPIN="/etc/systemd/system/hysteria-server.service.d/10-vps-proxy-user.conf"
@@ -100,7 +101,7 @@ usage() {
   bash proxy.sh hy2  [参数]     安装/更新 Hysteria2（默认复用）
   bash proxy.sh update-hy2      立即检查/更新 Hysteria2 核心
   bash proxy.sh update-cores    检查/更新 Xray 与 Hysteria2 核心
-  bash proxy.sh ws   [参数]     安装/更新 VLESS+WS+TLS（直连）
+  bash proxy.sh ws   [参数]     安装/更新 VLESS+WS+TLS（域名或 IP 直连）
   bash proxy.sh show
   bash proxy.sh show --status-debug   排障：显示内部元数据提示
   bash proxy.sh uninstall-reality | uninstall-xray-core | uninstall-hy2 | uninstall-ws
@@ -110,8 +111,10 @@ usage() {
 
 REALITY:  --port --sni --target --uuid
 Hysteria2: --port --password --domain --masquerade
-WS+TLS:   --domain [--port|--random-port] --path --uuid --email
-          更新同域名且未指定 --port 时保持原端口；新装/重装未指定则随机。
+WS+TLS:   [--domain] [--port|--random-port] --path --uuid --email
+          有 --domain：Let's Encrypt 证书，用域名连接。
+          无 --domain：自签证书，分享链接用公网 IP（客户端需允许不安全证书）。
+          更新同一身份（同域名，或同为 IP 直连）且未指定 --port 时保持原端口。
           --random-port 强制换端口。
 
 环境变量可覆盖安装器 pin（见 README）。
@@ -452,7 +455,8 @@ random_ws_port() {
   random_free_port tcp
 }
 
-# 更新同域名：保持原端口。新装/重装（无旧节点）或 --random-port：由调用方随机。
+# 更新同一身份（同域名，或同为 IP 直连/两边都空）时保持原端口。
+# 新装/换身份或 --random-port：由调用方随机。
 ws_pick_port() {
   local want_domain=$1 old_domain=$2 old_port=$3 arg_port=$4 arg_random=$5
   if [[ $arg_random == 1 ]]; then
@@ -462,7 +466,7 @@ ws_pick_port() {
     printf '%s' "$arg_port"
     return 0
   fi
-  if [[ -n $old_domain && $old_domain == "$want_domain" && -n $old_port ]]; then
+  if [[ $old_domain == "$want_domain" && -n $old_port ]]; then
     printf '%s' "$old_port"
     return 0
   fi
@@ -1476,9 +1480,16 @@ xray_apply_perms() {
   chmod 640 "$path" 2>/dev/null || true
 }
 
+write_cdn_state() {
+  write_kv_file "$CDN_STATE" \
+    "CDN_PORT=${CDN_PORT}" "CDN_UUID=${CDN_UUID}" "CDN_DOMAIN=${CDN_DOMAIN}" \
+    "CDN_PATH=${CDN_PATH}" "CDN_CERT=${CDN_CERT}" "CDN_KEY=${CDN_KEY}" \
+    "CDN_SNI=${CDN_SNI}" "CDN_ADDR=${CDN_ADDR}"
+}
+
 migrate_ws_certs_if_needed() {
   [[ -f $CDN_STATE ]] || return 0
-  [[ -n ${CDN_DOMAIN:-} && -n ${CDN_CERT:-} && -f ${CDN_CERT:-} ]] || return 0
+  [[ -n ${CDN_CERT:-} && -f ${CDN_CERT:-} ]] || return 0
   case $CDN_CERT in
     /root/*|"${CONFIG_DIR}"/*) ;;
     *)
@@ -1486,18 +1497,37 @@ migrate_ws_certs_if_needed() {
       return 0
       ;;
   esac
-  local newdir cert key
-  newdir=$(xray_cert_dir "$CDN_DOMAIN")
+  local newdir cert key id
+  id=${CDN_DOMAIN:-$WS_IP_CERT_ID}
+  newdir=$(xray_cert_dir "$id")
   install -d -m 750 "$newdir"
   cert="$newdir/fullchain.pem"; key="$newdir/privkey.pem"
   cp -a "$CDN_CERT" "$cert"
   [[ -f ${CDN_KEY:-} ]] && cp -a "$CDN_KEY" "$key"
   fix_cert_permissions "$newdir" "$cert" "$key"
   CDN_CERT=$cert; CDN_KEY=$key
-  write_kv_file "$CDN_STATE" \
-    "CDN_PORT=${CDN_PORT}" "CDN_UUID=${CDN_UUID}" "CDN_DOMAIN=${CDN_DOMAIN}" \
-    "CDN_PATH=${CDN_PATH}" "CDN_CERT=${CDN_CERT}" "CDN_KEY=${CDN_KEY}"
+  write_cdn_state
   log "WS+TLS 证书已迁移: $newdir"
+}
+
+issue_selfsigned_ws_cert() {
+  local sni=$1 certdir
+  [[ -n $sni ]] || fail "自签证书需要 SNI"
+  certdir=$(xray_cert_dir "$WS_IP_CERT_ID")
+  install -d -m 750 "$certdir"
+  CDN_CERT="$certdir/fullchain.pem"
+  CDN_KEY="$certdir/privkey.pem"
+  if [[ -f $CDN_CERT && -f $CDN_KEY ]] &&
+     openssl x509 -in "$CDN_CERT" -checkend 86400 -checkhost "$sni" -noout >/dev/null 2>&1; then
+    log "复用已有自签证书"
+  else
+    openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
+      -keyout "$CDN_KEY" -out "$CDN_CERT" \
+      -days 3650 -subj "/CN=${sni}" -addext "subjectAltName=DNS:${sni}" >/dev/null 2>&1 ||
+      fail "生成自签证书失败"
+    log "已生成自签证书: $certdir"
+  fi
+  fix_cert_permissions "$certdir" "$CDN_CERT" "$CDN_KEY" || fail "证书权限修复失败: $certdir"
 }
 
 # 生成本管理 inbound JSON 对象（单行/多行均可）
@@ -1877,9 +1907,9 @@ install_reality() {
 
 # ---------- VLESS + WS + TLS ----------
 parse_cdn_args() {
-  CDN_PORT="${CDN_PORT:-}"; CDN_DOMAIN="${CDN_DOMAIN:-}"; CDN_PATH="${CDN_PATH:-}"
-  CDN_UUID="${CDN_UUID:-}"; CDN_EMAIL="${CDN_EMAIL:-}"
-  CDN_RANDOM_PORT="${CDN_RANDOM_PORT:-0}"
+  CDN_PORT=; CDN_DOMAIN=; CDN_PATH=
+  CDN_UUID=; CDN_EMAIL=; CDN_SNI=; CDN_ADDR=
+  CDN_RANDOM_PORT=0
   while [[ $# -gt 0 ]]; do
     case $1 in
       --port) require_arg "$1" "${2:-}"; CDN_PORT=$2; shift 2 ;;
@@ -1984,21 +2014,28 @@ issue_cert() {
 
 install_ws() {
   parse_cdn_args "$@"
-  [[ -n ${CDN_DOMAIN:-} ]] || fail "WS+TLS 需要 --domain"
   prepare_env
 
   local arg_port=$CDN_PORT arg_path=$CDN_PATH arg_uuid=$CDN_UUID
   local arg_random=$CDN_RANDOM_PORT
   local want_domain=$CDN_DOMAIN
-  local old_domain old_path old_uuid old_port
+  local old_domain old_path old_uuid old_port old_sni
+  local ip_mode=0 cert_id link path_enc addr
   old_domain=$(state_get "$CDN_STATE" CDN_DOMAIN)
   old_path=$(state_get "$CDN_STATE" CDN_PATH)
   old_uuid=$(state_get "$CDN_STATE" CDN_UUID)
   old_port=$(state_get "$CDN_STATE" CDN_PORT)
-  if [[ -n $old_domain && $old_domain == "$want_domain" ]]; then
+  old_sni=$(state_get "$CDN_STATE" CDN_SNI)
+  [[ -z $want_domain ]] && ip_mode=1
+  if [[ -f $CDN_STATE && $old_domain == "$want_domain" ]]; then
     [[ -n $arg_path ]] || CDN_PATH=$old_path
     [[ -n $arg_uuid ]] || CDN_UUID=$old_uuid
-    log "复用已有 WS+TLS 节点参数（同域名）"
+    if ((ip_mode)); then
+      [[ -n ${CDN_SNI:-} ]] || CDN_SNI=$old_sni
+      log "复用已有 WS+TLS 节点参数（IP 直连）"
+    else
+      log "复用已有 WS+TLS 节点参数（同域名）"
+    fi
   fi
 
   CDN_PORT=$(ws_pick_port "$want_domain" "$old_domain" "$old_port" "$arg_port" "$arg_random")
@@ -2008,15 +2045,27 @@ install_ws() {
   elif [[ -n $old_port && $CDN_PORT == "$old_port" && $arg_random != 1 && -z $arg_port ]]; then
     log "保持已有 TLS 端口: $CDN_PORT"
   fi
-  validate_domain "$CDN_DOMAIN"
   validate_port "$CDN_PORT"
   [[ -z ${CDN_UUID:-} ]] || validate_uuid "$CDN_UUID"
   [[ -n ${CDN_UUID:-} ]] || CDN_UUID=$(random_uuid)
   [[ -n ${CDN_PATH:-} ]] || CDN_PATH=$(random_path)
   [[ $CDN_PATH == /* ]] || CDN_PATH="/$CDN_PATH"
   validate_cdn_path "$CDN_PATH"
-  [[ -n ${CDN_EMAIL:-} ]] || CDN_EMAIL="admin@${CDN_DOMAIN}"
-  is_safe_token "$CDN_EMAIL" || fail "邮箱含非法字符"
+
+  if ((ip_mode)); then
+    [[ -n ${CDN_SNI:-} ]] || CDN_SNI=${SNI_PRESETS[RANDOM % ${#SNI_PRESETS[@]}]}
+    validate_domain "$CDN_SNI"
+    CDN_ADDR=$(resolve_public_ip)
+    cert_id=$WS_IP_CERT_ID
+    log "未指定域名，使用公网 IP 直连 + 自签 TLS"
+  else
+    validate_domain "$CDN_DOMAIN"
+    CDN_SNI=$CDN_DOMAIN
+    CDN_ADDR=$CDN_DOMAIN
+    cert_id=$CDN_DOMAIN
+    [[ -n ${CDN_EMAIL:-} ]] || CDN_EMAIL="admin@${CDN_DOMAIN}"
+    is_safe_token "$CDN_EMAIL" || fail "邮箱含非法字符"
+  fi
 
   ensure_port_available "$CDN_PORT" tcp xray "Xray/WS+TLS" \
     "$CDN_STATE" CDN_PORT "$REALITY_STATE" REALITY_PORT
@@ -2024,28 +2073,42 @@ install_ws() {
   xray_discover
   local -a xray_targets=()
   mapfile -t xray_targets < <(xray_backup_target_list)
-  backup_paths cdn "$CDN_STATE" "$CDN_INFO" "${xray_targets[@]}" "$(xray_cert_dir "$CDN_DOMAIN")"
+  backup_paths cdn "$CDN_STATE" "$CDN_INFO" "${xray_targets[@]}" "$(xray_cert_dir "$cert_id")"
 
-  issue_cert "$CDN_DOMAIN" "$CDN_EMAIL"
+  if ((ip_mode)); then
+    issue_selfsigned_ws_cert "$CDN_SNI"
+  else
+    issue_cert "$CDN_DOMAIN" "$CDN_EMAIL"
+  fi
 
-  write_kv_file "$CDN_STATE" \
-    "CDN_PORT=${CDN_PORT}" "CDN_UUID=${CDN_UUID}" "CDN_DOMAIN=${CDN_DOMAIN}" \
-    "CDN_PATH=${CDN_PATH}" "CDN_CERT=${CDN_CERT}" "CDN_KEY=${CDN_KEY}"
+  write_cdn_state
 
   build_xray_config
   restart_svc xray "Xray"
   enable_proxy_auto_update
   open_port "$CDN_PORT" tcp
 
-  local link path_enc
   path_enc=$(printf %s "$CDN_PATH" | sed 's|/|%2F|g')
-  link="vless://${CDN_UUID}@${CDN_DOMAIN}:${CDN_PORT}?encryption=none&security=tls&type=ws&host=${CDN_DOMAIN}&sni=${CDN_DOMAIN}&path=${path_enc}#WS-${CDN_DOMAIN}"
-  save_info "$CDN_INFO" \
-    "Xray VLESS + WS + TLS（直连）" "" \
-    "连接地址: ${CDN_DOMAIN}" "域名/SNI: ${CDN_DOMAIN}" "端口:   ${CDN_PORT}" "UUID:   ${CDN_UUID}" \
-    "传输:   WebSocket" "TLS:    开启" "Host:   ${CDN_DOMAIN}" "SNI:    ${CDN_DOMAIN}" "Path:   ${CDN_PATH}" \
-    "" "分享链接:" "${link}" "" "说明: 直连模式使用域名连接本机 WS+TLS。"
-  ok "VLESS + WS + TLS 节点安装完成（直连）"
+  addr=$CDN_ADDR
+  if ((ip_mode)); then
+    link="vless://${CDN_UUID}@${addr}:${CDN_PORT}?encryption=none&security=tls&type=ws&host=${CDN_SNI}&sni=${CDN_SNI}&allowInsecure=1&fp=chrome&path=${path_enc}#WS-IP"
+    save_info "$CDN_INFO" \
+      "Xray VLESS + WS + TLS（IP 直连）" "" \
+      "连接地址: ${addr}" "端口:   ${CDN_PORT}" "UUID:   ${CDN_UUID}" \
+      "传输:   WebSocket" "TLS:    自签（需允许不安全证书）" \
+      "Host/SNI: ${CDN_SNI}" "Path:   ${CDN_PATH}" \
+      "" "分享链接:" "${link}" "" \
+      "说明: 不用自己的域名；客户端填写 VPS IP，并开启允许不安全证书。"
+    ok "VLESS + WS + TLS 节点安装完成（IP 直连）"
+  else
+    link="vless://${CDN_UUID}@${CDN_DOMAIN}:${CDN_PORT}?encryption=none&security=tls&type=ws&host=${CDN_DOMAIN}&sni=${CDN_DOMAIN}&path=${path_enc}#WS-${CDN_DOMAIN}"
+    save_info "$CDN_INFO" \
+      "Xray VLESS + WS + TLS（直连）" "" \
+      "连接地址: ${CDN_DOMAIN}" "域名/SNI: ${CDN_DOMAIN}" "端口:   ${CDN_PORT}" "UUID:   ${CDN_UUID}" \
+      "传输:   WebSocket" "TLS:    开启" "Host:   ${CDN_DOMAIN}" "SNI:    ${CDN_DOMAIN}" "Path:   ${CDN_PATH}" \
+      "" "分享链接:" "${link}" "" "说明: 直连模式使用域名连接本机 WS+TLS。"
+    ok "VLESS + WS + TLS 节点安装完成（直连）"
+  fi
   print_block "节点信息" "$CDN_INFO"
 }
 
@@ -2554,6 +2617,8 @@ uninstall_ws() {
   if [[ -n $dom ]]; then
     validate_domain "$dom"
     certdir=$(xray_cert_dir "$dom")
+  else
+    certdir=$(xray_cert_dir "$WS_IP_CERT_ID")
   fi
   state_snap=$(uninstall_snapshot_file "$CDN_STATE") || fail "无法创建临时回滚快照"
   info_snap=$(uninstall_snapshot_file "$CDN_INFO") || { rm -f -- "$state_snap"; fail "无法创建临时回滚快照"; }
@@ -2669,8 +2734,7 @@ confirm_yes() {
 menu_install_ws() {
   local domain port path email random_port=0 cur_port=""
   # 域名不从旧配置预填，避免误用旧节点并在提示符中回显域名。
-  domain=$(prompt "域名（已解析到本机）" "")
-  [[ -n $domain ]] || { warn "域名不能为空"; sleep 1; return; }
+  domain=$(prompt "域名（空=IP 直连，自签证书）" "")
   if [[ $domain == "$(state_get "$CDN_STATE" CDN_DOMAIN)" ]]; then
     cur_port=$(state_get "$CDN_STATE" CDN_PORT)
   fi
@@ -2680,9 +2744,12 @@ menu_install_ws() {
     random_port=1
   fi
   path=$(prompt "WebSocket path（空=保持或随机）" "$(state_get "$CDN_STATE" CDN_PATH)")
-  email=$(prompt "证书邮箱" "admin@${domain}")
 
-  local args=(--domain "$domain" --email "$email")
+  local args=()
+  if [[ -n $domain ]]; then
+    email=$(prompt "证书邮箱" "admin@${domain}")
+    args+=(--domain "$domain" --email "$email")
+  fi
   (( random_port )) && args+=(--random-port)
   [[ -n $port ]] && args+=(--port "$port")
   [[ -n $path ]] && args+=(--path "$path")
