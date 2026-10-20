@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+. "${0%/*}/_common"
+rm -f "$STUB/user-${*: -1}"

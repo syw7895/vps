@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# 假 systemctl：用文件记录 enabled / active
+. "${0%/*}/_common"
+S=$STUB/systemd
+mkdir -p "$S"
+quiet=0 now=0 args=()
+for a in "$@"; do
+  case $a in
+    -q | --quiet) quiet=1 ;;
+    --now) now=1 ;;
+    --* | -*) ;;
+    *) args+=("$a") ;;
+  esac
+done
+cmd=${args[0]:-}
+unit=${args[1]:-}
+unit=${unit%.service}
+start() {
+  if [[ -f $STUB/fail-$1 ]]; then rm -f "$S/$1.active"; exit 1; fi
+  touch "$S/$1.active"
+}
+case $cmd in
+  enable) touch "$S/$unit.enabled"; if ((now)); then start "$unit"; fi ;;
+  disable) rm -f "$S/$unit.enabled"; if ((now)); then rm -f "$S/$unit.active"; fi ;;
+  start | restart) start "$unit" ;;
+  stop) rm -f "$S/$unit.active" ;;
+  is-active) [[ -f $S/$unit.active ]] || exit 3; ((quiet)) || echo active ;;
+  is-enabled) [[ -f $S/$unit.enabled ]] || exit 1; ((quiet)) || echo enabled ;;
+esac
+exit 0

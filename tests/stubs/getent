@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+. "${0%/*}/_common"
+[[ $1 == passwd && -f $STUB/user-$2 ]] && { echo "$2:x:999:999::/nonexistent:/usr/sbin/nologin"; exit 0; }
+exit 2

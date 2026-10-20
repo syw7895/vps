@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# 假 tc：每块网卡一个文件记录 root qdisc；删除后回到默认队列
+. "${0%/*}/_common"
+T=$STUB/tc
+mkdir -p "$T"
+[[ $1 == qdisc ]] || exit 0
+op=$2 dev=$4
+default=$(cat "$T/default" 2>/dev/null || echo fq_codel)
+case $op in
+  show) if [[ -f $T/$dev ]]; then cat "$T/$dev"; else echo "qdisc $default 0: root refcnt 2"; fi ;;
+  replace | add)
+    [[ -f $T/fail ]] && { echo "RTNETLINK answers: Operation not supported" >&2; exit 2; }
+    shift 5
+    handle=0:
+    if [[ ${1:-} == handle ]]; then handle=$2; shift 2; fi
+    kind=$1
+    shift
+    echo "qdisc $kind $handle root refcnt 2 $*" >"$T/$dev"
+    ;;
+  del) rm -f "$T/$dev" ;;
+esac

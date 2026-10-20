@@ -6,49 +6,17 @@ on:
   pull_request:
 
 jobs:
-  shell:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Syntax check
+      - name: 语法检查
         run: |
-          bash -n vps.sh proxy.sh traffic.sh
-          bash -n tests/*.sh
+          bash -n vps install.sh lib/*.sh tests/*.sh
 
-      - name: VPS menu tests
-        run: bash tests/vps-menu-test.sh
+      - name: ShellCheck
+        run: shellcheck -x vps install.sh
 
-      - name: Proxy menu tests
-        run: bash tests/proxy-menu-test.sh
-
-      - name: Traffic mock tests
-        run: bash tests/traffic-mock-test.sh
-
-      - name: Traffic menu tests
-        run: bash tests/traffic-menu-test.sh
-
-      - name: Menu UI tests
-        run: bash tests/menu-ui-test.sh
-
-      - name: Status UI tests
-        run: bash tests/status-ui-test.sh
-
-      - name: Integrity safety tests
-        run: bash tests/integrity-safety-test.sh
-
-      - name: Hysteria2 update tests
-        run: bash tests/hy2-update-test.sh
-
-      - name: Xray core update tests
-        run: bash tests/core-update-test.sh
-
-      - name: Entrypoint update tests
-        run: bash tests/entrypoint-update-test.sh
-
-      - name: ShellCheck (advisory)
-        continue-on-error: true
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck
-          shellcheck -x vps.sh proxy.sh traffic.sh || true
+      - name: 测试
+        run: bash tests/run.sh

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# 假 ip：只回答默认路由
+. "${0%/*}/_common"
+[[ -f $STUB/no-route ]] && exit 0
+if [[ " $* " == *" -4 "* && " $* " == *" default"* ]]; then
+  echo "default via 10.0.0.1 dev $(cat "$STUB/iface" 2>/dev/null || echo eth0) proto dhcp"
+fi

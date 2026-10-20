@@ -1,0 +1,5 @@
+# shellcheck shell=bash
+# 桩命令共用：状态目录与调用日志
+STUB=${VPS_ROOT:?}/.stub
+mkdir -p "$STUB"
+printf '%s %s\n' "${0##*/}" "$*" >>"$STUB/calls.log"
