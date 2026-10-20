@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# 假 sysctl：键值存在 $STUB/sysctl/
+. "${0%/*}/_common"
+D=$STUB/sysctl
+mkdir -p "$D"
+get() {
+  if [[ -f $D/$1 ]]; then cat "$D/$1"; return; fi
+  case $1 in
+    net.ipv4.tcp_congestion_control) echo cubic ;;
+    net.ipv4.tcp_available_congestion_control) cat "$STUB/cc-available" 2>/dev/null || echo "reno cubic bbr" ;;
+  esac
+}
+while (($#)); do
+  case $1 in
+    -n) get "$2"; shift ;;
+    -p)
+      while IFS='=' read -r k v; do
+        k=${k//[[:space:]]/}; v=${v#"${v%%[![:space:]]*}"}
+        [[ -z $k || $k == \#* ]] && continue
+        printf '%s\n' "$v" >"$D/$k"
+      done <"$2"
+      shift ;;
+    -w) printf '%s\n' "${2#*=}" >"$D/${2%%=*}"; shift ;;
+  esac
+  shift
+done

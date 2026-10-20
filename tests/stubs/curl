@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# 假 curl：URL → $STUB/net/<URL 转义名> 里的内容；redirect/<名> 模拟跳转
+. "${0%/*}/_common"
+args=("$@")
+out="" fmt="" url=""
+while (($#)); do
+  case $1 in
+    -o) out=$2; shift ;;
+    -w) fmt=$2; shift ;;
+    -H | --proto | --proto-redir | --retry | --connect-timeout | --max-time | -m) shift ;;
+    http://* | https://*) url=$1 ;;
+  esac
+  shift
+done
+key=$(printf '%s' "$url" | sed 's/[^A-Za-z0-9]/_/g')
+eff=$url
+[[ -f $STUB/redirect/$key ]] && eff=$(cat "$STUB/redirect/$key")
+body=$STUB/net/$key
+# 本机地址且没有准备假数据：交给真 curl（集成测试用）
+if [[ ! -f $body && $url == http://127.0.0.1:* ]]; then
+  PATH=${PATH#*/tests/stubs:} exec curl "${args[@]}"
+fi
+if [[ ! -f $body ]]; then
+  [[ -f $STUB/redirect/$key ]] || { echo "curl: (22) 404 $url" >&2; exit 22; }
+  body=/dev/null
+fi
+if [[ -n $out && $out != /dev/null ]]; then cp "$body" "$out"
+elif [[ -z $out ]]; then cat "$body"; fi
+if [[ -n $fmt ]]; then printf '%s' "${fmt//%\{url_effective\}/$eff}"; fi
+if [[ $url == *clear=1* ]]; then rm -f "$STUB/net/$key"; fi
+exit 0

@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# vps：VPS 代理节点（REALITY / VLESS-WS / Hysteria2）与流量限额管理
+set -euo pipefail
+
+VPS_HOME=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+# shellcheck source=lib/common.sh
+source "$VPS_HOME/lib/common.sh"
+# shellcheck source=lib/core.sh
+source "$VPS_HOME/lib/core.sh"
+# shellcheck source=lib/node.sh
+source "$VPS_HOME/lib/node.sh"
+# shellcheck source=lib/traffic.sh
+source "$VPS_HOME/lib/traffic.sh"
+# shellcheck source=lib/system.sh
+source "$VPS_HOME/lib/system.sh"
+# shellcheck source=lib/menu.sh
+source "$VPS_HOME/lib/menu.sh"
+
+usage() {
+  cat <<'EOF'
+
+  vps                         打开菜单
+
+  节点
+    vps add reality [--port N|random] [--sni 域名]
+    vps add ws [--domain 域名 [--email 邮箱] | --no-domain] [--port N|random] [--path /路径]
+    vps add hy2 [--port N|random] [--sni 域名] [--masq 网址]
+    vps show [节点]           查看参数和分享链接
+    vps port <节点> <N|random> 换端口
+    vps reset <节点>          重置密码 / UUID（旧链接失效）
+    vps del <节点>            删除节点
+    vps start|stop|restart [xray|hy2]
+    vps status                节点概览
+    vps log [xray|hy2]        查看日志
+    节点名：reality / ws / hy2（不填 --port 时自动选，已有节点保持原值）
+
+  流量
+    vps traffic               查看本期用量
+    vps traffic set --quota GB [--percent 90] [--rate 1] [--count tx|rx|both]
+                    [--reset-day 1] [--iface auto|网卡] [--used GB]
+    vps traffic limit on|off  开启 / 关闭自动限速（关闭后只统计）
+    vps traffic unlimit       本期解除限速
+    vps traffic remove        删除流量限额
+
+  系统
+    vps bbr [on|off]
+    vps block [cn|ads] [on|off]   屏蔽回国 IP/域名、广告域名
+    vps host [IP|域名|auto]       分享链接里的服务器地址
+    vps autoupdate [on|off]       每周自动更新
+    vps update                    立即更新脚本、内核和规则
+    vps uninstall                 全部卸载
+    vps version
+
+EOF
+}
+
+cleanup() {
+  if [[ -n ${NODE_SNAP:-} ]]; then rm -rf "$NODE_SNAP"; fi
+}
+trap cleanup EXIT
+
+cmd_traffic() {
+  local sub=${1:-status}
+  shift || true
+  case $sub in
+    status) traffic_status ;;
+    set) lock; traffic_set "$@" ;;
+    limit) lock; traffic_limit_toggle "${1:-}" ;;
+    unlimit) lock; traffic_unlimit ;;
+    remove) lock; traffic_remove ;;
+    check) lock; traffic_check; traffic_status ;;
+    *) die "未知命令: traffic $sub（vps help 查看用法）" ;;
+  esac
+}
+
+cmd_menu() {
+  # 通过管道启动时（curl | bash）改从终端读键盘
+  if [[ ! -t 0 && ${VPS_TEST:-0} != 1 ]] && { : </dev/tty; } 2>/dev/null; then
+    exec </dev/tty
+  fi
+  menu_main
+}
+
+main() {
+  local cmd=${1:-menu}
+  shift || true
+  case $cmd in
+    help | -h | --help) usage; return 0 ;;
+    version | -v | --version)
+      local ref
+      ref=$(installed_ref)
+      echo "vps $VPS_VERSION${ref:+ (${ref:0:7})}"
+      return 0
+      ;;
+  esac
+  need_root
+  case $cmd in
+    menu) cmd_menu ;;
+    add) lock; node_add "$@" ;;
+    show | list | ls) node_show "${1:-}" ;;
+    port) lock; node_port "${1:-}" "${2:-}" ;;
+    reset) lock; node_reset "${1:-}" ;;
+    del | rm | remove) lock; node_del "${1:-}" ;;
+    start | stop | restart) lock; svc_cmd "$cmd" "${1:-}" ;;
+    status)
+      node_summary
+      printf '\n  流量       %s\n' "$(traffic_brief)"
+      ;;
+    log | logs) svc_cmd log "${1:-}" ;;
+    traffic) cmd_traffic "$@" ;;
+    bbr) lock; bbr_set "${1:-}" ;;
+    block) lock; block_set "${1:-}" "${2:-}" ;;
+    host) lock; host_set "${1:-}" ;;
+    autoupdate) lock; autoupdate_set "${1:-}" ;;
+    update) lock; cmd_update "$@" ;;
+    uninstall) lock; cmd_uninstall "${1:-}" ;;
+    _tick) cmd_tick ;;
+    _certhook) cmd_certhook ;;
+    _install) cmd_install_from "$@" ;;
+    _post-install) cmd_post_install ;;
+    *) die "未知命令: $cmd（vps help 查看用法）" ;;
+  esac
+}
+
+main "$@"

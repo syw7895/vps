@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# 假 certbot：certonly 生成自签证书到 letsencrypt/live/<域名>
+. "${0%/*}/_common"
+LIVE=$VPS_ROOT/etc/letsencrypt/live
+case $1 in
+  certonly)
+    [[ -f $STUB/certbot-fail ]] && { echo "Challenge failed for domain"; exit 1; }
+    d=""
+    while (($#)); do [[ $1 == -d ]] && d=$2; shift; done
+    mkdir -p "$LIVE/$d"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 90 -subj "/CN=$d" \
+      -keyout "$LIVE/$d/privkey.pem" -out "$LIVE/$d/fullchain.pem" >/dev/null 2>&1
+    ;;
+  delete)
+    while (($#)); do [[ $1 == --cert-name ]] && rm -rf "${LIVE:?}/$2"; shift; done
+    ;;
+esac

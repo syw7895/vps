@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+. "${0%/*}/_common"
+exit 0

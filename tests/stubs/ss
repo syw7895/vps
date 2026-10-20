@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# 假 ss：busy-tcp / busy-udp 文件里列出的端口视为已占用
+. "${0%/*}/_common"
+proto=tcp
+[[ $1 == *u* ]] && proto=udp
+port=${*: -1}
+port=${port##*:}
+if grep -qx "$port" "$STUB/busy-$proto" 2>/dev/null; then
+  echo "LISTEN 0 4096 0.0.0.0:$port 0.0.0.0:*"
+fi

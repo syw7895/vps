@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+. "${0%/*}/_common"
+if [[ $1 == status ]]; then
+  if [[ -f $STUB/ufw-active ]]; then echo "Status: active"; else echo "Status: inactive"; fi
+fi
