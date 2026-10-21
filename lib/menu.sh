@@ -302,20 +302,19 @@ menu_traffic_set() {
 onoff() { if [[ $1 == 1 ]]; then printf '%s已开启%s' "$CG" "$C0"; else printf '%s已关闭%s' "$CD" "$C0"; fi; }
 
 menu_system() {
-  local act bbr host
+  local act host
   while true; do
     menu_head 系统设置
-    if bbr_enabled; then bbr=1; else bbr=0; fi
     host=$(setting HOST)
     menu_pick act \
-      "bbr|$(pad "BBR 加速" 20)$(onoff "$bbr")" \
+      "net|$(pad "网络加速" 20)$(net_brief)" \
       "cn|$(pad "屏蔽回国 IP / 域名" 20)$(onoff "$(setting BLOCK_CN 0)")" \
       "ads|$(pad "屏蔽广告域名" 20)$(onoff "$(setting BLOCK_ADS 0)")" \
       "auto|$(pad "每周自动更新" 20)$(onoff "$(setting AUTO_UPDATE 1)")" \
       "host|$(pad "分享地址" 20)${host:-自动检测}" \
       "uninstall|卸载全部|danger" || return 1
     case $act in
-      bbr) if ((bbr)); then run bbr_set off; else run bbr_set on; fi; pause ;;
+      net) menu_net || return 1 ;;
       cn | ads)
         if [[ $(setting "$(block_key "$act")" 0) == 1 ]]; then run block_set "$act" off; else run block_set "$act" on; fi
         pause
@@ -336,4 +335,53 @@ menu_system() {
       back) return 0 ;;
     esac
   done
+}
+
+menu_net() {
+  local act tune
+  while true; do
+    menu_head 网络加速
+    net_status
+    printf '\n'
+    if net_tuned; then tune="tune|关闭线路调优"; else tune="tune|开启线路调优（加大 TCP 缓冲区，适合跨国高延迟线路）"; fi
+    menu_pick act "recommend|一键推荐（BBR + fq + 线路调优）" "cc|选择拥塞算法" "qdisc|选择队列算法" \
+      "$tune" "reset|全部恢复系统默认" || return 1
+    case $act in
+      recommend) run net_cmd recommend; pause ;;
+      cc) menu_net_pick cc || return 1 ;;
+      qdisc) menu_net_pick qdisc || return 1 ;;
+      tune) if net_tuned; then run net_set_tune off; else run net_set_tune on; fi; pause ;;
+      reset) run net_cmd reset; pause ;;
+      back) return 0 ;;
+    esac
+  done
+}
+
+# menu_net_pick cc|qdisc：列出可选项和说明，选中后应用
+menu_net_pick() {
+  local what=$1 act x key title cur desc list=() items=()
+  if [[ $what == cc ]]; then
+    title=拥塞算法 key=net.ipv4.tcp_congestion_control
+    mapfile -t list < <(cc_list)
+  else
+    title=队列算法 key=net.core.default_qdisc
+    list=("${NET_QDISCS[@]}")
+  fi
+  cur=$(sysctl -n "$key" 2>/dev/null || true)
+  menu_head "$title"
+  note "当前：$cur（$(net_origin "$key")）"
+  printf '\n'
+  for x in "${list[@]}"; do
+    if [[ $what == cc ]]; then desc=$(cc_desc "$x"); else desc=$(qdisc_desc "$x"); fi
+    if [[ $x == "$cur" ]]; then
+      items+=("$x|$CG$(pad "$x" 12)$C0$CD$desc$C0  $CG● 当前$C0")
+    else
+      items+=("$x|$(pad "$x" 12)$CD$desc$C0")
+    fi
+  done
+  items+=("default|恢复系统默认")
+  menu_pick act "${items[@]}" || return 1
+  if [[ $act == back ]]; then return 0; fi
+  if [[ $what == cc ]]; then run net_set_cc "$act"; else run net_set_qdisc "$act"; fi
+  pause
 }
