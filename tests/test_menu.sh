@@ -70,10 +70,18 @@ check "删除流量限额" test ! -e "$VPS_ROOT/etc/vps/traffic.env"
 
 echo "== 系统菜单"
 setup
-vps_in '3\n1\n\n0\n0\n'
-check "开启 BBR" test -e "$VPS_ROOT/etc/sysctl.d/90-vps-bbr.conf"
-vps_in '3\n1\n\n0\n0\n'
-check "再次选择关闭 BBR" test ! -e "$VPS_ROOT/etc/sysctl.d/90-vps-bbr.conf"
+vps_in '3\n1\n1\n\n0\n0\n0\n'
+check "网络加速一键推荐" file_has "$VPS_ROOT/etc/sysctl.d/99-zz-vps-net.conf" "net.ipv4.tcp_congestion_control = bbr"
+check "系统菜单显示网络概览" has "$OUT" "bbr · fq · 已调优"
+vps_in '3\n1\n3\n2\n\n0\n0\n0\n'
+check "菜单选队列算法" [ "$(state "$VPS_ROOT/etc/vps/settings.env" NET_QDISC)" = fq_codel ]
+check "队列选项带说明" has "$OUT" "BBR 推荐搭配"
+vps_in '3\n1\n2\n0\n0\n0\n0\n'
+check "拥塞算法列表 bbr 在第一个" has "$OUT" " 1  bbr"
+vps_in '3\n1\n4\n\n0\n0\n0\n'
+check "菜单关闭线路调优" [ "$(state "$VPS_ROOT/etc/vps/settings.env" NET_TUNE)" = 0 ]
+vps_in '3\n1\n5\n\n0\n0\n0\n'
+check "菜单全部恢复默认" test ! -e "$VPS_ROOT/etc/sysctl.d/99-zz-vps-net.conf"
 vps_in '3\n5\n198.51.100.7\n\n0\n0\n'
 check "设置分享地址" [ "$(state "$VPS_ROOT/etc/vps/settings.env" HOST)" = 198.51.100.7 ]
 check "菜单显示分享地址" has "$OUT" "198.51.100.7"

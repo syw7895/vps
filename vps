@@ -43,7 +43,13 @@ usage() {
     vps traffic remove        删除流量限额
 
   系统
-    vps bbr [on|off]
+    vps net                       网络加速：查看拥塞算法 / 队列 / 线路调优
+    vps net recommend             一键推荐（BBR + fq + 线路调优）
+    vps net cc <算法|default>     拥塞算法，如 bbr / cubic
+    vps net qdisc <fq|fq_codel|cake|default>
+    vps net tune on|off           线路调优（加大 TCP 缓冲区等，适合跨国高延迟线路）
+    vps net reset                 网络设置全部恢复系统默认
+    vps bbr [on|off]              同 vps net cc bbr + qdisc fq
     vps block [cn|ads] [on|off]   屏蔽回国 IP/域名、广告域名
     vps host [IP|域名|auto]       分享链接里的服务器地址
     vps autoupdate [on|off]       每周自动更新
@@ -110,6 +116,7 @@ main() {
     log | logs) svc_cmd log "${1:-}" ;;
     traffic) cmd_traffic "$@" ;;
     bbr) lock; bbr_set "${1:-}" ;;
+    net) lock; net_cmd "$@" ;;
     block) lock; block_set "${1:-}" "${2:-}" ;;
     host) lock; host_set "${1:-}" ;;
     autoupdate) lock; autoupdate_set "${1:-}" ;;

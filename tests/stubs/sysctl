@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 假 sysctl：键值存在 $STUB/sysctl/
+# 假 sysctl：键值存在 $STUB/sysctl/；--system 按文件名顺序应用 etc/sysctl.d 下的文件
 . "${0%/*}/_common"
 D=$STUB/sysctl
 mkdir -p "$D"
@@ -8,19 +8,39 @@ get() {
   case $1 in
     net.ipv4.tcp_congestion_control) echo cubic ;;
     net.ipv4.tcp_available_congestion_control) cat "$STUB/cc-available" 2>/dev/null || echo "reno cubic bbr" ;;
+    net.core.default_qdisc) echo fq_codel ;;
+    net.core.rmem_max | net.core.wmem_max) echo 212992 ;;
   esac
+}
+put() {
+  # $STUB/qdisc-unsupported 里列出的队列视为内核不支持
+  if [[ $1 == net.core.default_qdisc ]] && grep -qx "$2" "$STUB/qdisc-unsupported" 2>/dev/null; then
+    echo "sysctl: setting key \"$1\": No such file or directory" >&2
+    exit 255
+  fi
+  printf '%s\n' "$2" >"$D/$1"
+}
+apply() {
+  local k v
+  while IFS='=' read -r k v; do
+    k=${k//[[:space:]]/}
+    v=${v#"${v%%[![:space:]]*}"}
+    [[ -z $k || $k == \#* ]] && continue
+    put "$k" "$v"
+  done <"$1"
 }
 while (($#)); do
   case $1 in
     -n) get "$2"; shift ;;
-    -p)
-      while IFS='=' read -r k v; do
-        k=${k//[[:space:]]/}; v=${v#"${v%%[![:space:]]*}"}
-        [[ -z $k || $k == \#* ]] && continue
-        printf '%s\n' "$v" >"$D/$k"
-      done <"$2"
-      shift ;;
-    -w) printf '%s\n' "${2#*=}" >"$D/${2%%=*}"; shift ;;
+    -p) apply "$2"; shift ;;
+    -w) put "${2%%=*}" "${2#*=}"; shift ;;
+    --system)
+      for f in "$VPS_ROOT"/etc/sysctl.d/*.conf; do
+        [[ -f $f ]] && apply "$f"
+      done
+      ;;
+    -*) ;;
+    *) printf '%s = %s\n' "$1" "$(get "$1")" ;;
   esac
   shift
 done
