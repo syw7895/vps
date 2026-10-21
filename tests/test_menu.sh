@@ -78,6 +78,7 @@ check "菜单选队列算法" [ "$(state "$VPS_ROOT/etc/vps/settings.env" NET_QD
 check "队列选项带说明" has "$OUT" "BBR 推荐搭配"
 vps_in '3\n1\n2\n0\n0\n0\n0\n'
 check "拥塞算法列表 bbr 在第一个" has "$OUT" " 1  bbr"
+check "标出当前算法" has "$OUT" "● 当前"
 vps_in '3\n1\n4\n\n0\n0\n0\n'
 check "菜单关闭线路调优" [ "$(state "$VPS_ROOT/etc/vps/settings.env" NET_TUNE)" = 0 ]
 vps_in '3\n1\n5\n\n0\n0\n0\n'

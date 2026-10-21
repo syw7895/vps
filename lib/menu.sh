@@ -359,7 +359,7 @@ menu_net() {
 
 # menu_net_pick cc|qdisc：列出可选项和说明，选中后应用
 menu_net_pick() {
-  local what=$1 act x key title list=() items=()
+  local what=$1 act x key title cur desc list=() items=()
   if [[ $what == cc ]]; then
     title=拥塞算法 key=net.ipv4.tcp_congestion_control
     mapfile -t list < <(cc_list)
@@ -367,14 +367,16 @@ menu_net_pick() {
     title=队列算法 key=net.core.default_qdisc
     list=("${NET_QDISCS[@]}")
   fi
+  cur=$(sysctl -n "$key" 2>/dev/null || true)
   menu_head "$title"
-  note "当前：$(sysctl -n "$key" 2>/dev/null)（$(net_origin "$key")）"
+  note "当前：$cur（$(net_origin "$key")）"
   printf '\n'
   for x in "${list[@]}"; do
-    if [[ $what == cc ]]; then
-      items+=("$x|$(pad "$x" 12)$CD$(cc_desc "$x")$C0")
+    if [[ $what == cc ]]; then desc=$(cc_desc "$x"); else desc=$(qdisc_desc "$x"); fi
+    if [[ $x == "$cur" ]]; then
+      items+=("$x|$CG$(pad "$x" 12)$C0$CD$desc$C0  $CG● 当前$C0")
     else
-      items+=("$x|$(pad "$x" 12)$CD$(qdisc_desc "$x")$C0")
+      items+=("$x|$(pad "$x" 12)$CD$desc$C0")
     fi
   done
   items+=("default|恢复系统默认")

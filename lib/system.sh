@@ -21,7 +21,10 @@ cc_desc() {
     hybla) echo "为高延迟链路设计" ;;
     westwood) echo "适合无线 / 随机丢包" ;;
     htcp | illinois | highspeed | scalable | yeah) echo "高带宽长距离链路" ;;
-    vegas | veno | bic | reno) echo "" ;;
+    veno) echo "适合无线链路" ;;
+    vegas) echo "按延迟调速，和其他算法抢带宽时吃亏" ;;
+    bic) echo "cubic 的前身" ;;
+    reno) echo "最早的经典算法" ;;
   esac
 }
 
