@@ -130,7 +130,7 @@ check "删除 Hysteria2 服务" test ! -e "$VPS_ROOT/etc/systemd/system/vps-hy2.
 echo "== 失败回滚"
 setup
 release_xray v25.9.11
-vps add reality --sni www.microsoft.com
+vps add reality --sni www.nvidia.com
 port=$(node_val reality PORT)
 touch "$VPS_ROOT/.stub/fail-vps-xray"
 vps port reality 2096

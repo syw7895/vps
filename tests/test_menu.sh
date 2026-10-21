@@ -10,6 +10,7 @@ check "标题" has "$OUT" "VPS 管理"
 check "节点状态行" has "$OUT" "还没有节点"
 check "流量状态行" has "$OUT" "未设置额度"
 check "四个入口" bash -c '[[ $0 == *"节点管理"*"流量限额"*"系统设置"*"立即更新"* ]]' "$OUT"
+check "主菜单 0 是退出" has "$OUT" " 0  退出"
 vps_in ''
 check "输入结束时退出" rc_is 0
 vps_in '9\nabc\n0\n'
@@ -20,11 +21,12 @@ echo "== 添加节点"
 setup
 release_xray v25.9.11
 vps_in '1\n1\n\n\n\n0\n0\n'
-check "菜单添加 REALITY" [ "$(node_val reality SNI)" = www.microsoft.com ]
+check "菜单添加 REALITY" [ "$(node_val reality SNI)" = www.nvidia.com ]
 check "显示分享链接" has "$OUT" "vless://"
+check "子菜单 0 是返回" has "$OUT" " 0  返回"
 check "添加后菜单显示修改" has "$OUT" "修改 REALITY"
 vps_in '1\n1\n\n3\n\n0\n0\n'
-check "按序号选 SNI" [ "$(node_val reality SNI)" = www.amazon.com ]
+check "按序号选 SNI" [ "$(node_val reality SNI)" = www.tesla.com ]
 vps_in '1\n1\n\nwww.example.org\n\n0\n0\n'
 check "直接输入 SNI" [ "$(node_val reality SNI)" = www.example.org ]
 vps_in '1\n2\n\n\n\n\n0\n0\n'
