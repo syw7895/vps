@@ -21,7 +21,7 @@ cc_desc() {
     hybla) echo "为高延迟链路设计" ;;
     westwood) echo "适合无线 / 随机丢包" ;;
     htcp | illinois | highspeed | scalable | yeah) echo "高带宽长距离链路" ;;
-    vegas | veno | nv | lp | cdg | dctcp | bic | reno) echo "" ;;
+    vegas | veno | bic | reno) echo "" ;;
   esac
 }
 
@@ -34,6 +34,7 @@ qdisc_desc() {
 }
 
 # 内核里能用的拥塞算法：已加载的 + 能加载的模块
+# 不列出只适合数据中心或后台传输的（dctcp / lp / cdg / nv），命令行仍可直接指定
 cc_list() {
   local f n
   {
@@ -44,7 +45,8 @@ cc_list() {
       n=${n%%.ko*}
       [[ $n == diag ]] || echo "$n"
     done
-  } | awk 'NF' | sort -u | awk '$0 == "bbr" {print; next} {rest = rest $0 "\n"} END {printf "%s", rest}'
+  } | awk 'NF && $0 !~ /^(dctcp|lp|cdg|nv)$/' | sort -u |
+    awk '$0 == "bbr" {print; next} {rest = rest $0 "\n"} END {printf "%s", rest}'
 }
 
 net_buf_max() {

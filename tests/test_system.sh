@@ -112,6 +112,10 @@ check "查看" rc_is 0
 check "显示拥塞算法" has "$OUT" "拥塞算法  cubic"
 check "显示来源" has "$OUT" "内核默认"
 check "列出可用算法（bbr 在前）" has "$OUT" "可用拥塞算法：bbr cubic reno"
+echo "reno cubic bbr dctcp" >"$VPS_ROOT/.stub/cc-available"
+vps net
+check "不列出数据中心算法" lacks "$OUT" "dctcp"
+rm -f "$VPS_ROOT/.stub/cc-available"
 vps net cc hybla
 check "不支持的算法" has "$OUT" "不支持 hybla"
 vps net cc 'bad;name'
