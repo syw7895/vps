@@ -1,10 +1,10 @@
 # shellcheck shell=bash
 # 交互菜单
 
+# menu_head 标题 [右侧小字]：清屏后画标题栏
 menu_head() {
-  printf '\n  %s%s%s%s' "$C1" "$CC" "$1" "$C0"
-  if [[ -n ${2:-} ]]; then printf '  %s%s%s' "$CD" "$2" "$C0"; fi
-  printf '\n'
+  printf '%s' "$CLS"
+  title_bar "$@"
 }
 
 pause() {
@@ -21,7 +21,7 @@ run() {
 }
 
 # menu_pick 结果变量 "动作|文字[|danger]" ...
-# 打印编号菜单并读取选择；0 → back，无效 → 空；读到输入结束返回 1
+# 打印编号菜单并读取选择；0 → back，无效输入原地重问；读到输入结束返回 1
 # 0 的文字默认“返回”，可用 PICK_ZERO 改
 menu_pick() {
   local -n __pick=$1
@@ -38,19 +38,21 @@ menu_pick() {
     fi
     __i=$((__i + 1))
   done
-  printf '  %s%2s  %s%s\n' "$CD" 0 "${PICK_ZERO:-返回}" "$C0"
-  printf '\n  请选择: '
-  IFS= read -r __in || return 1
-  __in=${__in//[[:space:]]/}
-  __pick=""
-  if [[ $__in == 0 ]]; then
-    __pick=back
-  elif [[ $__in =~ ^[0-9]+$ ]] && ((__in >= 1 && __in <= ${#__acts[@]})); then
-    __pick=${__acts[__in - 1]}
-  elif [[ -n $__in ]]; then
-    warn "无效选项"
-  fi
-  return 0
+  printf '\n  %s%2s  %s%s\n\n' "$CD" 0 "${PICK_ZERO:-返回}" "$C0"
+  while true; do
+    printf '  请选择: '
+    IFS= read -r __in || return 1
+    __in=${__in//[[:space:]]/}
+    if [[ $__in == 0 ]]; then
+      __pick=back
+      return 0
+    elif [[ $__in =~ ^[0-9]+$ ]] && ((__in >= 1 && __in <= ${#__acts[@]})); then
+      __pick=${__acts[__in - 1]}
+      return 0
+    elif [[ -n $__in ]]; then
+      warn "无效选项"
+    fi
+  done
 }
 
 # 选择一个已有节点（只有一个时直接返回它）
@@ -69,14 +71,18 @@ pick_node() {
   for i in "${!nodes[@]}"; do
     printf '  %s%2s%s  %s\n' "$CC" $((i + 1)) "$C0" "$(node_label "${nodes[i]}")" >&2
   done
-  printf '\n  选择节点: ' >&2
-  IFS= read -r c || return 1
-  if [[ $c =~ ^[0-9]+$ ]] && ((c >= 1 && c <= ${#nodes[@]})); then
-    echo "${nodes[c - 1]}"
-  else
+  printf '\n' >&2
+  while true; do
+    printf '  选择节点（0 取消）: ' >&2
+    IFS= read -r c || return 1
+    c=${c//[[:space:]]/}
+    if [[ -z $c || $c == 0 ]]; then return 1; fi
+    if [[ $c =~ ^[0-9]+$ ]] && ((c >= 1 && c <= ${#nodes[@]})); then
+      echo "${nodes[c - 1]}"
+      return 0
+    fi
     warn "无效选项"
-    return 1
-  fi
+  done
 }
 
 nodes_brief() {
@@ -100,8 +106,8 @@ menu_main() {
   ref=$(installed_ref)
   while true; do
     menu_head "VPS 管理" "v$VPS_VERSION${ref:+ (${ref:0:7})}"
-    printf '  节点  %s\n' "$(nodes_brief)"
-    printf '  流量  %s\n\n' "$(traffic_brief)"
+    printf '  %s节点%s  %s\n' "$CD" "$C0" "$(nodes_brief)"
+    printf '  %s流量%s  %s\n\n' "$CD" "$C0" "$(traffic_brief)"
     PICK_ZERO=退出 menu_pick act "nodes|节点管理" "traffic|流量限额" "system|系统设置" \
       "update|立即更新（脚本 / 内核 / 规则）" || return 0
     case $act in
@@ -128,7 +134,6 @@ menu_nodes() {
   local act n port
   while true; do
     menu_head 节点管理
-    printf '\n'
     node_summary
     printf '\n'
     menu_pick act "reality|$(add_label reality)" "ws|$(add_label ws)" "hy2|$(add_label hy2)" \
@@ -228,7 +233,6 @@ menu_service() {
   local act
   while true; do
     menu_head "启动 / 停止 / 重启 / 日志"
-    printf '\n'
     node_summary
     printf '\n'
     menu_pick act "restart|重启" "stop|停止" "start|启动" "log|查看日志" || return 1
@@ -244,6 +248,7 @@ menu_service() {
 menu_traffic() {
   local act limited items=()
   while true; do
+    printf '%s' "$CLS"
     traffic_status
     items=()
     if traffic_configured; then
@@ -300,7 +305,6 @@ menu_system() {
   local act bbr host
   while true; do
     menu_head 系统设置
-    printf '\n'
     if bbr_enabled; then bbr=1; else bbr=0; fi
     host=$(setting HOST)
     menu_pick act \

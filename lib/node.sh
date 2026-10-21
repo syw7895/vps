@@ -793,15 +793,16 @@ node_state() {
   fi
 }
 
-kv_line() { printf '  %s%s%s %s\n' "$CD" "$(pad "$1" 8)" "$C0" "$2"; }
+kv_line() { printf '  %s%s%s%s\n' "$CD" "$(pad "$1" 10)" "$C0" "$2"; }
 
 node_card() {
   local node=$1 host up down
   local -A N
   kv_load "$(node_file "$node")" N
   host=$(share_host)
-  printf '\n  %s%s%s  %s  %s/%s\n' "$C1" "$(node_label "$node")" "$C0" "$(node_state "$node")" \
+  printf '\n  %s%s%s%s  %s  %s/%s\n' "$C1" "$CC" "$(node_label "$node")" "$C0" "$(node_state "$node")" \
     "${N[PORT]}" "$(node_proto "$node")"
+  rule
   case $node in
     reality)
       kv_line 地址 "$host"
@@ -830,7 +831,7 @@ node_card() {
   esac
   read -r up down < <(stats_get "$node")
   kv_line 本期流量 "↑ $(human "$up")  ↓ $(human "$down")"
-  printf '\n  %s\n' "$(node_link "$node")"
+  printf '\n  %s分享链接（整段复制到客户端导入）%s\n  %s\n' "$CD" "$C0" "$(node_link "$node")"
 }
 
 node_show() {
@@ -855,7 +856,7 @@ node_summary() {
   for n in "${NODE_TYPES[@]}"; do
     if node_exists "$n"; then
       read -r up down < <(stats_get "$n")
-      printf '  %-10s %s  %-11s %s↑ %s  ↓ %s%s\n' "$(node_label "$n")" "$(node_state "$n")" \
+      printf '  %-10s %s  %-11s %s↑ %-9s  ↓ %s%s\n' "$(node_label "$n")" "$(node_state "$n")" \
         "$(kv_get "$(node_file "$n")" PORT)/$(node_proto "$n")" "$CD" "$(human "$up")" "$(human "$down")" "$C0"
     else
       printf '  %-10s %s- 未添加%s\n' "$(node_label "$n")" "$CD" "$C0"

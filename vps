@@ -103,8 +103,9 @@ main() {
     del | rm | remove) lock; node_del "${1:-}" ;;
     start | stop | restart) lock; svc_cmd "$cmd" "${1:-}" ;;
     status)
+      printf '\n'
       node_summary
-      printf '\n  流量       %s\n' "$(traffic_brief)"
+      printf '\n  %s%s%s %s\n\n' "$CD" "$(pad 流量 10)" "$C0" "$(traffic_brief)"
       ;;
     log | logs) svc_cmd log "${1:-}" ;;
     traffic) cmd_traffic "$@" ;;
