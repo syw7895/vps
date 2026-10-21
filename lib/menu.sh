@@ -22,6 +22,7 @@ run() {
 
 # menu_pick 结果变量 "动作|文字[|danger]" ...
 # 打印编号菜单并读取选择；0 → back，无效 → 空；读到输入结束返回 1
+# 0 的文字默认“返回”，可用 PICK_ZERO 改
 menu_pick() {
   local -n __pick=$1
   shift
@@ -37,7 +38,7 @@ menu_pick() {
     fi
     __i=$((__i + 1))
   done
-  printf '  %s%2s  返回%s\n' "$CD" 0 "$C0"
+  printf '  %s%2s  %s%s\n' "$CD" 0 "${PICK_ZERO:-返回}" "$C0"
   printf '\n  请选择: '
   IFS= read -r __in || return 1
   __in=${__in//[[:space:]]/}
@@ -101,7 +102,7 @@ menu_main() {
     menu_head "VPS 管理" "v$VPS_VERSION${ref:+ (${ref:0:7})}"
     printf '  节点  %s\n' "$(nodes_brief)"
     printf '  流量  %s\n\n' "$(traffic_brief)"
-    menu_pick act "nodes|节点管理" "traffic|流量限额" "system|系统设置" \
+    PICK_ZERO=退出 menu_pick act "nodes|节点管理" "traffic|流量限额" "system|系统设置" \
       "update|立即更新（脚本 / 内核 / 规则）" || return 0
     case $act in
       nodes) menu_nodes || return 0 ;;

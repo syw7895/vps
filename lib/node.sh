@@ -2,7 +2,8 @@
 # 节点：REALITY / VLESS-WS / Hysteria2 的参数、配置生成、分享链接、服务管理
 
 NODE_TYPES=(reality ws hy2)
-REALITY_SNIS=(www.microsoft.com www.apple.com www.amazon.com www.nvidia.com)
+# 都实测过能用作 REALITY 目标。www.microsoft.com 握手失败；apple / icloud 会被 Xray 警告易被封
+REALITY_SNIS=(www.nvidia.com www.amazon.com www.tesla.com www.samsung.com)
 HY2_DEFAULT_SNI=www.bing.com
 
 node_label() { case $1 in reality) echo REALITY ;; ws) echo VLESS-WS ;; hy2) echo Hysteria2 ;; esac; }
