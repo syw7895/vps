@@ -354,8 +354,7 @@ bar() {
   fill=$((pct * width / 100))
   ((pct >= 80)) && color=$CY
   ((pct >= 100)) && color=$CR
-  printf '%s%s%s%s%s' "$color" "$(printf '%*s' "$fill" '' | tr ' ' '#')" "$CD" \
-    "$(printf '%*s' $((width - fill)) '' | tr ' ' '.')" "$C0"
+  printf '%s%s%s%s%s' "$color" "$(repeat ━ "$fill")" "$CD" "$(repeat ─ $((width - fill)))" "$C0"
 }
 
 count_label() {
@@ -389,9 +388,10 @@ traffic_brief() {
 traffic_status() {
   local -A S
   local used quota thr pct period next days state ifc
-  printf '\n  %s流量限额%s\n' "$C1" "$C0"
+  title_bar 流量限额
   if ! traffic_configured; then
     say "还没有设置。示例：vps traffic set --quota 1000"
+    printf '\n'
     return 0
   fi
   kv_load "$TRAFFIC_STATE" S
@@ -423,7 +423,7 @@ traffic_status() {
   printf '\n'
   kv_line 本期 "$period → $next（还剩 $days 天）"
   kv_line 已用 "$(human "$used") / $(kv_get "$TRAFFIC_CONF" QUOTA_GB) GB（$(count_label)）"
-  printf '  %-8s %s %s%%\n' "" "$(bar "$pct")" "$pct"
+  kv_line "" "$(bar "$pct")  $pct%"
   kv_line 限速 "用到 $(kv_get "$TRAFFIC_CONF" PERCENT 90)%（$(human "$thr")）后限速到 $(kv_get "$TRAFFIC_CONF" RATE 1) Mbit/s"
   kv_line 明细 "出站 $(human "${S[USED_TX]:-0}")  入站 $(human "${S[USED_RX]:-0}")"
   kv_line 网卡 "${ifc:-未知}"

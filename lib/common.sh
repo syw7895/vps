@@ -30,9 +30,11 @@ SVC_USER=vps-proxy
 # ---------- 输出 ----------
 if [[ -t 1 ]]; then
   C0=$'\e[0m' C1=$'\e[1m' CD=$'\e[2m' CR=$'\e[31m' CG=$'\e[32m' CY=$'\e[33m' CC=$'\e[36m'
+  CLS=$'\e[H\e[2J' # 清屏但保留回滚记录
 else
-  C0='' C1='' CD='' CR='' CG='' CY='' CC=''
+  C0='' C1='' CD='' CR='' CG='' CY='' CC='' CLS=''
 fi
+UI_W=48 # 标题栏和分隔线的宽度
 
 say()  { printf '  %s\n' "$*"; }
 note() { printf '  %s%s%s\n' "$CD" "$*" "$C0"; }
@@ -69,6 +71,28 @@ pad() {
   local w
   w=$(dwidth "$1")
   printf '%s%*s' "$1" $(($2 > w ? $2 - w : 0)) ''
+}
+
+# repeat 字符 次数
+repeat() {
+  local s
+  printf -v s '%*s' "$2" ''
+  printf '%s' "${s// /$1}"
+}
+
+rule() { printf '  %s%s%s\n' "$CD" "$(repeat ─ "$UI_W")" "$C0"; }
+
+# title_bar 标题 [右侧小字]：标题 + 分隔线（右侧小字只用 ASCII，才能算准宽度）
+title_bar() {
+  local sub=${2:-} gap
+  printf '\n  %s%s%s%s' "$C1" "$CC" "$1" "$C0"
+  if [[ -n $sub ]]; then
+    gap=$((UI_W - $(dwidth "$1") - ${#sub}))
+    printf '%*s%s%s%s' $((gap > 2 ? gap : 2)) '' "$CD" "$sub" "$C0"
+  fi
+  printf '\n'
+  rule
+  printf '\n'
 }
 
 # ---------- 输入 ----------
